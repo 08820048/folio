@@ -65,7 +65,7 @@ pub fn index(root: &Path) -> io::Result<Vec<PathBuf>> {
         }
         if files.len() > 100_000 {
             return Err(io::Error::other(
-                "快速打开索引超过 100,000 个文件；仍可使用项目树",
+                "Quick open index exceeds 100,000 files; the project tree still works",
             ));
         }
     }

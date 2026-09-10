@@ -11,21 +11,26 @@ pub const FILE_LIMIT: u64 = 32 * 1024 * 1024;
 pub fn read(path: &Path) -> io::Result<String> {
     let bytes = read_bytes(path)?;
     if bytes.contains(&0) {
-        return Err(io::Error::other("无法预览：二进制文件"));
+        return Err(io::Error::other("Cannot preview: binary file"));
     }
-    String::from_utf8(bytes).map_err(|_| io::Error::other("无法预览：目前仅支持 UTF-8 文本"))
+    String::from_utf8(bytes)
+        .map_err(|_| io::Error::other("Cannot preview: only UTF-8 text is supported"))
 }
 
 pub fn read_bytes(path: &Path) -> io::Result<Vec<u8>> {
     let file = fs::File::open(path)?;
     let meta = file.metadata()?;
     if !meta.is_file() || meta.len() > FILE_LIMIT {
-        return Err(io::Error::other("无法预览：不是普通文件，或文件超过 32 MB"));
+        return Err(io::Error::other(
+            "Cannot preview: not a regular file, or larger than 32 MB",
+        ));
     }
     let mut bytes = Vec::new();
     file.take(FILE_LIMIT + 1).read_to_end(&mut bytes)?;
     if bytes.len() as u64 > FILE_LIMIT {
-        return Err(io::Error::other("无法预览：文件超过 32 MB"));
+        return Err(io::Error::other(
+            "Cannot preview: file is larger than 32 MB",
+        ));
     }
     Ok(bytes)
 }
@@ -34,23 +39,25 @@ pub fn read_bytes(path: &Path) -> io::Result<Vec<u8>> {
 pub fn save(path: &Path, text: &str, expected: &str) -> io::Result<()> {
     if read(path)? != expected {
         return Err(io::Error::other(
-            "文件已在磁盘变更，未覆盖。请保留当前修改并重新打开项目",
+            "File changed on disk; nothing was overwritten. Keep your edits and reopen the project",
         ));
     }
     let permissions = fs::metadata(path)?.permissions();
     if permissions.readonly() {
-        return Err(io::Error::other("文件为只读，未保存"));
+        return Err(io::Error::other("File is read-only; not saved"));
     }
     let mut temp = tempfile::NamedTempFile::new_in(
         path.parent()
-            .ok_or_else(|| io::Error::other("无效文件路径"))?,
+            .ok_or_else(|| io::Error::other("Invalid file path"))?,
     )?;
     temp.as_file().set_permissions(permissions)?;
     temp.write_all(text.as_bytes())?;
     temp.as_file().sync_all()?;
     // Check again after writing the temporary file to narrow the external-editor race.
     if read(path)? != expected {
-        return Err(io::Error::other("文件已在磁盘变更，未覆盖"));
+        return Err(io::Error::other(
+            "File changed on disk; nothing was overwritten",
+        ));
     }
     temp.persist(path).map_err(|e| e.error)?;
     Ok(())

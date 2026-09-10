@@ -86,7 +86,7 @@ impl Matcher {
             .build()
             .map_err(|error| {
                 format!(
-                    "正则表达式无效：{}",
+                    "Invalid regular expression: {}",
                     error.to_string().replace('\n', " ").trim()
                 )
             })?;
@@ -219,7 +219,7 @@ pub fn search_files(
 
 fn read(path: &Path) -> io::Result<String> {
     if fs::metadata(path)?.len() > FILE_BYTES_LIMIT {
-        return Err(io::Error::other("文件过大，已跳过搜索"));
+        return Err(io::Error::other("File too large; skipped"));
     }
     crate::buffer::read(path)
 }
@@ -448,7 +448,7 @@ mod tests {
     #[test]
     fn invalid_regex_reports_a_single_line_error() {
         let error = Matcher::new("(unclosed", options(true)).unwrap_err();
-        assert!(error.starts_with("正则表达式无效："));
+        assert!(error.starts_with("Invalid regular expression:"));
         assert!(!error.contains('\n'));
     }
 }

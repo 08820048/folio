@@ -234,12 +234,12 @@ fn context_menu_file_operations_never_clobber() {
     // Duplicates land beside the original and bump the suffix instead of
     // colliding with an earlier copy.
     let copy = fs_op::duplicate(&file).unwrap();
-    assert_eq!(copy.file_name().unwrap().to_string_lossy(), "笔记 副本.md");
+    assert_eq!(copy.file_name().unwrap().to_string_lossy(), "笔记 copy.md");
     assert_eq!(fs::read_to_string(&copy).unwrap(), "hello");
     let second = fs_op::duplicate(&file).unwrap();
     assert_eq!(
         second.file_name().unwrap().to_string_lossy(),
-        "笔记 副本 2.md"
+        "笔记 copy 2.md"
     );
 
     // A folder duplicate carries its whole tree.

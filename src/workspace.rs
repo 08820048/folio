@@ -11,7 +11,7 @@ impl Workspace {
     pub fn open(path: &Path) -> io::Result<Self> {
         let root = path.canonicalize()?;
         if !root.is_dir() {
-            return Err(io::Error::other("项目路径不是文件夹"));
+            return Err(io::Error::other("Project path is not a folder"));
         }
         Ok(Self { root })
     }
@@ -23,7 +23,7 @@ impl Workspace {
         }
         .canonicalize()?;
         if !path.starts_with(&self.root) {
-            return Err(io::Error::other("路径不在当前项目中"));
+            return Err(io::Error::other("Path is outside the current project"));
         }
         Ok(path)
     }

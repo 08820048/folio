@@ -33,7 +33,7 @@ pub fn load(file: &Path) -> io::Result<Vec<RecentProject>> {
 fn write(file: &Path, items: &[RecentProject]) -> io::Result<()> {
     let parent = file
         .parent()
-        .ok_or_else(|| io::Error::other("无效配置路径"))?;
+        .ok_or_else(|| io::Error::other("Invalid config path"))?;
     fs::create_dir_all(parent)?;
     let mut temp = tempfile::NamedTempFile::new_in(parent)?;
     temp.write_all(&serde_json::to_vec_pretty(items)?)?;

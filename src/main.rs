@@ -39,30 +39,30 @@ fn main() {
                 KeyBinding::new(&format!("{modifier}-q"), Quit, Some("Folio")),
             ]);
             cx.set_menus([
-                Menu::new("Folio").items([MenuItem::action("退出 Folio", Quit)]),
-                Menu::new("文件").items([
-                    MenuItem::action("打开项目…", OpenProject),
-                    MenuItem::action("快速打开…", QuickOpen),
-                    MenuItem::action("在项目中搜索…", ProjectSearch),
-                    MenuItem::action("在项目中替换…", ProjectReplace),
+                Menu::new("Folio").items([MenuItem::action("Quit Folio", Quit)]),
+                Menu::new("File").items([
+                    MenuItem::action("Open Project…", OpenProject),
+                    MenuItem::action("Quick Open…", QuickOpen),
+                    MenuItem::action("Find in Project…", ProjectSearch),
+                    MenuItem::action("Replace in Project…", ProjectReplace),
                     MenuItem::separator(),
-                    MenuItem::action("保存", Save),
-                    MenuItem::action("关闭项目", CloseProject),
+                    MenuItem::action("Save", Save),
+                    MenuItem::action("Close Project", CloseProject),
                 ]),
-                Menu::new("编辑").items([
-                    MenuItem::action("撤销", input::Undo),
-                    MenuItem::action("重做", input::Redo),
+                Menu::new("Edit").items([
+                    MenuItem::action("Undo", input::Undo),
+                    MenuItem::action("Redo", input::Redo),
                     MenuItem::separator(),
-                    MenuItem::action("剪切", input::Cut),
-                    MenuItem::action("复制", input::Copy),
-                    MenuItem::action("粘贴", input::Paste),
-                    MenuItem::action("全选", input::SelectAll),
+                    MenuItem::action("Cut", input::Cut),
+                    MenuItem::action("Copy", input::Copy),
+                    MenuItem::action("Paste", input::Paste),
+                    MenuItem::action("Select All", input::SelectAll),
                     MenuItem::separator(),
-                    MenuItem::action("查找", input::Search),
+                    MenuItem::action("Find", input::Search),
                 ]),
-                Menu::new("视图").items([
-                    MenuItem::action("切换侧栏", ToggleSidebar),
-                    MenuItem::action("跳转到行…", GoToLine),
+                Menu::new("View").items([
+                    MenuItem::action("Toggle Sidebar", ToggleSidebar),
+                    MenuItem::action("Go to Line…", GoToLine),
                 ]),
             ]);
             let bounds = std::fs::read(config_dir().join("window.json"))
@@ -89,7 +89,7 @@ fn main() {
                     cx.new(|cx| Root::new(view, window, cx))
                 },
             )
-            .expect("无法打开 Folio 窗口");
+            .expect("Failed to open the Folio window");
             cx.activate(true);
         });
 }

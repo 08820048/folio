@@ -47,7 +47,7 @@ pub fn read(path: &Path) -> io::Result<Content> {
     let mut decoder = reader.into_decoder().map_err(io::Error::other)?;
     let (width, height) = decoder.dimensions();
     if u64::from(width) * u64::from(height) > 32 * 1024 * 1024 {
-        return Err(io::Error::other("图片像素过多，无法预览"));
+        return Err(io::Error::other("Cannot preview: too many pixels"));
     }
     let orientation = decoder.orientation().map_err(io::Error::other)?;
     // ponytail: animated formats show the first frame; add bounded animation decoding if playback is requested.

@@ -363,8 +363,8 @@ impl Folio {
             sync_appearance(window.appearance(), window, cx);
             cx.notify();
         });
-        let query =
-            cx.new(|cx| InputState::new(window, cx).placeholder("搜索文件名，或输入 :行号"));
+        let query = cx
+            .new(|cx| InputState::new(window, cx).placeholder("Search file names, or type :line"));
         let subscription = cx.subscribe_in(
             &query,
             window,
@@ -384,7 +384,7 @@ impl Folio {
                     .min((f32::from(window.viewport_size().width) * 0.4).max(160.));
                 cx.notify();
             });
-        let search_query = cx.new(|cx| InputState::new(window, cx).placeholder("搜索内容"));
+        let search_query = cx.new(|cx| InputState::new(window, cx).placeholder("Search contents"));
         let search_subscription = cx.subscribe_in(
             &search_query,
             window,
@@ -397,7 +397,7 @@ impl Folio {
                 _ => {}
             },
         );
-        let replace_query = cx.new(|cx| InputState::new(window, cx).placeholder("替换为"));
+        let replace_query = cx.new(|cx| InputState::new(window, cx).placeholder("Replace with"));
         let replace_subscription = cx.subscribe_in(
             &replace_query,
             window,
@@ -477,13 +477,13 @@ impl Folio {
         cx.notify();
         let answer = window.prompt(
             PromptLevel::Warning,
-            &format!("有 {dirty} 个文件尚未保存"),
+            &format!("{dirty} files have unsaved changes"),
             Some(if matches!(next, Next::Quit) {
-                "退出之前，是否保存所有项目的修改？"
+                "Save changes in every project before quitting?"
             } else {
-                "关闭当前项目之前，是否保存修改？"
+                "Save changes before closing this project?"
             }),
-            &["全部保存", "不保存", "取消"],
+            &["Save All", "Don't Save", "Cancel"],
             cx,
         );
         cx.spawn_in(window, async move |this, cx| {
@@ -519,7 +519,7 @@ impl Folio {
                     )
                 };
                 if let Err(error) = save_window() {
-                    eprintln!("窗口位置未保存：{error}");
+                    eprintln!("Could not save the window position: {error}");
                 }
                 cx.quit();
             }
@@ -542,7 +542,7 @@ impl Folio {
                     files: false,
                     directories: true,
                     multiple: false,
-                    prompt: Some("打开项目".into()),
+                    prompt: Some("Open Project".into()),
                 });
                 self.prompting = true;
                 cx.notify();
@@ -728,7 +728,7 @@ impl Folio {
                         this.refresh_project(cx);
                         this.tree_focus.focus(window, cx);
                     }
-                    Err(e) => this.error(format!("无法打开项目：{e}"), cx),
+                    Err(e) => this.error(format!("Could not open the project: {e}"), cx),
                 }
                 cx.notify();
             });
@@ -795,7 +795,7 @@ impl Folio {
                 };
                 match result {
                     Ok(status) => project.git_status = status,
-                    Err(e) => this.error(format!("Git 状态读取失败：{e}"), cx),
+                    Err(e) => this.error(format!("Could not read git status: {e}"), cx),
                 }
                 cx.notify();
             });
@@ -1089,21 +1089,25 @@ impl Folio {
         let unsaved = self.unsaved_under(&path);
         let detail = match (trashed, unsaved) {
             (true, unsaved) => {
-                format!("{name} 及其内容将移到废纸篓，其中 {unsaved} 个文件有未保存的修改。")
+                format!(
+                    "{name} and its contents will move to the Trash. {unsaved} files have unsaved changes."
+                )
             }
-            (false, 0) => format!("{name} 及其内容将被永久删除，无法撤销。"),
+            (false, 0) => format!(
+                "{name} and its contents will be deleted permanently. This cannot be undone."
+            ),
             (false, unsaved) => format!(
-                "{name} 及其内容将被永久删除，无法撤销。其中 {unsaved} 个文件有未保存的修改。"
+                "{name} and its contents will be deleted permanently. This cannot be undone. {unsaved} files have unsaved changes."
             ),
         };
-        let confirm = if trashed { "移到废纸篓" } else { "删除" };
+        let confirm = if trashed { "Move to Trash" } else { "Delete" };
         self.prompting = true;
         cx.notify();
         let answer = window.prompt(
             PromptLevel::Warning,
             confirm,
             Some(&detail),
-            &[confirm, "取消"],
+            &[confirm, "Cancel"],
             cx,
         );
         cx.spawn_in(window, async move |this, cx| {
@@ -1148,11 +1152,7 @@ impl Folio {
                         this.forget_paths(&path);
                         this.rescan(dir, cx);
                         this.update_title(window);
-                        let verb = if trashed {
-                            "已移到废纸篓"
-                        } else {
-                            "已删除"
-                        };
+                        let verb = if trashed { "Moved to Trash" } else { "Deleted" };
                         this.toast(&format!("{verb} {}", name(&path)), cx);
                     }
                     Err(error) => this.error(error.to_string(), cx),
@@ -1316,7 +1316,7 @@ impl Folio {
                     path: path.clone(),
                     cut,
                 });
-                let verb = if cut { "已剪切" } else { "已复制" };
+                let verb = if cut { "Cut" } else { "Copied" };
                 self.toast(&format!("{verb} {}", name(&path)), cx);
             }
             MenuItem::Duplicate => {
@@ -1382,8 +1382,8 @@ impl Folio {
             self.toggle_directory(parent.clone(), cx);
         }
         let placeholder = match kind {
-            EntryKind::Directory => "文件夹名称",
-            EntryKind::File => "文件名称",
+            EntryKind::Directory => "Folder name",
+            EntryKind::File => "File name",
         };
         let input = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
         let subscription = Self::subscribe_edit(&input, window, cx);
@@ -1721,7 +1721,7 @@ impl Folio {
                 .map(|(project_id, workspace, path, text, expected)| {
                     let result = workspace
                         .as_ref()
-                        .ok_or_else(|| std::io::Error::other("项目已关闭"))
+                        .ok_or_else(|| std::io::Error::other("Project is closed"))
                         .and_then(|ws| ws.resolve(&path))
                         .and_then(|path| buffer::save(&path, &text, &expected));
                     (project_id, path, text, result)
@@ -1752,7 +1752,7 @@ impl Folio {
                     if let Some(next) = next {
                         this.request(next, window, cx);
                     } else {
-                        this.toast("已保存", cx);
+                        this.toast("Saved", cx);
                         this.refresh_git(cx);
                     }
                 } else {
@@ -1789,7 +1789,7 @@ impl Folio {
             let _ = this.update(cx, |this, cx| {
                 match result {
                     Ok(items) => this.recent = items,
-                    Err(e) => this.error(format!("最近项目更新失败：{e}"), cx),
+                    Err(e) => this.error(format!("Could not update recent projects: {e}"), cx),
                 }
                 cx.notify();
             });
@@ -2043,11 +2043,11 @@ impl Folio {
         cx.notify();
         let answer = window.prompt(
             PromptLevel::Warning,
-            "全部替换",
+            "Replace All",
             Some(&format!(
-                "将在 {files} 个文件中替换 {hits} 处。未打开的文件会立即写盘，此操作不可撤销。"
+                "Replace {hits} occurrences across {files} files. Files that are not open are written to disk immediately; this cannot be undone."
             )),
-            &["全部替换", "取消"],
+            &["Replace All", "Cancel"],
             cx,
         );
         cx.spawn_in(window, async move |this, cx| {
@@ -2126,7 +2126,7 @@ impl Folio {
                     for path in disk {
                         let outcome = workspace
                             .as_ref()
-                            .ok_or_else(|| io::Error::other("项目已关闭"))
+                            .ok_or_else(|| io::Error::other("Project is closed"))
                             .and_then(|workspace| workspace.resolve(&path))
                             .and_then(|path| {
                                 let original = buffer::read(&path)?;
@@ -2158,10 +2158,10 @@ impl Folio {
                     this.refresh_git(cx);
                     this.toast(
                         &if open_files == 0 {
-                            format!("已替换 {replaced} 处 · {files} 个文件")
+                            format!("Replaced {replaced} in {files} files")
                         } else {
                             format!(
-                                "已替换 {replaced} 处 · {files} 个文件（{open_files} 个已打开文件待保存）"
+                                "Replaced {replaced} in {files} files ({open_files} open files still to save)"
                             )
                         },
                         cx,
@@ -2198,7 +2198,7 @@ impl Folio {
                 cx.notify();
                 return;
             }
-            self.error("请输入有效行号，例如 :123".into(), cx);
+            self.error("Enter a line number, for example :123".into(), cx);
         } else if let Some(path) = self.matches.get(self.match_selected).cloned() {
             self.open_file(path, window, cx);
         }
@@ -2347,7 +2347,7 @@ impl Folio {
                                         div()
                                             .text_size(px(13.))
                                             .text_color(cx.theme().muted_foreground)
-                                            .child("读懂代码，改好几行。"),
+                                            .child("Read the code, change a few lines."),
                                     ),
                             ),
                     )
@@ -2356,9 +2356,9 @@ impl Folio {
                             .text()
                             .icon(IconName::FolderOpen)
                             .label(if self.loading {
-                                "正在打开…"
+                                "Opening…"
                             } else {
-                                "打开项目…"
+                                "Open Project…"
                             })
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.request(Next::Picker, window, cx)
@@ -2375,7 +2375,7 @@ impl Folio {
                                     .justify_between()
                                     .text_size(px(11.))
                                     .text_color(cx.theme().muted_foreground)
-                                    .child("最近项目")
+                                    .child("Recent Projects")
                                     .child("⌘ O"),
                             )
                             .when(self.recent.is_empty(), |el| {
@@ -2384,7 +2384,7 @@ impl Folio {
                                         .py_4()
                                         .text_size(px(13.))
                                         .text_color(cx.theme().muted_foreground)
-                                        .child("从一个本地文件夹开始。"),
+                                        .child("Start from a local folder."),
                                 )
                             })
                             .children(self.recent.iter().enumerate().map(|(i, item)| {
@@ -2403,7 +2403,7 @@ impl Folio {
                                         div()
                                             .id(("recent-open", i))
                                             .role(Role::Button)
-                                            .aria_label(format!("打开项目 {}", name(&path)))
+                                            .aria_label(format!("Open project {}", name(&path)))
                                             .focusable()
                                             .tab_index(0)
                                             .on_key_down(cx.listener(
@@ -2437,7 +2437,7 @@ impl Folio {
                                                         if item.available {
                                                             ""
                                                         } else {
-                                                            " · 路径失效"
+                                                            " · missing"
                                                         }
                                                     ))
                                                     .child(
@@ -2460,7 +2460,7 @@ impl Folio {
                                     .child(Self::icon_button(
                                         ("remove", i),
                                         IconName::Close,
-                                        "从最近项目移除",
+                                        "Remove from recent projects",
                                         move |this, _, cx| this.remove_recent(remove.clone(), cx),
                                         cx,
                                     ))
@@ -2470,7 +2470,7 @@ impl Folio {
                         div()
                             .text_size(px(11.))
                             .text_color(cx.theme().muted_foreground)
-                            .child("也可以将文件夹拖到这里"),
+                            .child("Or drop a folder here"),
                     ),
             )
             .into_any_element()
@@ -2591,7 +2591,7 @@ impl Folio {
         div()
             .id("sidebar")
             .role(Role::Tree)
-            .aria_label("项目")
+            .aria_label("Project")
             .track_focus(&self.tree_focus)
             .tab_index(0)
             .key_context("FolioTree")
@@ -2623,7 +2623,7 @@ impl Folio {
                     Button::new("add-project")
                         .text()
                         .icon(IconName::Plus)
-                        .label("添加项目")
+                        .label("Add Project")
                         .small()
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.request(Next::Picker, window, cx)
@@ -2917,14 +2917,14 @@ impl Folio {
             .flex()
             .items_center()
             .gap_1()
-            .child(self.panel_tab("panel-tab-files", "文件名", Panel::Files, cx))
-            .child(self.panel_tab("panel-tab-search", "内容", Panel::Search, cx))
+            .child(self.panel_tab("panel-tab-files", "Files", Panel::Files, cx))
+            .child(self.panel_tab("panel-tab-search", "Contents", Panel::Search, cx))
             .child(div().flex_1())
             .when(panel == Panel::Search, |el| {
                 el.child(self.option_toggle(
                     "search-case",
                     "Aa",
-                    "区分大小写",
+                    "Match case",
                     self.search.options.case_sensitive,
                     |options| options.case_sensitive = !options.case_sensitive,
                     cx,
@@ -2932,7 +2932,7 @@ impl Folio {
                 .child(self.option_toggle(
                     "search-word",
                     "ab",
-                    "全字匹配",
+                    "Match whole word",
                     self.search.options.whole_word,
                     |options| options.whole_word = !options.whole_word,
                     cx,
@@ -2940,7 +2940,7 @@ impl Folio {
                 .child(self.option_toggle(
                     "search-regex",
                     ".*",
-                    "正则表达式，替换时可用 $1 引用捕获组",
+                    "Regular expression; $1 in the replacement refers to a capture group",
                     self.search.options.regex,
                     |options| options.regex = !options.regex,
                     cx,
@@ -2948,7 +2948,7 @@ impl Folio {
                 .child(Self::icon_button(
                     "search-replace-toggle",
                     IconName::Replace,
-                    "替换",
+                    "Replace",
                     |this, window, cx| {
                         this.search.show_replace = !this.search.show_replace;
                         if this.search.show_replace {
@@ -2966,7 +2966,7 @@ impl Folio {
             .child(Self::icon_button(
                 "panel-close",
                 IconName::Close,
-                "关闭",
+                "Close",
                 |this, window, cx| this.close_panel(window, cx),
                 cx,
             ))
@@ -3028,7 +3028,7 @@ impl Folio {
             .id(id)
             .role(Role::Button)
             .aria_label(if active {
-                format!("{tooltip}（已开启）")
+                format!("{tooltip} (on)")
             } else {
                 tooltip.to_string()
             })
@@ -3084,11 +3084,11 @@ impl Folio {
                     .text_size(px(11.))
                     .text_color(cx.theme().muted_foreground)
                     .child(if self.project.indexing {
-                        "正在索引文件…"
+                        "Indexing files…"
                     } else if jumping {
-                        "Enter 跳转到行 · Esc 关闭"
+                        "Enter to go to the line · Esc to close"
                     } else {
-                        "↑ ↓ 选择 · Enter 打开 · Esc 关闭"
+                        "↑ ↓ to choose · Enter to open · Esc to close"
                     }),
             )
             .when(!jumping, |el| {
@@ -3150,11 +3150,11 @@ impl Folio {
                         .px_2()
                         .text_size(px(11.))
                         .text_color(cx.theme().muted_foreground)
-                        .child(format!("范围：{label}"))
+                        .child(format!("In {label}"))
                         .child(Self::icon_button(
                             "search-scope-clear",
                             IconName::Close,
-                            "在整个项目中搜索",
+                            "Search the whole project",
                             |this, _, cx| {
                                 this.search.scope = None;
                                 this.start_search(cx);
@@ -3179,7 +3179,7 @@ impl Folio {
                         .child(
                             Button::new("replace-all")
                                 .text()
-                                .label("全部替换")
+                                .label("Replace All")
                                 .xsmall()
                                 .disabled(
                                     self.search.results.is_empty()
@@ -3215,20 +3215,20 @@ impl Folio {
         let text = if let Some(error) = &self.search.error {
             error.clone()
         } else if self.project.indexing && self.search.running {
-            "正在索引文件…".into()
+            "Indexing files…".into()
         } else if self.search.running {
-            "正在搜索…".into()
+            "Searching…".into()
         } else if self.search.query.trim().is_empty() {
-            "输入内容以在项目中搜索".into()
+            "Type to search the project".into()
         } else if self.search.results.is_empty() {
-            "无结果".into()
+            "No results".into()
         } else {
             format!(
-                "{} 个匹配 · {} 个文件{}",
+                "{} matches · {} files{}",
                 self.total_hits(),
                 self.search.results.len(),
                 if self.search.truncated {
-                    " · 结果已截断"
+                    " · results truncated"
                 } else {
                     ""
                 }
@@ -3247,7 +3247,7 @@ impl Folio {
             })
             .child(div().flex_1().min_w_0().child(text))
             .when(!error && !self.search.rows.is_empty(), |el| {
-                el.child("↑ ↓ 选择 · Enter 打开 · Esc 关闭")
+                el.child("↑ ↓ to choose · Enter to open · Esc to close")
             })
             .into_any_element()
     }
@@ -3390,7 +3390,7 @@ impl Folio {
                             } else {
                                 FolioIcon::PanelRightDashed
                             },
-                            "切换侧栏",
+                            "Toggle sidebar",
                             |this, _, cx| {
                                 this.sidebar = !this.sidebar;
                                 cx.notify();
@@ -3422,7 +3422,7 @@ impl Folio {
                             div()
                                 .text_size(px(11.))
                                 .text_color(cx.theme().muted_foreground)
-                                .child("读取中…"),
+                                .child("Loading…"),
                         )
                     })
                     .when(self.project.workspace.is_some(), |el| {
@@ -3444,7 +3444,7 @@ impl Folio {
                                     Button::new("project-search")
                                         .text()
                                         .icon(IconName::Search)
-                                        .label("搜索")
+                                        .label("Search")
                                         .xsmall()
                                         .px_2()
                                         .on_click(cx.listener(|this, _, window, cx| {
@@ -3455,7 +3455,7 @@ impl Folio {
                                     Button::new("close-project")
                                         .text()
                                         .icon(IconName::Close)
-                                        .label("关闭项目")
+                                        .label("Close Project")
                                         .xsmall()
                                         .px_2()
                                         .on_click(cx.listener(|this, _, window, cx| {
@@ -3519,7 +3519,7 @@ impl Folio {
                                             .py_1()
                                             .text_size(px(11.))
                                             .text_color(cx.theme().muted_foreground)
-                                            .child("大文件 · 已关闭语法高亮"),
+                                            .child("Large file · syntax highlighting off"),
                                     )
                                 })
                                 .child(
@@ -3548,7 +3548,7 @@ impl Folio {
                                         .text_size(px(11.))
                                         .text_color(cx.theme().muted_foreground)
                                         .child(format!(
-                                            "{} · {} × {} · 静态预览",
+                                            "{} · {} × {} · static preview",
                                             name(path),
                                             u32::from(image.size(0).width),
                                             u32::from(image.size(0).height)
@@ -3568,13 +3568,13 @@ impl Folio {
                                             div()
                                                 .text_size(px(24.))
                                                 .text_color(cx.theme().accent_foreground)
-                                                .child("留一点空间，读一段代码。"),
+                                                .child("Some room to read a little code."),
                                         )
                                         .child(
                                             div()
                                                 .text_size(px(12.))
                                                 .text_color(cx.theme().muted_foreground)
-                                                .child("从左侧选择文件，或按 ⌘ P 快速打开"),
+                                                .child("Pick a file on the left, or press ⌘ P"),
                                         ),
                                 )
                             }),
@@ -3766,7 +3766,7 @@ impl Render for Folio {
                         .child(Self::icon_button(
                             "dismiss-message",
                             IconName::Close,
-                            "关闭提示",
+                            "Dismiss",
                             |this, _, cx| {
                                 this.message = None;
                                 cx.notify();
@@ -3814,9 +3814,9 @@ fn relative_time(time: u64) -> String {
         .as_secs()
         .saturating_sub(time);
     match age {
-        0..3600 => "刚刚".into(),
-        3600..86400 => format!("{} 小时前", age / 3600),
-        _ => format!("{} 天前", age / 86400),
+        0..3600 => "just now".into(),
+        3600..86400 => format!("{} hours ago", age / 3600),
+        _ => format!("{} days ago", age / 86400),
     }
 }
 
@@ -3905,7 +3905,7 @@ mod tests {
         });
         assert!(cx.has_pending_prompt());
         assert!(cx.pending_prompt().unwrap().0.contains('2'));
-        cx.simulate_prompt_answer("取消");
+        cx.simulate_prompt_answer("Cancel");
         cx.run_until_parked();
         std::fs::write(b.join("main.rs"), "// external edit\n").unwrap();
         view.update_in(cx, |app, window, cx| {
@@ -3929,7 +3929,7 @@ mod tests {
             app.request(Next::Close, window, cx);
         });
         assert!(cx.has_pending_prompt());
-        cx.simulate_prompt_answer("取消");
+        cx.simulate_prompt_answer("Cancel");
         cx.run_until_parked();
         view.update_in(cx, |app, _, _| {
             assert!(app.project.documents[&b.join("main.rs")].dirty)
@@ -4093,7 +4093,7 @@ mod tests {
         cx.run_until_parked();
         assert!(cx.has_pending_prompt());
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "// first edit\n");
-        cx.simulate_prompt_answer("取消");
+        cx.simulate_prompt_answer("Cancel");
         cx.run_until_parked();
         view.update_in(cx, |app, _, cx| {
             assert!(app.project.documents[&file].dirty);
@@ -4269,7 +4269,7 @@ mod tests {
         });
         cx.run_until_parked();
         assert!(cx.has_pending_prompt());
-        cx.simulate_prompt_answer("全部替换");
+        cx.simulate_prompt_answer("Replace All");
         cx.run_until_parked();
         assert_eq!(
             std::fs::read_to_string(&closed).unwrap(),
@@ -4391,7 +4391,7 @@ mod tests {
             assert!(
                 app.message
                     .as_deref()
-                    .is_some_and(|message| message.contains("路径分隔符")),
+                    .is_some_and(|message| message.contains("path separator")),
                 "an unusable name must surface as a message"
             );
         });
@@ -4425,7 +4425,7 @@ mod tests {
             app.run_menu_item(MenuItem::Duplicate, window, cx);
         });
         cx.run_until_parked();
-        assert!(root.join("笔记 副本.md").is_file());
+        assert!(root.join("笔记 copy.md").is_file());
 
         // Find in Folder narrows the project search to the folder it opened on.
         view.update_in(cx, |app, window, cx| {
@@ -4504,7 +4504,7 @@ mod tests {
             app.run_menu_item(MenuItem::Trash, window, cx);
         });
         assert!(cx.has_pending_prompt());
-        cx.simulate_prompt_answer("取消");
+        cx.simulate_prompt_answer("Cancel");
         cx.run_until_parked();
         assert!(src.is_dir() && core.is_file());
 
@@ -4517,14 +4517,14 @@ mod tests {
             app.run_menu_item(MenuItem::Delete, window, cx);
         });
         assert!(cx.has_pending_prompt());
-        cx.simulate_prompt_answer("删除");
+        cx.simulate_prompt_answer("Delete");
         cx.run_until_parked();
         assert!(!doomed.exists(), "the whole subtree must go");
         view.update_in(cx, |app, _, _| {
             assert!(
                 app.message
                     .as_deref()
-                    .is_some_and(|message| message.contains("已删除")),
+                    .is_some_and(|message| message.contains("Deleted")),
                 "a successful delete reports back instead of erroring"
             );
         });

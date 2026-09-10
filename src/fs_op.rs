@@ -10,21 +10,21 @@ use std::{
 };
 
 /// Finder's suffix for a copy, so a second duplicate never collides.
-const COPY: &str = "副本";
+const COPY: &str = "copy";
 
 /// Reject names that would escape the containing folder or address nothing.
 pub fn validate_name(name: &str) -> io::Result<()> {
     if name.trim().is_empty() {
-        return Err(io::Error::other("名称不能为空"));
+        return Err(io::Error::other("Name cannot be empty"));
     }
     if name == "." || name == ".." {
-        return Err(io::Error::other("名称无效"));
+        return Err(io::Error::other("Invalid name"));
     }
     if name.contains(['/', '\\']) {
-        return Err(io::Error::other("名称不能包含路径分隔符"));
+        return Err(io::Error::other("Name cannot contain a path separator"));
     }
     if name.contains('\0') {
-        return Err(io::Error::other("名称包含无效字符"));
+        return Err(io::Error::other("Name contains an invalid character"));
     }
     Ok(())
 }
@@ -48,16 +48,16 @@ pub fn create_dir(dir: &Path, name: &str) -> io::Result<PathBuf> {
     Ok(path)
 }
 
-/// Copy an entry beside itself, named "`stem` 副本", bumping the suffix until
+/// Copy an entry beside itself, named "`stem` copy", bumping the suffix until
 /// the name is free.
 pub fn duplicate(source: &Path) -> io::Result<PathBuf> {
     let parent = source
         .parent()
-        .ok_or_else(|| io::Error::other("无效路径"))?;
+        .ok_or_else(|| io::Error::other("Invalid path"))?;
     let stem = source
         .file_stem()
         .map(|stem| stem.to_string_lossy().into_owned())
-        .ok_or_else(|| io::Error::other("无效路径"))?;
+        .ok_or_else(|| io::Error::other("Invalid path"))?;
     let extension = source.extension().map(|e| e.to_string_lossy().into_owned());
     for count in 0..1000 {
         let suffix = match count {
@@ -76,7 +76,7 @@ pub fn duplicate(source: &Path) -> io::Result<PathBuf> {
         copy(source, &candidate)?;
         return Ok(candidate);
     }
-    Err(io::Error::other("无法生成不冲突的副本名称"))
+    Err(io::Error::other("Could not find a free name for the copy"))
 }
 
 /// Copy or move `source` into the folder `into`. A cut only removes the source
@@ -84,17 +84,17 @@ pub fn duplicate(source: &Path) -> io::Result<PathBuf> {
 pub fn paste(source: &Path, into: &Path, cut: bool) -> io::Result<PathBuf> {
     let name = source
         .file_name()
-        .ok_or_else(|| io::Error::other("无效路径"))?;
+        .ok_or_else(|| io::Error::other("Invalid path"))?;
     let destination = into.join(name);
     if destination == source {
-        return Err(io::Error::other("源和目标相同"));
+        return Err(io::Error::other("Source and destination are the same"));
     }
     if source.is_dir() && into.starts_with(source) {
-        return Err(io::Error::other("不能把文件夹放进它自己里面"));
+        return Err(io::Error::other("Cannot move a folder into itself"));
     }
     if destination.exists() {
         return Err(io::Error::other(format!(
-            "{} 已存在",
+            "{} already exists",
             name.to_string_lossy()
         )));
     }
@@ -115,7 +115,7 @@ pub fn rename(source: &Path, name: &str) -> io::Result<PathBuf> {
     validate_name(name)?;
     let parent = source
         .parent()
-        .ok_or_else(|| io::Error::other("无效路径"))?;
+        .ok_or_else(|| io::Error::other("Invalid path"))?;
     let destination = parent.join(name);
     if destination == source {
         return Ok(destination);
@@ -126,7 +126,7 @@ pub fn rename(source: &Path, name: &str) -> io::Result<PathBuf> {
         .file_name()
         .is_some_and(|current| current.to_string_lossy().to_lowercase() == name.to_lowercase());
     if destination.exists() && !same_entry {
-        return Err(io::Error::other(format!("{name} 已存在")));
+        return Err(io::Error::other(format!("{name} already exists")));
     }
     fs::rename(source, &destination)?;
     Ok(destination)
@@ -196,7 +196,9 @@ fn copy(source: &Path, destination: &Path) -> io::Result<()> {
     } else {
         // Symlinks are hidden from the tree, so they never arrive here in
         // practice; refuse rather than follow one out of the project.
-        Err(io::Error::other("只支持复制普通文件或文件夹"))
+        Err(io::Error::other(
+            "Only regular files and folders can be copied",
+        ))
     }
 }
 
@@ -295,6 +297,6 @@ fn run(mut command: Command) -> io::Result<()> {
     if cfg!(target_os = "windows") || status.success() {
         Ok(())
     } else {
-        Err(io::Error::other("外部命令执行失败"))
+        Err(io::Error::other("External command failed"))
     }
 }
