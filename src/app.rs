@@ -1,19 +1,26 @@
+use crate::assets::FolioIcon;
 use crate::preview::{self, Content};
 use folio::{
     buffer, git,
     recent::{self, RecentProject},
+    search,
     tree::{self, Entry, EntryKind},
     workspace::Workspace,
 };
 use gpui::{prelude::*, *};
 use gpui_component::{
-    ActiveTheme, Icon, IconName, Sizable, Theme, TitleBar,
+    ActiveTheme, Disableable, Icon, IconName, Sizable, Theme, TitleBar,
     button::{Button, ButtonVariants},
     input::{Editor, EditorState, Input, InputEvent, InputState, Position, TabSize},
 };
 use std::{
     collections::{HashMap, HashSet},
+    io,
     path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -54,6 +61,8 @@ actions!(
         CloseProject,
         Save,
         QuickOpen,
+        ProjectSearch,
+        ProjectReplace,
         GoToLine,
         ToggleSidebar,
         Quit
@@ -84,6 +93,54 @@ struct Document {
 struct Row {
     entry: Entry,
     depth: usize,
+}
+
+/// Which lookup the overlay panel is running.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Panel {
+    /// `⌘P`: fuzzy file-name search.
+    Files,
+    /// `⇧⌘F`: project-wide content search, optionally with replace.
+    Search,
+}
+
+/// One line of the project-search results list. File headers and matches share
+/// a height so the list can stay a `uniform_list`.
+#[derive(Clone, Copy)]
+enum SearchRow {
+    File(usize),
+    Hit { file: usize, hit: usize },
+}
+
+/// Project-search panel state, grouped so `Folio` stays readable.
+#[derive(Default)]
+struct SearchState {
+    options: search::Options,
+    /// The query the current results were produced from.
+    query: String,
+    results: Vec<search::FileHits>,
+    rows: Vec<SearchRow>,
+    /// Index into `rows`; always a `SearchRow::Hit` when the list is not empty.
+    selected: usize,
+    running: bool,
+    truncated: bool,
+    error: Option<String>,
+    show_replace: bool,
+    scroll: UniformListScrollHandle,
+}
+
+/// Wait for typing to settle before scanning. Long enough to avoid scanning on
+/// every keystroke, short enough to still feel live.
+const SEARCH_DEBOUNCE: Duration = Duration::from_millis(140);
+
+/// Flatten grouped results into the single list the panel renders.
+fn search_rows(results: &[search::FileHits]) -> Vec<SearchRow> {
+    let mut rows = Vec::with_capacity(results.len() * 2);
+    for (file, hits) in results.iter().enumerate() {
+        rows.push(SearchRow::File(file));
+        rows.extend((0..hits.hits.len()).map(|hit| SearchRow::Hit { file, hit }));
+    }
+    rows
 }
 
 #[derive(Default)]
@@ -118,9 +175,17 @@ pub struct Folio {
     generation: u64,
     open_request: u64,
     query: Entity<InputState>,
-    quick_open: bool,
+    panel: Option<Panel>,
     matches: Vec<PathBuf>,
     match_selected: usize,
+    search_query: Entity<InputState>,
+    replace_query: Entity<InputState>,
+    search: SearchState,
+    /// Bumped for every new search; a running scan compares it to stop early.
+    search_request: Arc<AtomicU64>,
+    /// Set when a search result is opened, so the cursor lands on the match once
+    /// the file's editor exists.
+    goto: Option<(PathBuf, Position)>,
     message: Option<String>,
     loading: bool,
     project_loading: bool,
@@ -157,6 +222,30 @@ impl Folio {
                     .min((f32::from(window.viewport_size().width) * 0.4).max(160.));
                 cx.notify();
             });
+        let search_query = cx.new(|cx| InputState::new(window, cx).placeholder("搜索内容"));
+        let search_subscription = cx.subscribe_in(
+            &search_query,
+            window,
+            |this: &mut Self, _, event: &InputEvent, window, cx| match event {
+                InputEvent::Change => {
+                    this.start_search(cx);
+                    cx.notify();
+                }
+                InputEvent::PressEnter { .. } => this.open_selected_hit(window, cx),
+                _ => {}
+            },
+        );
+        let replace_query = cx.new(|cx| InputState::new(window, cx).placeholder("替换为"));
+        let replace_subscription = cx.subscribe_in(
+            &replace_query,
+            window,
+            |this: &mut Self, _, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::PressEnter { .. }) {
+                    this.replace_project(window, cx);
+                    cx.notify();
+                }
+            },
+        );
         let recent_file = config_dir().join("recent.json");
         let mut this = Self {
             project: Project::default(),
@@ -173,15 +262,26 @@ impl Folio {
             generation: 0,
             open_request: 0,
             query,
-            quick_open: false,
+            panel: None,
             matches: vec![],
             match_selected: 0,
+            search_query,
+            replace_query,
+            search: SearchState::default(),
+            search_request: Arc::new(AtomicU64::new(0)),
+            goto: None,
             message: None,
             loading: false,
             project_loading: false,
             saving: false,
             prompting: false,
-            _subscriptions: vec![subscription, bounds_subscription, appearance_subscription],
+            _subscriptions: vec![
+                subscription,
+                search_subscription,
+                replace_subscription,
+                bounds_subscription,
+                appearance_subscription,
+            ],
         };
         this.refresh_recent(RecentAction::Load, cx);
         this.tree_focus.focus(window, cx);
@@ -305,13 +405,49 @@ impl Folio {
     fn reset(&mut self) {
         self.generation += 1;
         self.open_request += 1;
-        self.quick_open = false;
+        self.panel = None;
         self.matches.clear();
         self.quick_scroll = UniformListScrollHandle::new();
+        self.cancel_search();
+        self.goto = None;
         self.loading = false;
         self.project_loading = false;
         self.resizing = false;
         self.message = None;
+    }
+
+    /// Supersede any running scan and drop the results it produced.
+    fn cancel_search(&mut self) {
+        self.search_request.fetch_add(1, Ordering::Relaxed);
+        self.search.running = false;
+        self.search.truncated = false;
+        self.search.error = None;
+        self.search.results.clear();
+        self.search.rows.clear();
+        self.search.selected = 0;
+    }
+
+    /// Put the cursor on a match once its file has an editor.
+    ///
+    /// `Position`'s column counts characters, which is what `search::Hit`
+    /// records, so this is a direct hand-off. Cleared whether or not it applied.
+    fn apply_goto(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((target, position)) = self.goto.clone() else {
+            return;
+        };
+        if target != path {
+            return;
+        }
+        self.goto = None;
+        let Some(document) = self.project.documents.get(&target) else {
+            return;
+        };
+        let editor = document.editor.clone();
+        editor.update(cx, |state, cx| {
+            state.base_state().clone().update(cx, |base, cx| {
+                base.set_cursor_position(position, window, cx)
+            });
+        });
     }
 
     fn project_mut(&mut self, id: u64) -> Option<&mut Project> {
@@ -579,7 +715,15 @@ impl Folio {
         if self.saving || self.project_loading || self.prompting {
             return;
         }
-        self.quick_open = false;
+        self.panel = None;
+        // A pending jump only belongs to the file it was queued for.
+        if self
+            .goto
+            .as_ref()
+            .is_some_and(|(target, _)| target != &path)
+        {
+            self.goto = None;
+        }
         self.open_request += 1;
         if self
             .project
@@ -595,9 +739,11 @@ impl Folio {
             return;
         }
         if let Some(doc) = self.project.documents.get(&path) {
-            self.project.active = Some(path);
+            let editor = doc.editor.clone();
+            self.project.active = Some(path.clone());
             self.loading = false;
-            doc.editor.focus_handle(cx).focus(window, cx);
+            editor.focus_handle(cx).focus(window, cx);
+            self.apply_goto(&path, window, cx);
             self.update_title(window);
             cx.notify();
             return;
@@ -683,6 +829,7 @@ impl Folio {
                                 _subscription: subscription,
                             },
                         );
+                        this.apply_goto(&path, window, cx);
                         this.project.active = Some(path);
                         this.message = None;
                         this.update_title(window);
@@ -851,13 +998,358 @@ impl Folio {
         if self.project.workspace.is_none() || self.project_loading || self.prompting {
             return;
         }
-        self.quick_open = true;
+        self.panel = Some(Panel::Files);
         self.query.update(cx, |query, cx| {
             query.set_value(if line { ":" } else { "" }, window, cx);
             query.focus(window, cx);
         });
         self.filter(cx);
         cx.notify();
+    }
+
+    /// Open the project-search panel, optionally revealing the replace field.
+    fn show_search(&mut self, replace: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.project.workspace.is_none() || self.project_loading || self.prompting {
+            return;
+        }
+        self.panel = Some(Panel::Search);
+        if replace {
+            self.search.show_replace = true;
+        }
+        self.search_query
+            .update(cx, |query, cx| query.focus(window, cx));
+        if !self.search.query.is_empty() {
+            self.start_search(cx);
+        }
+        cx.notify();
+    }
+
+    fn select_panel(&mut self, panel: Panel, window: &mut Window, cx: &mut Context<Self>) {
+        if self.panel == Some(panel) {
+            return;
+        }
+        self.panel = Some(panel);
+        match panel {
+            Panel::Files => {
+                self.query.update(cx, |query, cx| query.focus(window, cx));
+                self.filter(cx);
+            }
+            Panel::Search => {
+                self.search_query
+                    .update(cx, |query, cx| query.focus(window, cx));
+                self.start_search(cx);
+            }
+        }
+        cx.notify();
+    }
+
+    fn close_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.panel = None;
+        if let Some(doc) = self
+            .project
+            .active
+            .as_ref()
+            .and_then(|p| self.project.documents.get(p))
+        {
+            doc.editor.focus_handle(cx).focus(window, cx);
+        } else {
+            self.tree_focus.focus(window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Flip one of the `Aa` / `ab` / `.*` toggles and rescan.
+    fn toggle_search_option(
+        &mut self,
+        toggle: impl Fn(&mut search::Options),
+        cx: &mut Context<Self>,
+    ) {
+        toggle(&mut self.search.options);
+        self.start_search(cx);
+        cx.notify();
+    }
+
+    /// Compile the current query and scan the project for it.
+    ///
+    /// The scan runs on the background executor after a short debounce.
+    /// `search_request` identifies the newest scan and lets an older one give up
+    /// instead of racing it for the CPU.
+    fn start_search(&mut self, cx: &mut Context<Self>) {
+        let query = self.search_query.read(cx).value().to_string();
+        self.search.query = query.clone();
+        self.search.selected = 0;
+        self.search.error = None;
+        self.search.truncated = false;
+        self.search.results.clear();
+        self.search.rows.clear();
+        self.search.scroll.scroll_to_item(0, ScrollStrategy::Top);
+        let request = self.search_request.fetch_add(1, Ordering::Relaxed) + 1;
+        if query.trim().is_empty() {
+            self.search.running = false;
+            cx.notify();
+            return;
+        }
+        let matcher = match search::Matcher::new(&query, self.search.options) {
+            Ok(matcher) => matcher,
+            Err(error) => {
+                self.search.running = false;
+                self.search.error = Some(error);
+                cx.notify();
+                return;
+            }
+        };
+        self.search.running = true;
+        cx.notify();
+        let cancel = self.search_request.clone();
+        let cancel_inner = cancel.clone();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(SEARCH_DEBOUNCE).await;
+            if cancel.load(Ordering::Relaxed) != request {
+                return;
+            }
+            // Snapshot the file list and the open buffers only once the query
+            // has settled, so typing does not copy them on every keystroke.
+            let prepared = this
+                .update(cx, |this, cx| {
+                    if this.search_request.load(Ordering::Relaxed) != request {
+                        return None;
+                    }
+                    let files = this.project.files.clone();
+                    let open = this
+                        .project
+                        .documents
+                        .iter()
+                        .map(|(path, document)| {
+                            (path.clone(), document.editor.read(cx).value().to_string())
+                        })
+                        .collect::<HashMap<PathBuf, String>>();
+                    Some((files, open))
+                })
+                .ok()
+                .flatten();
+            let Some((files, open)) = prepared else {
+                return;
+            };
+            let outcome = cx
+                .background_executor()
+                .spawn(async move {
+                    search::search_files(&files, &open, &matcher, || {
+                        cancel_inner.load(Ordering::Relaxed) == request
+                    })
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.search_request.load(Ordering::Relaxed) != request {
+                    return;
+                }
+                this.search.running = false;
+                this.search.truncated = outcome.truncated;
+                this.search.results = outcome.files;
+                this.search.rows = search_rows(&this.search.results);
+                this.search.selected = this
+                    .search
+                    .rows
+                    .iter()
+                    .position(|row| matches!(row, SearchRow::Hit { .. }))
+                    .unwrap_or(0);
+                this.search.scroll.scroll_to_item(0, ScrollStrategy::Top);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn open_selected_hit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(SearchRow::Hit { file, hit }) =
+            self.search.rows.get(self.search.selected).copied()
+        else {
+            return;
+        };
+        let Some(file) = self.search.results.get(file) else {
+            return;
+        };
+        let (path, hit) = (file.path.clone(), file.hits[hit].clone());
+        self.goto = Some((path.clone(), Position::new(hit.line, hit.column)));
+        self.open_file(path, window, cx);
+    }
+
+    /// Move the highlight to the next or previous match, skipping file headers.
+    fn move_search_selection(&mut self, down: bool) {
+        let hits = self
+            .search
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| matches!(row, SearchRow::Hit { .. }))
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        let current = hits.iter().position(|&index| index == self.search.selected);
+        let next = match (current, down) {
+            (Some(current), true) => (current + 1).min(hits.len() - 1),
+            (Some(current), false) => current.saturating_sub(1),
+            (None, _) => 0,
+        };
+        let Some(&selected) = hits.get(next) else {
+            return;
+        };
+        self.search.selected = selected;
+        self.search
+            .scroll
+            .scroll_to_item(selected, ScrollStrategy::Nearest);
+    }
+
+    fn total_hits(&self) -> usize {
+        self.search.results.iter().map(|file| file.hits.len()).sum()
+    }
+
+    /// Confirm, then replace every match the results list points at.
+    fn replace_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.saving
+            || self.prompting
+            || self.project_loading
+            || self.search.running
+            || self.search.error.is_some()
+            || self.search.results.is_empty()
+        {
+            return;
+        }
+        let files = self.search.results.len();
+        let hits = self.total_hits();
+        self.prompting = true;
+        cx.notify();
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            "全部替换",
+            Some(&format!(
+                "将在 {files} 个文件中替换 {hits} 处。未打开的文件会立即写盘，此操作不可撤销。"
+            )),
+            &["全部替换", "取消"],
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            let answer = answer.await.unwrap_or(1);
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.prompting = false;
+                if answer == 0 {
+                    this.apply_replace(window, cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn apply_replace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let replacement = self.replace_query.read(cx).value().to_string();
+        let Ok(matcher) = search::Matcher::new(&self.search.query, self.search.options) else {
+            return;
+        };
+        let targets = self
+            .search
+            .results
+            .iter()
+            .map(|file| file.path.clone())
+            .collect::<Vec<_>>();
+
+        // Open buffers are edited in memory: the change stays undoable and
+        // reaches the disk through the usual ⌘S flow.
+        let mut edited = 0;
+        let mut open_files = 0;
+        for path in &targets {
+            let Some(document) = self.project.documents.get(path) else {
+                continue;
+            };
+            let text = document.editor.read(cx).value().to_string();
+            let (updated, count) = matcher.replace(&text, &replacement);
+            if count == 0 {
+                continue;
+            }
+            let editor = document.editor.clone();
+            editor.update(cx, |state, cx| {
+                state
+                    .base_state()
+                    .clone()
+                    .update(cx, |base, cx| base.replace_all(updated, window, cx));
+            });
+            edited += count;
+            open_files += 1;
+        }
+        for path in &targets {
+            if let Some(document) = self.project.documents.get_mut(path) {
+                document.dirty = document.editor.read(cx).value() != document.saved;
+            }
+        }
+
+        // Closed files are rewritten on disk, atomically and only while they
+        // still hold what the search saw.
+        let disk = targets
+            .iter()
+            .filter(|path| !self.project.documents.contains_key(*path))
+            .cloned()
+            .collect::<Vec<_>>();
+        let workspace = self.project.workspace.clone();
+        if !disk.is_empty() {
+            self.saving = true;
+            cx.notify();
+        }
+        cx.spawn_in(window, async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let mut replaced = 0;
+                    let mut files = 0;
+                    let mut errors = Vec::new();
+                    for path in disk {
+                        let outcome = workspace
+                            .as_ref()
+                            .ok_or_else(|| io::Error::other("项目已关闭"))
+                            .and_then(|workspace| workspace.resolve(&path))
+                            .and_then(|path| {
+                                let original = buffer::read(&path)?;
+                                let (updated, count) = matcher.replace(&original, &replacement);
+                                if count == 0 {
+                                    return Ok(0);
+                                }
+                                buffer::save(&path, &updated, &original)?;
+                                Ok(count)
+                            });
+                        match outcome {
+                            Ok(count) => {
+                                replaced += count;
+                                files += 1;
+                            }
+                            Err(error) => errors.push(format!("{}：{error}", name(&path))),
+                        }
+                    }
+                    (files, replaced, errors)
+                })
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.saving = false;
+                let (files, replaced, errors) = result;
+                let replaced = replaced + edited;
+                let files = files + open_files;
+                if errors.is_empty() {
+                    this.update_title(window);
+                    this.refresh_git(cx);
+                    this.toast(
+                        &if open_files == 0 {
+                            format!("已替换 {replaced} 处 · {files} 个文件")
+                        } else {
+                            format!(
+                                "已替换 {replaced} 处 · {files} 个文件（{open_files} 个已打开文件待保存）"
+                            )
+                        },
+                        cx,
+                    );
+                } else {
+                    this.error(errors.join("\n"), cx);
+                }
+                this.start_search(cx);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn accept_match(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -878,7 +1370,7 @@ impl Folio {
                     .update(cx, |base, cx| {
                         base.set_cursor_position(Position::new(line - 1, 0), window, cx)
                     });
-                self.quick_open = false;
+                self.panel = None;
                 cx.notify();
                 return;
             }
@@ -955,7 +1447,9 @@ impl Folio {
 
     fn icon_button(
         id: impl Into<ElementId>,
-        icon: IconName,
+        // `impl Into<Icon>` rather than `IconName`, so the vendored icons in
+        // `src/assets.rs` can be passed here too.
+        icon: impl Into<Icon>,
         label: &'static str,
         activate: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
         cx: &Context<Self>,
@@ -1363,6 +1857,451 @@ impl Folio {
         .into_any_element()
     }
 
+    fn relative_path(&self, path: &Path) -> String {
+        self.project
+            .workspace
+            .as_ref()
+            .and_then(|workspace| path.strip_prefix(&workspace.root).ok())
+            .unwrap_or(path)
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    /// The `⌘P` / `⇧⌘F` overlay. Both lookups share one panel so the mode switch
+    /// is a click away instead of a separate dialog.
+    fn render_panel(&self, panel: Panel, cx: &mut Context<Self>) -> AnyElement {
+        let width = if panel == Panel::Search { 720. } else { 520. };
+        div()
+            .id("panel")
+            .absolute()
+            .top(px(48.))
+            .left(relative(0.5))
+            .ml(px(-width / 2.))
+            .w(px(width))
+            .rounded_lg()
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().sidebar)
+            .shadow_lg()
+            .p_2()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(self.render_panel_header(panel, cx))
+            .when(panel == Panel::Files, |el| {
+                el.child(self.render_file_finder(cx))
+            })
+            .when(panel == Panel::Search, |el| {
+                el.child(self.render_project_search(cx))
+            })
+            .into_any_element()
+    }
+
+    /// Mode tabs, the `Aa` / `ab` / `.*` filters, and the replace toggle.
+    fn render_panel_header(&self, panel: Panel, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .child(self.panel_tab("panel-tab-files", "文件名", Panel::Files, cx))
+            .child(self.panel_tab("panel-tab-search", "内容", Panel::Search, cx))
+            .child(div().flex_1())
+            .when(panel == Panel::Search, |el| {
+                el.child(self.option_toggle(
+                    "search-case",
+                    "Aa",
+                    "区分大小写",
+                    self.search.options.case_sensitive,
+                    |options| options.case_sensitive = !options.case_sensitive,
+                    cx,
+                ))
+                .child(self.option_toggle(
+                    "search-word",
+                    "ab",
+                    "全字匹配",
+                    self.search.options.whole_word,
+                    |options| options.whole_word = !options.whole_word,
+                    cx,
+                ))
+                .child(self.option_toggle(
+                    "search-regex",
+                    ".*",
+                    "正则表达式，替换时可用 $1 引用捕获组",
+                    self.search.options.regex,
+                    |options| options.regex = !options.regex,
+                    cx,
+                ))
+                .child(Self::icon_button(
+                    "search-replace-toggle",
+                    IconName::Replace,
+                    "替换",
+                    |this, window, cx| {
+                        this.search.show_replace = !this.search.show_replace;
+                        if this.search.show_replace {
+                            this.replace_query
+                                .update(cx, |query, cx| query.focus(window, cx));
+                        } else {
+                            this.search_query
+                                .update(cx, |query, cx| query.focus(window, cx));
+                        }
+                        cx.notify();
+                    },
+                    cx,
+                ))
+            })
+            .child(Self::icon_button(
+                "panel-close",
+                IconName::Close,
+                "关闭",
+                |this, window, cx| this.close_panel(window, cx),
+                cx,
+            ))
+            .into_any_element()
+    }
+
+    fn panel_tab(
+        &self,
+        id: &'static str,
+        label: &'static str,
+        panel: Panel,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let active = self.panel == Some(panel);
+        div()
+            .id(id)
+            .role(Role::Button)
+            .aria_label(label)
+            .focusable()
+            .tab_index(0)
+            .h(px(22.))
+            .px_2()
+            .flex()
+            .items_center()
+            .rounded_sm()
+            .cursor_pointer()
+            .text_size(px(11.))
+            .text_color(if active {
+                cx.theme().accent_foreground
+            } else {
+                cx.theme().muted_foreground
+            })
+            .hover(|el| el.text_color(cx.theme().foreground))
+            .focus_visible(|el| el.text_color(cx.theme().accent_foreground))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(move |this, _, window, cx| this.select_panel(panel, window, cx)))
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                    this.select_panel(panel, window, cx);
+                    cx.stop_propagation();
+                }
+            }))
+            .child(label)
+            .into_any_element()
+    }
+
+    /// A text toggle. An "on" state is shown with colour alone, matching the
+    /// icon rule in AGENTS.md: no background box, no border, hover or not.
+    fn option_toggle(
+        &self,
+        id: &'static str,
+        label: &'static str,
+        tooltip: &'static str,
+        active: bool,
+        toggle: fn(&mut search::Options),
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        div()
+            .id(id)
+            .role(Role::Button)
+            .aria_label(if active {
+                format!("{tooltip}（已开启）")
+            } else {
+                tooltip.to_string()
+            })
+            .focusable()
+            .tab_index(0)
+            .h(px(22.))
+            .min_w(px(24.))
+            .px_1()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_sm()
+            .cursor_pointer()
+            .font_family("JetBrains Mono")
+            .text_size(px(11.))
+            .text_color(if active {
+                cx.theme().accent_foreground
+            } else {
+                cx.theme().muted_foreground
+            })
+            .hover(|el| el.text_color(cx.theme().foreground))
+            .focus_visible(|el| el.text_color(cx.theme().accent_foreground))
+            .tooltip(move |window, cx| {
+                gpui_component::tooltip::Tooltip::new(tooltip).build(window, cx)
+            })
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(move |this, _, _, cx| this.toggle_search_option(toggle, cx)))
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                    this.toggle_search_option(toggle, cx);
+                    cx.stop_propagation();
+                }
+            }))
+            .child(label)
+            .into_any_element()
+    }
+
+    /// `⌘P`: fuzzy file names, or `:123` to jump to a line.
+    fn render_file_finder(&self, cx: &mut Context<Self>) -> AnyElement {
+        let query = self.query.read(cx).value();
+        let jumping = query.starts_with(':');
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            // `focus_bordered(false)` drops the focus ring: without it gpui-component
+            // repaints the border in `theme().ring` and draws a second ring outside
+            // the box, which reads as a grey halo on a panel this small.
+            .child(Input::new(&self.query).focus_bordered(false))
+            .child(
+                div()
+                    .px_2()
+                    .text_size(px(11.))
+                    .text_color(cx.theme().muted_foreground)
+                    .child(if self.project.indexing {
+                        "正在索引文件…"
+                    } else if jumping {
+                        "Enter 跳转到行 · Esc 关闭"
+                    } else {
+                        "↑ ↓ 选择 · Enter 打开 · Esc 关闭"
+                    }),
+            )
+            .when(!jumping, |el| {
+                el.child(
+                    uniform_list(
+                        "quick-results",
+                        self.matches.len(),
+                        cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
+                            range
+                                .map(|i| {
+                                    let path = this.matches[i].clone();
+                                    let label = this.relative_path(&path);
+                                    div()
+                                        .id(("match", i))
+                                        .h(px(30.))
+                                        .px_2()
+                                        .flex()
+                                        .items_center()
+                                        .text_size(px(12.))
+                                        .rounded_sm()
+                                        .when(i == this.match_selected, |el| {
+                                            el.bg(cx.theme().list_active)
+                                        })
+                                        .hover(|el| el.bg(cx.theme().list_hover))
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.open_file(path.clone(), window, cx)
+                                        }))
+                                        .child(div().truncate().child(label))
+                                })
+                                .collect()
+                        }),
+                    )
+                    .track_scroll(&self.quick_scroll)
+                    .h(px((self.matches.len().min(10) * 30) as f32)),
+                )
+            })
+            .into_any_element()
+    }
+
+    /// `⇧⌘F`: project-wide content search with optional replace.
+    fn render_project_search(&self, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(Input::new(&self.search_query).focus_bordered(false))
+            .when(self.search.show_replace, |el| {
+                el.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .child(Input::new(&self.replace_query).focus_bordered(false)),
+                        )
+                        .child(
+                            Button::new("replace-all")
+                                .text()
+                                .label("全部替换")
+                                .xsmall()
+                                .disabled(
+                                    self.search.results.is_empty()
+                                        || self.search.error.is_some()
+                                        || self.search.running
+                                        || self.saving,
+                                )
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.replace_project(window, cx)
+                                })),
+                        ),
+                )
+            })
+            .child(self.render_search_status(cx))
+            .when(!self.search.rows.is_empty(), |el| {
+                el.child(
+                    uniform_list(
+                        "project-search-results",
+                        self.search.rows.len(),
+                        cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
+                            range.map(|i| this.render_search_row(i, cx)).collect()
+                        }),
+                    )
+                    .track_scroll(&self.search.scroll)
+                    .h(px((self.search.rows.len().min(12) * 26) as f32)),
+                )
+            })
+            .into_any_element()
+    }
+
+    fn render_search_status(&self, cx: &Context<Self>) -> AnyElement {
+        let error = self.search.error.is_some();
+        let text = if let Some(error) = &self.search.error {
+            error.clone()
+        } else if self.project.indexing && self.search.running {
+            "正在索引文件…".into()
+        } else if self.search.running {
+            "正在搜索…".into()
+        } else if self.search.query.trim().is_empty() {
+            "输入内容以在项目中搜索".into()
+        } else if self.search.results.is_empty() {
+            "无结果".into()
+        } else {
+            format!(
+                "{} 个匹配 · {} 个文件{}",
+                self.total_hits(),
+                self.search.results.len(),
+                if self.search.truncated {
+                    " · 结果已截断"
+                } else {
+                    ""
+                }
+            )
+        };
+        div()
+            .px_2()
+            .flex()
+            .items_center()
+            .gap_2()
+            .text_size(px(11.))
+            .text_color(if error {
+                cx.theme().warning
+            } else {
+                cx.theme().muted_foreground
+            })
+            .child(div().flex_1().min_w_0().child(text))
+            .when(!error && !self.search.rows.is_empty(), |el| {
+                el.child("↑ ↓ 选择 · Enter 打开 · Esc 关闭")
+            })
+            .into_any_element()
+    }
+
+    fn render_search_row(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
+        let selected = index == self.search.selected;
+        let base = div()
+            .id(("search-row", index))
+            .w_full()
+            .h(px(26.))
+            .flex()
+            .items_center()
+            .gap_2()
+            .text_size(px(12.))
+            .cursor_default()
+            .when(selected, |el| el.bg(cx.theme().list_active))
+            .hover(|el| el.bg(cx.theme().list_hover));
+        match self.search.rows[index] {
+            SearchRow::File(file) => {
+                let entry = &self.search.results[file];
+                let label = self.relative_path(&entry.path);
+                let count = entry.hits.len();
+                let path = entry.path.clone();
+                let position = entry
+                    .hits
+                    .first()
+                    .map(|hit| Position::new(hit.line, hit.column));
+                base.px_2()
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if let Some(position) = position {
+                            this.goto = Some((path.clone(), position));
+                        }
+                        this.open_file(path.clone(), window, cx);
+                    }))
+                    .child(
+                        Icon::new(IconName::File)
+                            .xsmall()
+                            .text_color(cx.theme().muted_foreground),
+                    )
+                    .child(div().flex_1().min_w_0().truncate().child(label))
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .text_size(px(11.))
+                            .text_color(cx.theme().muted_foreground)
+                            .child(format!("{count}")),
+                    )
+                    .into_any_element()
+            }
+            SearchRow::Hit { file, hit } => {
+                let found = &self.search.results[file].hits[hit];
+                let preview = found.preview.clone();
+                let before = preview[..found.start].to_string();
+                let matched = preview[found.start..found.end].to_string();
+                let after = preview[found.end..].to_string();
+                let line = found.line + 1;
+                let path = self.search.results[file].path.clone();
+                let position = Position::new(found.line, found.column);
+                base.pl(px(18.))
+                    .pr_2()
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.goto = Some((path.clone(), position));
+                        this.open_file(path.clone(), window, cx);
+                    }))
+                    .child(
+                        div()
+                            .w(px(44.))
+                            .flex_shrink_0()
+                            .text_right()
+                            .font_family("JetBrains Mono")
+                            .text_size(px(11.))
+                            .text_color(cx.theme().muted_foreground)
+                            .child(format!("{line}")),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .flex()
+                            .items_center()
+                            .font_family("JetBrains Mono")
+                            .child(div().flex_shrink_0().whitespace_nowrap().child(before))
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .whitespace_nowrap()
+                                    .text_color(cx.theme().accent_foreground)
+                                    .child(matched),
+                            )
+                            .child(div().flex_shrink_0().whitespace_nowrap().child(after)),
+                    )
+                    .into_any_element()
+            }
+        }
+    }
+
     fn render_titlebar(&self, cx: &mut Context<Self>) -> AnyElement {
         let project = self
             .project
@@ -1404,9 +2343,9 @@ impl Folio {
                         el.child(Self::icon_button(
                             "sidebar-toggle",
                             if self.sidebar {
-                                IconName::PanelLeftClose
+                                FolioIcon::PanelLeftDashed
                             } else {
-                                IconName::PanelLeftOpen
+                                FolioIcon::PanelRightDashed
                             },
                             "切换侧栏",
                             |this, _, cx| {
@@ -1444,25 +2383,42 @@ impl Folio {
                         )
                     })
                     .when(self.project.workspace.is_some(), |el| {
+                        // One button for the whole panel: it opens on the content
+                        // tab, and the panel's own tabs reach the file finder
+                        // (also `⌘P`).
+                        //
+                        // These are `text` buttons: they draw no background in any
+                        // state and carry no padding of their own. At the 13px rem
+                        // this theme uses, the row's own gap was only ~10px, so the
+                        // labels ran together; `px_2` per button plus this gap gives
+                        // ~23px between them.
                         el.child(
-                            Button::new("quick-open")
-                                .text()
-                                .icon(IconName::Search)
-                                .label("快速打开")
-                                .xsmall()
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.show_quick_open(false, window, cx)
-                                })),
-                        )
-                        .child(
-                            Button::new("close-project")
-                                .text()
-                                .icon(IconName::Close)
-                                .label("关闭项目")
-                                .xsmall()
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.request(Next::Close, window, cx)
-                                })),
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_3()
+                                .child(
+                                    Button::new("project-search")
+                                        .text()
+                                        .icon(IconName::Search)
+                                        .label("搜索")
+                                        .xsmall()
+                                        .px_2()
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.show_search(false, window, cx)
+                                        })),
+                                )
+                                .child(
+                                    Button::new("close-project")
+                                        .text()
+                                        .icon(IconName::Close)
+                                        .label("关闭项目")
+                                        .xsmall()
+                                        .px_2()
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.request(Next::Close, window, cx)
+                                        })),
+                                ),
                         )
                     }),
             )
@@ -1615,6 +2571,12 @@ impl Render for Folio {
             .on_action(cx.listener(|this, _: &QuickOpen, window, cx| {
                 this.show_quick_open(false, window, cx)
             }))
+            .on_action(cx.listener(|this, _: &ProjectSearch, window, cx| {
+                this.show_search(false, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ProjectReplace, window, cx| {
+                this.show_search(true, window, cx)
+            }))
             .on_action(
                 cx.listener(|this, _: &GoToLine, window, cx| {
                     this.show_quick_open(true, window, cx)
@@ -1644,32 +2606,28 @@ impl Render for Folio {
                 }
             }))
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                if !this.quick_open {
+                let Some(panel) = this.panel else {
                     return;
-                }
+                };
                 match event.keystroke.key.as_str() {
-                    "escape" => {
-                        this.quick_open = false;
-                        if let Some(doc) = this
-                            .project
-                            .active
-                            .as_ref()
-                            .and_then(|p| this.project.documents.get(p))
-                        {
-                            doc.editor.focus_handle(cx).focus(window, cx);
+                    "escape" => this.close_panel(window, cx),
+                    "down" | "up" => {
+                        let down = event.keystroke.key == "down";
+                        if panel == Panel::Search {
+                            this.move_search_selection(down);
                         } else {
-                            this.tree_focus.focus(window, cx);
+                            let last = this.matches.len().saturating_sub(1);
+                            this.match_selected = if down {
+                                (this.match_selected + 1).min(last)
+                            } else {
+                                this.match_selected.saturating_sub(1)
+                            };
+                            this.quick_scroll
+                                .scroll_to_item(this.match_selected, ScrollStrategy::Nearest);
                         }
                     }
-                    "down" => {
-                        this.match_selected =
-                            (this.match_selected + 1).min(this.matches.len().saturating_sub(1))
-                    }
-                    "up" => this.match_selected = this.match_selected.saturating_sub(1),
                     _ => return,
                 }
-                this.quick_scroll
-                    .scroll_to_item(this.match_selected, ScrollStrategy::Nearest);
                 cx.stop_propagation();
                 cx.notify();
             }))
@@ -1685,80 +2643,8 @@ impl Render for Folio {
                         self.render_launcher(cx)
                     }),
             )
-            .when(self.quick_open, |el| {
-                el.child(
-                    div()
-                        .absolute()
-                        .top(px(48.))
-                        .left(relative(0.5))
-                        .ml(px(-260.))
-                        .w(px(520.))
-                        .rounded_lg()
-                        .border_1()
-                        .border_color(cx.theme().border)
-                        .bg(cx.theme().sidebar)
-                        .shadow_lg()
-                        .p_2()
-                        .flex()
-                        .flex_col()
-                        .gap_2()
-                        .child(Input::new(&self.query))
-                        .child(
-                            div()
-                                .px_2()
-                                .text_size(px(11.))
-                                .text_color(cx.theme().muted_foreground)
-                                .child(if self.project.indexing {
-                                    "正在索引文件…"
-                                } else if self.query.read(cx).value().starts_with(':') {
-                                    "Enter 跳转到行 · Esc 关闭"
-                                } else {
-                                    "↑ ↓ 选择 · Enter 打开 · Esc 关闭"
-                                }),
-                        )
-                        .when(!self.query.read(cx).value().starts_with(':'), |el| {
-                            el.child(
-                                uniform_list(
-                                    "quick-results",
-                                    self.matches.len(),
-                                    cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
-                                        range
-                                            .map(|i| {
-                                                let path = this.matches[i].clone();
-                                                let label = this
-                                                    .project
-                                                    .workspace
-                                                    .as_ref()
-                                                    .and_then(|w| path.strip_prefix(&w.root).ok())
-                                                    .unwrap_or(&path)
-                                                    .to_string_lossy()
-                                                    .into_owned();
-                                                div()
-                                                    .id(("match", i))
-                                                    .h(px(30.))
-                                                    .px_2()
-                                                    .flex()
-                                                    .items_center()
-                                                    .text_size(px(12.))
-                                                    .rounded_sm()
-                                                    .when(i == this.match_selected, |el| {
-                                                        el.bg(cx.theme().list_active)
-                                                    })
-                                                    .on_click(cx.listener(
-                                                        move |this, _, window, cx| {
-                                                            this.open_file(path.clone(), window, cx)
-                                                        },
-                                                    ))
-                                                    .child(div().truncate().child(label))
-                                            })
-                                            .collect()
-                                    }),
-                                )
-                                .track_scroll(&self.quick_scroll)
-                                .h(px((self.matches.len().min(10) * 30) as f32)),
-                            )
-                        }),
-                )
+            .when_some(self.panel, |el, panel| {
+                el.child(self.render_panel(panel, cx))
             })
             .when_some(self.message.clone(), |el, message| {
                 el.child(
@@ -2149,6 +3035,168 @@ mod tests {
                     .as_ref(),
                 "// newer edit\n"
             );
+        });
+    }
+
+    #[gpui::test]
+    fn project_search_reads_dirty_buffers_and_replace_splits_open_and_closed_files(
+        cx: &mut TestAppContext,
+    ) {
+        // The scan is debounced, so a test has to move its clock past the delay.
+        fn settle(cx: &VisualTestContext) {
+            cx.executor().advance_clock(SEARCH_DEBOUNCE * 2);
+            cx.run_until_parked();
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let open = root.join("open.rs");
+        let closed = root.join("closed.rs");
+        std::fs::write(&open, "let value = 1;\nlet other = 2;\n").unwrap();
+        std::fs::write(&closed, "let value = 3;\n").unwrap();
+        std::fs::write(root.join("notes.md"), "value in prose\n").unwrap();
+        cx.update(gpui_component::init);
+        let cx = cx.add_empty_window();
+        let view = cx.update(|window, cx| {
+            cx.new(|cx| {
+                let mut app = Folio::new(window, cx);
+                app.recent_task = None;
+                app.recent_file = root.join("recent.json");
+                app
+            })
+        });
+        view.update_in(cx, |app, window, cx| {
+            app.request(Next::Open(root.clone()), window, cx)
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |app, window, cx| {
+            app.open_file(open.clone(), window, cx)
+        });
+        cx.run_until_parked();
+
+        // Edit the buffer without saving: the search must see what is on screen,
+        // not what is on disk, or every reported position would be wrong.
+        view.update_in(cx, |app, window, cx| {
+            app.project.documents[&open]
+                .editor
+                .read(cx)
+                .base_state()
+                .clone()
+                .update(cx, |base, cx| {
+                    base.replace_all("let value = 1;\nlet added = 5;\n", window, cx)
+                });
+            app.show_search(true, window, cx);
+            app.search_query
+                .update(cx, |query, cx| query.set_value("added", window, cx));
+            app.start_search(cx);
+        });
+        settle(cx);
+        view.update_in(cx, |app, _, _| {
+            assert!(!app.search.running);
+            assert!(app.search.error.is_none());
+            assert_eq!(app.total_hits(), 1, "the unsaved line must be searchable");
+            assert_eq!(app.search.results[0].path, open);
+            assert_eq!(app.search.results[0].hits[0].line, 1);
+        });
+
+        // Case sensitivity is a filter over the same code path.
+        view.update_in(cx, |app, window, cx| {
+            app.search_query
+                .update(cx, |query, cx| query.set_value("Value", window, cx));
+            app.search.options.case_sensitive = true;
+            app.start_search(cx);
+        });
+        settle(cx);
+        view.update_in(cx, |app, _, _| assert_eq!(app.total_hits(), 0));
+        view.update_in(cx, |app, window, cx| {
+            app.search.options.case_sensitive = false;
+            app.search_query
+                .update(cx, |query, cx| query.set_value("value", window, cx));
+            app.start_search(cx);
+        });
+        settle(cx);
+        view.update_in(cx, |app, _, _| {
+            assert_eq!(app.total_hits(), 3, "open.rs, closed.rs and notes.md");
+            assert_eq!(app.search.results.len(), 3);
+        });
+
+        // Opening a hit closes the panel and leaves the cursor on the match.
+        view.update_in(cx, |app, window, cx| {
+            let file = app
+                .search
+                .results
+                .iter()
+                .position(|file| file.path == open)
+                .unwrap();
+            let row = app
+                .search
+                .rows
+                .iter()
+                .position(
+                    |row| matches!(row, SearchRow::Hit { file: f, hit } if *f == file && *hit == 0),
+                )
+                .unwrap();
+            app.search.selected = row;
+            app.open_selected_hit(window, cx);
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |app, _, cx| {
+            assert!(app.goto.is_none(), "the pending jump must be consumed");
+            assert!(app.panel.is_none(), "opening a hit closes the panel");
+            let cursor = app.project.documents[&open]
+                .editor
+                .read(cx)
+                .base_state()
+                .read(cx)
+                .cursor_position();
+            assert_eq!((cursor.line, cursor.character), (0, 4));
+        });
+
+        // Replace all: the open buffer is edited in memory and left dirty while
+        // the files without an editor are rewritten on disk.
+        view.update_in(cx, |app, window, cx| {
+            app.show_search(true, window, cx);
+            app.search_query
+                .update(cx, |query, cx| query.set_value("value", window, cx));
+            app.replace_query
+                .update(cx, |query, cx| query.set_value("const value", window, cx));
+            app.start_search(cx);
+        });
+        settle(cx);
+        view.update_in(cx, |app, window, cx| {
+            assert_eq!(app.total_hits(), 3);
+            app.replace_project(window, cx);
+        });
+        cx.run_until_parked();
+        assert!(cx.has_pending_prompt());
+        cx.simulate_prompt_answer("全部替换");
+        cx.run_until_parked();
+        assert_eq!(
+            std::fs::read_to_string(&closed).unwrap(),
+            "let const value = 3;\n",
+            "a closed file is rewritten in place"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&open).unwrap(),
+            "let value = 1;\nlet other = 2;\n",
+            "an open buffer must not be written behind the user's back"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("notes.md")).unwrap(),
+            "const value in prose\n"
+        );
+        view.update_in(cx, |app, _, cx| {
+            let document = &app.project.documents[&open];
+            assert!(document.dirty);
+            assert_eq!(
+                document.editor.read(cx).value().as_ref(),
+                "let const value = 1;\nlet added = 5;\n"
+            );
+        });
+        settle(cx);
+        view.update_in(cx, |app, _, _| {
+            assert_eq!(app.total_hits(), 3, "the search re-runs after a replace");
+            assert_eq!(app.search.results.len(), 3);
         });
     }
 }

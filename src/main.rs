@@ -1,4 +1,5 @@
 mod app;
+mod assets;
 mod preview;
 mod syntax;
 use app::*;
@@ -7,7 +8,7 @@ use gpui_component::{Root, TitleBar, input};
 
 fn main() {
     gpui_platform::application()
-        .with_assets(gpui_component_assets::Assets)
+        .with_assets(assets::Assets)
         .run(|cx| {
             gpui_component::init(cx);
             syntax::register_extra_languages();
@@ -27,6 +28,12 @@ fn main() {
                 KeyBinding::new(&format!("{modifier}-w"), CloseProject, Some("Folio")),
                 KeyBinding::new(&format!("{modifier}-s"), Save, Some("Folio")),
                 KeyBinding::new(&format!("{modifier}-p"), QuickOpen, Some("Folio")),
+                KeyBinding::new(&format!("{modifier}-shift-f"), ProjectSearch, Some("Folio")),
+                KeyBinding::new(
+                    &format!("{modifier}-shift-h"),
+                    ProjectReplace,
+                    Some("Folio"),
+                ),
                 KeyBinding::new(&format!("{modifier}-g"), GoToLine, Some("Folio")),
                 KeyBinding::new(&format!("{modifier}-b"), ToggleSidebar, Some("Folio")),
                 KeyBinding::new(&format!("{modifier}-q"), Quit, Some("Folio")),
@@ -36,6 +43,8 @@ fn main() {
                 Menu::new("文件").items([
                     MenuItem::action("打开项目…", OpenProject),
                     MenuItem::action("快速打开…", QuickOpen),
+                    MenuItem::action("在项目中搜索…", ProjectSearch),
+                    MenuItem::action("在项目中替换…", ProjectReplace),
                     MenuItem::separator(),
                     MenuItem::action("保存", Save),
                     MenuItem::action("关闭项目", CloseProject),

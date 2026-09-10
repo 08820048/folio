@@ -1794,6 +1794,7 @@ dependencies = [
  "gpui-component-assets",
  "gpui_platform",
  "image",
+ "regex",
  "serde",
  "serde_json",
  "tempfile",

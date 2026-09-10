@@ -1,4 +1,4 @@
-use folio::{buffer, recent, tree, workspace::Workspace};
+use folio::{buffer, recent, search, tree, workspace::Workspace};
 use std::fs;
 
 #[test]
@@ -37,6 +37,51 @@ fn project_read_edit_save_and_recent_round_trip() {
     assert!(tree::fuzzy_match("sMR", "src/main.rs"));
     assert!(!tree::fuzzy_match("rsm", "src/main.rs"));
     assert_eq!(buffer::language(&file), "rust");
+}
+
+#[test]
+fn project_search_prefers_open_buffers_and_skips_unusable_files() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let text = root.join("text.rs");
+    let binary = root.join("binary.bin");
+    let huge = root.join("huge.rs");
+    let dirty = root.join("dirty.rs");
+    fs::write(&text, "let needle = 1;\n").unwrap();
+    fs::write(&binary, b"needle\0\xff").unwrap();
+    fs::write(
+        &huge,
+        format!("needle\n{}", "x".repeat(search::FILE_BYTES_LIMIT as usize)),
+    )
+    .unwrap();
+    fs::write(&dirty, "let needle = 1;\n").unwrap();
+
+    let files = vec![text.clone(), binary, huge, dirty.clone()];
+    // The open buffer differs from disk: the search must use the buffer.
+    let overlay = [(dirty.clone(), "let edited = 2;\nneedle here\n".to_string())]
+        .into_iter()
+        .collect();
+    let matcher = search::Matcher::new("needle", search::Options::default()).unwrap();
+    let outcome = search::search_files(&files, &overlay, &matcher, || true);
+
+    assert_eq!(
+        outcome
+            .files
+            .iter()
+            .map(|file| file.path.clone())
+            .collect::<Vec<_>>(),
+        vec![text, dirty],
+        "binary and oversized files are skipped without failing the search"
+    );
+    assert_eq!(
+        outcome.files[1].hits[0].line, 1,
+        "the buffer on screen wins"
+    );
+    assert!(!outcome.truncated);
+
+    // A cancelled scan reports nothing rather than a partial list.
+    let cancelled = search::search_files(&files, &overlay, &matcher, || false);
+    assert!(cancelled.files.is_empty());
 }
 
 #[test]
