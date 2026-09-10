@@ -40,6 +40,65 @@ fn project_read_edit_save_and_recent_round_trip() {
 }
 
 #[test]
+fn language_mapping_names_registered_grammars() {
+    let case = |path: &str, expected: &str| {
+        assert_eq!(
+            buffer::language(std::path::Path::new(path)),
+            expected,
+            "{path}"
+        );
+    };
+    // Whole-file names, including ones with no extension at all.
+    case("Dockerfile", "dockerfile");
+    case("Dockerfile.dev", "dockerfile");
+    case("Containerfile", "dockerfile");
+    case("Makefile", "make");
+    case("CMakeLists.txt", "cmake");
+    case("Jenkinsfile", "text"); // no Groovy grammar is available
+    case("Gemfile", "ruby");
+    case(".zshrc", "bash");
+    case(".editorconfig", "ini");
+    case(".vimrc", "vim");
+    case(".Rprofile", "r");
+    case("Cargo.lock", "toml");
+    case(".env", "ini");
+    case(".env.local", "ini");
+    case("COMMIT_EDITMSG", "gitcommit");
+    // Extensions.
+    case("a.xml", "xml");
+    case("a.xaml", "xml");
+    case("a.dtd", "dtd");
+    case("a.scss", "scss");
+    case("a.sass", "scss");
+    case("a.less", "less");
+    case("a.vue", "vue");
+    case("a.nix", "nix");
+    case("a.dart", "dart");
+    case("a.r", "r");
+    case("a.hs", "haskell");
+    case("a.ml", "ocaml");
+    case("a.mli", "ocaml");
+    case("a.erl", "erlang");
+    case("a.elm", "elm");
+    case("a.gleam", "gleam");
+    case("a.sol", "solidity");
+    case("a.m", "objc");
+    case("a.s", "asm");
+    case("a.ps1", "powershell");
+    case("config.fish", "fish");
+    case("a.regex", "regex");
+    case("a.ipynb", "json");
+    case("a.json5", "json");
+    // Uppercase .C / .H stay C++, everything else is case-insensitive.
+    case("a.C", "cpp");
+    case("a.H", "cpp");
+    case("a.c", "c");
+    case("a.XML", "xml");
+    // Unknown extensions must not go through SyntaxHighlighter's error path.
+    case("a.unknown-extension", "text");
+}
+
+#[test]
 fn git_status_and_save_failures_keep_existing_data() {
     use std::process::Command;
     let temp = tempfile::tempdir().unwrap();

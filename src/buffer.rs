@@ -56,20 +56,130 @@ pub fn save(path: &Path, text: &str, expected: &str) -> io::Result<()> {
     Ok(())
 }
 
+/// Returns the grammar name for a file.
+///
+/// Every name must resolve in gpui-component's `LanguageRegistry`: either one of
+/// its built-in languages or one added by `src/syntax.rs`. `"text"` means "no
+/// grammar" and is rendered as unhighlighted text; it is registered by
+/// gpui-component, so an unknown file never has to go through
+/// `SyntaxHighlighter`'s error fallback.
+///
+/// `src/syntax.rs` has a test that walks a sample of these paths and asserts the
+/// returned name actually resolves, so the two tables cannot drift apart.
 pub fn language(path: &Path) -> &'static str {
-    match path.extension().and_then(|x| x.to_str()).unwrap_or("") {
+    let filename = path.file_name().and_then(|x| x.to_str()).unwrap_or("");
+    let filename = filename.to_ascii_lowercase();
+    // Whole-name matches beat extensions: "Dockerfile" has no extension at all,
+    // and "CMakeLists.txt" would otherwise be read as plain text.
+    let named = match filename.as_str() {
+        "makefile" | "gnumakefile" | "bsdmakefile" | "makefile.am" | "makefile.in" => Some("make"),
+        "cmakelists.txt" => Some("cmake"),
+        "gemfile" | "rakefile" | "guardfile" | "podfile" | "brewfile" | "vagrantfile"
+        | "fastfile" | "appfile" | "dangerfile" | "capfile" | "berksfile" | "thorfile" => {
+            Some("ruby")
+        }
+        ".bashrc" | ".bash_profile" | ".bash_login" | ".bash_logout" | ".bash_aliases"
+        | ".profile" | ".envrc" | ".zshrc" | ".zprofile" | ".zshenv" | ".zlogin" | ".zlogout"
+        | ".kshrc" | ".tmux.conf" => Some("bash"),
+        ".editorconfig" | ".gitconfig" | ".npmrc" | ".yarnrc" | ".pylintrc" | ".flake8"
+        | ".coveragerc" | ".hgrc" => Some("ini"),
+        ".vimrc" | "vimrc" | ".gvimrc" | "gvimrc" | ".exrc" => Some("vim"),
+        ".rprofile" | ".renviron" => Some("r"),
+        "cargo.lock" | "pipfile" | "poetry.lock" | "gopkg.lock" => Some("toml"),
+        "dockerfile" | "containerfile" => Some("dockerfile"),
+        "commit_editmsg" | "merge_msg" | "tag_editmsg" | "git-rebase-todo" | ".gitmessage" => {
+            Some("gitcommit")
+        }
+        _ => None,
+    };
+    if let Some(language) = named {
+        return language;
+    }
+    // Variants carry a suffix instead of an extension: "Dockerfile.dev".
+    if filename.starts_with("dockerfile.") || filename.starts_with("containerfile.") {
+        return "dockerfile";
+    }
+    // ".env" / ".env.local" / ".env.example" are KEY=value files.
+    if filename == ".env" || filename.starts_with(".env.") {
+        return "ini";
+    }
+    let extension = path.extension().and_then(|x| x.to_str()).unwrap_or("");
+    // Uppercase .C and .H conventionally denote C++, unlike lowercase .c / .h.
+    if matches!(extension, "C" | "H") {
+        return "cpp";
+    }
+    match extension.to_ascii_lowercase().as_str() {
+        // Systems
         "rs" => "rust",
-        "ts" => "typescript",
+        "go" => "go",
+        "c" | "h" => "c",
+        "cpp" | "cc" | "cxx" | "c++" | "hpp" | "hh" | "hxx" | "h++" | "ipp" | "tpp" => "cpp",
+        "cs" | "csx" => "csharp",
+        "swift" => "swift",
+        "zig" | "zon" => "zig",
+        "dart" => "dart",
+        "nix" => "nix",
+        "m" | "mm" => "objc",
+        "s" | "asm" | "nasm" => "asm",
+        // JVM
+        "java" => "java",
+        "kt" | "kts" => "kotlin",
+        "scala" | "sc" | "sbt" => "scala",
+        // Scripting
+        "py" | "pyi" | "pyw" => "python",
+        "rb" | "rake" | "gemspec" | "ru" => "ruby",
+        "php" | "phtml" => "php",
+        "lua" => "lua",
+        "sh" | "bash" | "zsh" | "ksh" => "bash",
+        "fish" => "fish",
+        "vim" => "vim",
+        "ps1" | "psm1" | "psd1" => "powershell",
+        "ex" | "exs" => "elixir",
+        "erl" | "hrl" => "erlang",
+        // Functional
+        "hs" | "lhs" => "haskell",
+        // The interface grammar shares the implementation query in the upstream
+        // crate, and that query does not compile against it, so `.mli` reuses the
+        // implementation grammar and is highlighted approximately.
+        "ml" | "mli" => "ocaml",
+        "elm" => "elm",
+        "gleam" => "gleam",
+        "r" => "r",
+        // Data science and contracts
+        "sol" => "solidity",
+        // Web
+        "ts" | "mts" | "cts" => "typescript",
         "tsx" => "tsx",
         "js" | "mjs" | "cjs" | "jsx" => "javascript",
-        "py" => "python",
-        "go" => "go",
-        "json" => "json",
-        "toml" => "toml",
-        "md" | "mdx" => "markdown",
-        "yml" | "yaml" => "yaml",
+        "vue" => "vue",
         "html" | "htm" => "html",
         "css" => "css",
-        _ => "plain_text",
+        "scss" | "sass" => "scss",
+        "less" => "less",
+        "astro" => "astro",
+        "svelte" => "svelte",
+        "erb" => "erb",
+        "ejs" => "ejs",
+        // Data and configuration
+        "json" | "jsonc" | "json5" | "ipynb" | "webmanifest" => "json",
+        "toml" => "toml",
+        "yml" | "yaml" => "yaml",
+        "xml" | "xsd" | "xsl" | "xslt" | "wsdl" | "plist" | "csproj" | "fsproj" | "vbproj"
+        | "props" | "targets" | "xaml" | "pom" | "nuspec" | "resx" | "storyboard" | "xib"
+        | "rss" | "atom" => "xml",
+        "dtd" => "dtd",
+        "ini" | "cfg" | "cnf" | "conf" | "properties" | "desktop" | "prefs" | "service"
+        | "socket" | "timer" => "ini",
+        "md" | "mdx" | "markdown" => "markdown",
+        "sql" => "sql",
+        "graphql" | "gql" => "graphql",
+        "proto" => "proto",
+        "diff" | "patch" => "diff",
+        "regex" => "regex",
+        // Build systems and tools
+        "cmake" => "cmake",
+        "mk" | "mak" => "make",
+        "dockerfile" | "containerfile" => "dockerfile",
+        _ => "text",
     }
 }

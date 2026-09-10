@@ -632,7 +632,8 @@ impl Folio {
                     Ok((path, Content::Text(text))) => {
                         let large = text.len() > buffer::HIGHLIGHT_LIMIT;
                         let language = if large {
-                            "plain_text"
+                            // "text" is gpui-component's grammardless language.
+                            "text"
                         } else {
                             buffer::language(&path)
                         };

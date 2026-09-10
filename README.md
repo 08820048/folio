@@ -42,6 +42,21 @@ open target/Folio.app
 
 保存会检查磁盘是否仍与打开时的版本一致，再写入同目录临时文件并原子替换；失败保持脏状态，外部变更不会直接被覆盖。最近项目是本地 JSON，最多 8 项；删除记录不删除项目文件。macOS 数据目录为 `~/Library/Application Support/Folio/`。
 
+## 语法高亮
+
+高亮来自 Tree-sitter。gpui-component 内置 37 种语法，`src/syntax.rs` 通过它公开的 `LanguageRegistry` 再注册 23 种，不需要改动或 fork 组件库：
+
+| 来源 | 语言 |
+| --- | --- |
+| 组件库内置 | Rust、C、C++、C#、Go、Zig、Swift、Java、Kotlin、Scala、Python、Ruby、PHP、Lua、Bash、Elixir、TypeScript、TSX、JavaScript、HTML、CSS、Astro、Svelte、EJS、ERB、JSON、TOML、YAML、CMake、Make、Markdown、SQL、GraphQL、Protocol Buffers、Diff、JsDoc |
+| 本仓库新增 | XML、DTD、INI、Dockerfile、Nix、PowerShell、Fish、Vim script、Git 提交信息、正则、Vue、Dart、R、汇编、Solidity、Haskell、OCaml、Erlang、Elm、Gleam、SCSS、Less |
+
+扩展名到语言的映射在 `src/buffer.rs::language`，整名匹配优先于扩展名，覆盖 `Dockerfile` / `Dockerfile.dev`、`Containerfile`、`Makefile`、`CMakeLists.txt`、`Gemfile` / `Rakefile` / `Vagrantfile`、`.zshrc` 系列、`.editorconfig`、`.vimrc`、`.Rprofile`、`Cargo.lock` / `Pipfile`、`COMMIT_EDITMSG`、`.env` / `.env.local` 等无扩展名或易误解的文件。大写 `.C` / `.H` 仍按约定视为 C++。未知扩展名返回 `text`，不高亮也不报错。
+
+新增语言的判定条件写在 `src/syntax.rs` 的模块注释里：候选 crate 必须与 gpui-component 锁定的 tree-sitter 0.26 共用同一 `tree-sitter-language` 0.1 ABI、把高亮查询导出为常量、并且 build 脚本真的启用了门控该常量的 cfg。`tree-sitter-dockerfile`、`tree-sitter-vue`、`tree-sitter-wgsl`、`tree-sitter-cue` 卡在第一条，`tree-sitter-glsl`、`tree-sitter-nickel`、`tree-sitter-groovy`、`tree-sitter-perl` 和 `tree-sitter-vue-next` 卡在后面两条，都被排除。
+
+语法表静态编译进二进制，只在打开对应文件时解析，对启动、内存和滚动没有影响；磁盘代价是 Release 二进制从约 21 MB 增至约 73 MB。最贵的四套是 OCaml 13.8 MB、Objective-C 11.4 MB、Haskell 8.1 MB、Git 提交信息 4.2 MB，其余每套都在 3.4 MB 以下；不需要某套时删掉 `src/syntax.rs` 的条目和 `Cargo.toml` 里的依赖即可，`syntax` feature 也能整体关闭（此时所有扩展名回退为纯文本）。
+
 ## 检查
 
 ```sh
@@ -52,13 +67,16 @@ cargo clippy --locked --all-targets --features desktop-tests -- -D warnings
 cargo build --locked
 ```
 
-测试覆盖中文路径、最近项目 JSON、忽略目录、路径越界、UTF-8 和二进制校验、原子保存、外部修改冲突、权限保留、Git 未跟踪和重命名状态。`desktop-tests` 另用 GPUI 测试执行器覆盖连续展开/收起、最近项目按序写入、跨项目过期回调、选择器互斥，跨项目脏缓冲保留和退出保存冲突、图片解码及图片与脏文本切换，以及保存期间新编辑的保留；不代替原生输入法或渲染验收。
+测试覆盖中文路径、最近项目 JSON、忽略目录、路径越界、UTF-8 和二进制校验、原子保存、外部修改冲突、权限保留、Git 未跟踪和重命名状态，以及扩展名到语法名的映射。`desktop-tests` 另用 GPUI 测试执行器覆盖连续展开/收起、最近项目按序写入、跨项目过期回调、选择器互斥，跨项目脏缓冲保留和退出保存冲突、图片解码及图片与脏文本切换，以及保存期间新编辑的保留；不代替原生输入法或渲染验收。
+
+每个新增语法都会真正编译一次高亮查询并断言不回退为纯文本 —— `SyntaxHighlighter::new` 在查询编译失败时会静默降级，只有断言才能发现配置写错的语法。
 
 ## 固定依赖
 
 - 官方 GPUI `0.2.2` + `gpui_platform 0.1.0`，**源码提交** `cc053a4a6fa2fd0e8793201ed9099466af1be0b1`。
 - gpui-component `0.5.2`，提交 `f3ba893bd6a996ab0699266ba774b5bbb7f0ca1c`，以及同提交的 assets。
 - GPUI 系列来自同一 Git source，统一由 `Cargo.lock` 锁定，避免组件库与主程序出现两份不兼容的 GPUI。始终用 `--locked` 构建，不直接运行 `cargo update`。
+- `src/syntax.rs` 的额外语法来自 crates.io，锁在 `Cargo.lock` 里，全部由 `syntax` feature 门控（`desktop` 会启用它）。它们只被二进制使用，`cargo test --locked` 这类仅库构建不会编译它们。
 
 只编译 GPUI 框架及所需组件，不依赖 Zed 的 editor、language、workspace 应用模块。Cargo 的 Git source 下载仍会包含上游仓库 checkout。
 

@@ -1,5 +1,6 @@
 mod app;
 mod preview;
+mod syntax;
 use app::*;
 use gpui::*;
 use gpui_component::{Root, TitleBar, input};
@@ -9,6 +10,7 @@ fn main() {
         .with_assets(gpui_component_assets::Assets)
         .run(|cx| {
             gpui_component::init(cx);
+            syntax::register_extra_languages();
             gpui_component::set_locale("zh-CN");
             let _ = cx
                 .text_system()
