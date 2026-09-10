@@ -77,6 +77,56 @@ projects live in a local JSON file capped at eight entries; removing one does
 not touch the project's files. On macOS the data directory is
 `~/Library/Application Support/Folio/`.
 
+## Project tree
+
+Right-click a folder row, or a project header, and the menu opens at the
+pointer, flipping when it would overhang the window. It carries New File, New
+Folder, Reveal in Finder, Open in Default App, Open in Terminal, Find in
+Folder…, Cut, Copy, Duplicate, Paste, Rename, Move to Trash and Delete
+Immediately, in that order, in six groups.
+
+The project root's menu drops the last three. The root is the workspace's
+identity — `project_order`, the recent list and every cached path key off it —
+so renaming or removing it would cascade through all of them for little gain.
+Renaming or deleting a folder *inside* the project is ordinary.
+
+The shortcuts the menu prints are real bindings while it is open, claimed in
+the root's key-capture phase so a bare `⇧R` or `⌘⌫` never reaches the editor
+underneath. They are not global: `⌘C` opens the menu's Copy only while a menu
+is up and stays the editor's Copy otherwise.
+
+New File and New Folder splice a text field into the tree in front of the
+folder's children; Rename reuses the entry's own row and preselects the name.
+Enter is what touches the filesystem — Escape and clicking away create nothing.
+The field is a text input rather than a hand-rolled buffer, so IME composition
+works for non-ASCII names.
+
+Rename re-keys the open buffers, the active file, the image preview, the
+expansion state and the cached directory listings, so a renamed folder keeps
+its expanded subtree and a file that is open stays open under its new path.
+
+Cut, Copy and Paste use an in-app clipboard holding one path, so they move and
+copy entries inside the project rather than going through the system
+clipboard. A cut is spent once it lands; a copy can be pasted again. Duplicate
+copies beside the original as `foo copy.rs`, then `foo copy 2.rs`.
+
+Find in Folder… opens the search panel scoped to that subtree. The panel shows
+the scope as a chip that can be cleared, and opening it from the keyboard
+resets the scope rather than inheriting the last folder.
+
+Nothing here overwrites. Creating uses an exclusive open, and renaming or
+pasting onto a name that already exists is refused with a message. Pasting a
+folder into its own subtree is refused too, and a cut that cannot be a rename —
+across volumes — falls back to copy-then-delete.
+
+Move to Trash hands the path to Finder, which is the only route to a real Trash
+entry the user can put back without adding a dependency. Delete Immediately is
+permanent and always confirms first. Trash is recoverable and only stops to
+confirm when unsaved edits sit under the entry, which it would otherwise drop
+silently. Both release the buffers, previews and cached directories that
+pointed at the entry. Reveal, Open in Default App and Open in Terminal hand the
+path to the OS, so what they launch follows the platform.
+
 ## Project-wide search and replace
 
 The `⌘P` panel's "Files" and "Contents" tabs switch between the two lookups in
@@ -171,16 +221,23 @@ cargo build --locked
 The tests cover non-ASCII paths, the recent-projects JSON, ignored directories,
 paths escaping the project, UTF-8 and binary validation, atomic saves,
 external-change conflicts, permission preservation, Git untracked and renamed
-status, the extension-to-grammar map, and project search (case, whole word,
+status, the extension-to-grammar map, the file operations behind the tree menu
+(create collisions, a recursive duplicate and rename, paste refusals, a
+case-only rename, deleting a tree), and project search (case, whole word,
 regex, long-line windowing, CRLF, multi-byte columns, capture-group
 replacement, skipping binary and oversized files). `desktop-tests` uses the
 GPUI test executor for the rest: repeated expand and collapse, recents written
 in order, stale callbacks across projects, picker exclusivity, dirty buffers
 kept across projects and the save conflict on quit, image decoding and
 switching between an image and a dirty text buffer, edits made during a save,
-and project search reading unsaved content, landing the cursor on a hit, and
-the open-buffer-in-memory versus closed-file-on-disk split in replace. It does
-not stand in for native IME or rendering acceptance.
+project search reading unsaved content, landing the cursor on a hit, and the
+open-buffer-in-memory versus closed-file-on-disk split in replace, plus the
+tree menu driving create, rename, cut, paste, duplicate, delete and Find in
+Folder — including the entries the root menu omits. What no test covers is the
+Trash call itself: it would move real files and raise an automation prompt. The
+guard that stops to confirm when unsaved edits are under the entry, and that
+cancelling leaves the entry alone, is covered. None of this stands in for
+native IME or rendering acceptance.
 
 Every registered grammar has its highlight query compiled and asserted not to
 fall back to plain text. `SyntaxHighlighter::new` degrades silently on a bad
@@ -215,7 +272,10 @@ matches. Project search skips files above 2 MiB and caps results at 1000
 matches over 200 files, with no streaming results and no cancel button. Bitmaps
 are capped at 32M pixels and 16,384 pixels per side, and SVG rasterization is
 size-limited by GPUI. Git status refreshes when a project is opened or switched
-and after a save.
+and after a save. Move to Trash goes through Finder, so macOS raises an
+automation permission prompt the first time and a refusal surfaces as an error;
+the Recycle Bin and `gio trash` paths behind the other platforms are written
+but untested on real hardware.
 
 Full progress and the outstanding acceptance items are in
 [docs/开发进度.md](docs/开发进度.md); the original requirements are in
