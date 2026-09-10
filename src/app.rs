@@ -1,7 +1,7 @@
 use crate::assets::FolioIcon;
 use crate::preview::{self, Content};
 use folio::{
-    buffer, git,
+    buffer, fs_op, git,
     recent::{self, RecentProject},
     search,
     tree::{self, Entry, EntryKind},
@@ -96,12 +96,166 @@ struct Row {
 }
 
 /// Which lookup the overlay panel is running.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Panel {
     /// `⌘P`: fuzzy file-name search.
     Files,
     /// `⇧⌘F`: project-wide content search, optionally with replace.
     Search,
+}
+
+/// Every entry the project-tree context menu offers, in menu order.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MenuItem {
+    NewFile,
+    NewFolder,
+    Reveal,
+    OpenDefault,
+    OpenTerminal,
+    FindInFolder,
+    Cut,
+    Copy,
+    Duplicate,
+    Paste,
+    Rename,
+    Trash,
+    Delete,
+}
+
+impl MenuItem {
+    /// The project root is the workspace's identity: `project_order`, the
+    /// recent list and every cached path key off it, so the tree offers no way
+    /// to rename or remove it.
+    fn applies_to_root(self) -> bool {
+        !matches!(self, MenuItem::Rename | MenuItem::Trash | MenuItem::Delete)
+    }
+}
+
+/// `(item, label, shortcut)`. The shortcut is spelled the way macOS writes it
+/// and rewritten for other platforms by [`shortcut_label`].
+const MENU_ITEMS: &[(MenuItem, &str, &str)] = &[
+    (MenuItem::NewFile, "New File", "⌘N"),
+    (MenuItem::NewFolder, "New Folder", "⌘⇧N"),
+    (MenuItem::Reveal, "Reveal in Finder", "⌘⇧R"),
+    (MenuItem::OpenDefault, "Open in Default App", ""),
+    (MenuItem::OpenTerminal, "Open in Terminal", ""),
+    (MenuItem::FindInFolder, "Find in Folder…", "⌘⇧F"),
+    (MenuItem::Cut, "Cut", "⌘X"),
+    (MenuItem::Copy, "Copy", "⌘C"),
+    (MenuItem::Duplicate, "Duplicate", "⌘D"),
+    (MenuItem::Paste, "Paste", "⌘V"),
+    (MenuItem::Rename, "Rename", "⇧R"),
+    // The two Finder bindings, so the destructive one carries the extra key.
+    (MenuItem::Trash, "Move to Trash", "⌘⌫"),
+    (MenuItem::Delete, "Delete Immediately", "⌥⌘⌫"),
+];
+
+/// Items that get a separator line above them, splitting the menu into groups.
+const MENU_SEPARATORS: &[usize] = &[2, 5, 6, 10, 11];
+
+/// The menu is a fixed grid so its height can be measured before it is built.
+const MENU_WIDTH: f32 = 228.;
+const MENU_ROW: f32 = 26.;
+
+/// The indices of `MENU_ITEMS` a menu shows for this target.
+fn visible_menu_items(root: bool) -> Vec<usize> {
+    MENU_ITEMS
+        .iter()
+        .enumerate()
+        .filter(|(_, (item, _, _))| !root || item.applies_to_root())
+        .map(|(index, _)| index)
+        .collect()
+}
+
+fn shortcut_label(shortcut: &str) -> String {
+    if cfg!(target_os = "macos") || shortcut.is_empty() {
+        shortcut.to_string()
+    } else {
+        shortcut
+            .replace('⌘', "Ctrl+")
+            .replace('⇧', "Shift+")
+            .replace('⌥', "Alt+")
+            .replace('⌫', "Backspace")
+            .replace('⌦', "Delete")
+    }
+}
+
+/// The `KeyDownEvent` key name for the glyph a shortcut label ends with.
+fn shortcut_key(shortcut: &str) -> Option<String> {
+    let key = shortcut.chars().last()?;
+    Some(match key {
+        '⌫' => "backspace".into(),
+        '⌦' => "delete".into(),
+        '↩' => "enter".into(),
+        '⎋' => "escape".into(),
+        key => key.to_lowercase().to_string(),
+    })
+}
+
+/// Whether a keystroke is the platform's form of one of the shortcuts the menu
+/// prints, so those labels are real bindings while the menu is open.
+fn matches_shortcut(keystroke: &Keystroke, shortcut: &str) -> bool {
+    let Some(key) = shortcut_key(shortcut) else {
+        return false;
+    };
+    if keystroke.key.to_lowercase() != key {
+        return false;
+    }
+    let modifiers = keystroke.modifiers;
+    let command = if cfg!(target_os = "macos") {
+        modifiers.platform
+    } else {
+        modifiers.control
+    };
+    command == shortcut.contains('⌘')
+        && modifiers.shift == shortcut.contains('⇧')
+        && modifiers.alt == shortcut.contains('⌥')
+}
+
+/// Total menu height including separators and the 4px inner padding.
+fn menu_height(root: bool) -> f32 {
+    let visible = visible_menu_items(root);
+    let separators = visible
+        .iter()
+        .enumerate()
+        .filter(|(position, index)| *position > 0 && MENU_SEPARATORS.contains(index))
+        .count();
+    visible.len() as f32 * MENU_ROW + separators as f32 * 9. + 8.
+}
+
+/// An open right-click menu, anchored where the pointer was.
+struct TreeMenu {
+    /// The folder the menu acts on.
+    path: PathBuf,
+    /// Whether the target is the project root, which drops the entries that
+    /// only make sense for an entry inside the project.
+    root: bool,
+    position: Point<Pixels>,
+    /// Index into `MENU_ITEMS`, for the keyboard and the highlight.
+    selected: usize,
+}
+
+/// The in-app file clipboard behind Cut / Copy / Paste.
+#[derive(Clone)]
+struct FileClipboard {
+    path: PathBuf,
+    /// Cut moves the entry on paste; copy leaves the source alone.
+    cut: bool,
+}
+
+/// A tree row currently being typed into: a new entry being named, or an
+/// existing one being renamed. The filesystem is only touched on Enter.
+struct InlineEdit {
+    /// Folder that will receive a new entry, or that holds the renamed one.
+    parent: PathBuf,
+    kind: EntryKind,
+    /// The entry being renamed, or `None` when this is a new entry.
+    renaming: Option<PathBuf>,
+    /// Row the text field occupies. `rebuild_rows` keeps this in step with the
+    /// list it splices into.
+    row: usize,
+    input: Entity<InputState>,
+    _subscription: Subscription,
 }
 
 /// One line of the project-search results list. File headers and matches share
@@ -118,6 +272,8 @@ struct SearchState {
     options: search::Options,
     /// The query the current results were produced from.
     query: String,
+    /// Set by "Find in Folder", which narrows the scan to one subtree.
+    scope: Option<PathBuf>,
     results: Vec<search::FileHits>,
     rows: Vec<SearchRow>,
     /// Index into `rows`; always a `SearchRow::Hit` when the list is not empty.
@@ -178,6 +334,12 @@ pub struct Folio {
     panel: Option<Panel>,
     matches: Vec<PathBuf>,
     match_selected: usize,
+    /// The open right-click menu, if any.
+    menu: Option<TreeMenu>,
+    /// Where Cut / Copy put the entry, and whether it was a cut.
+    clipboard: Option<FileClipboard>,
+    /// The tree row being named, if any.
+    editing: Option<InlineEdit>,
     search_query: Entity<InputState>,
     replace_query: Entity<InputState>,
     search: SearchState,
@@ -265,6 +427,9 @@ impl Folio {
             panel: None,
             matches: vec![],
             match_selected: 0,
+            menu: None,
+            clipboard: None,
+            editing: None,
             search_query,
             replace_query,
             search: SearchState::default(),
@@ -572,13 +737,22 @@ impl Folio {
     }
 
     fn refresh_project(&mut self, cx: &mut Context<Self>) {
+        let Some(root) = self.project.workspace.as_ref().map(|w| w.root.clone()) else {
+            return;
+        };
+        self.refresh_recent(RecentAction::Open(root), cx);
+        self.reindex(cx);
+        self.refresh_git(cx);
+    }
+
+    /// Rebuild the flat index that quick-open and project search read.
+    fn reindex(&mut self, cx: &mut Context<Self>) {
         let Some(workspace) = &self.project.workspace else {
             return;
         };
         self.project.indexing = true;
         let project_id = self.project.id;
         let root = workspace.root.clone();
-        self.refresh_recent(RecentAction::Open(root.clone()), cx);
         let task = cx
             .background_executor()
             .spawn(async move { tree::index(&root) });
@@ -602,7 +776,6 @@ impl Folio {
             });
         })
         .detach();
-        self.refresh_git(cx);
     }
 
     fn refresh_git(&mut self, cx: &mut Context<Self>) {
@@ -666,6 +839,62 @@ impl Folio {
             .project
             .selected_row
             .min(self.project.rows.len().saturating_sub(1));
+
+        // The row being named is not on disk under its new name yet, so it is
+        // spliced in after the flattening pass: renaming takes over the entry's
+        // own row, creating adds one in front of the folder's children.
+        let edit = self.editing.as_ref().map(|edit| {
+            (
+                edit.parent.clone(),
+                edit.kind,
+                edit.renaming.clone(),
+                edit.renaming.as_ref().and_then(|path| {
+                    self.project
+                        .rows
+                        .iter()
+                        .position(|row| &row.entry.path == path)
+                }),
+            )
+        });
+        if let Some((parent, kind, renaming, taken)) = edit {
+            // Collapsing the folder took the renamed entry's row away; there is
+            // nothing left to type into.
+            if renaming.is_some() && taken.is_none() {
+                self.editing = None;
+                return;
+            }
+            let (index, depth) = match taken {
+                Some(index) => (index, self.project.rows[index].depth),
+                None => {
+                    let parent_row = self
+                        .project
+                        .rows
+                        .iter()
+                        .position(|row| row.entry.path == parent);
+                    match (parent_row, &self.project.workspace) {
+                        (Some(index), _) => (index + 1, self.project.rows[index].depth + 1),
+                        (None, Some(workspace)) if parent == workspace.root => (0, 0),
+                        (None, _) => (self.project.rows.len(), 0),
+                    }
+                }
+            };
+            // A placeholder path that can never collide with a real entry: NUL
+            // is illegal in a path on every platform we build for.
+            let entry = Entry {
+                path: renaming.unwrap_or_else(|| parent.join("\0")),
+                name: String::new(),
+                kind,
+            };
+            let row = Row { entry, depth };
+            if taken.is_some() {
+                self.project.rows[index] = row;
+            } else {
+                self.project.rows.insert(index, row);
+            }
+            if let Some(edit) = self.editing.as_mut() {
+                edit.row = index;
+            }
+        }
     }
 
     fn toggle_directory(&mut self, path: PathBuf, cx: &mut Context<Self>) {
@@ -708,6 +937,609 @@ impl Folio {
             }
         }
         self.rebuild_rows();
+        cx.notify();
+    }
+
+    /// Re-read one folder into the tree cache. Unlike `toggle_directory` this
+    /// forces a fresh read, which is what a filesystem change needs.
+    fn reload_directory(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
+        if !self.project.directories.contains_key(&dir) {
+            return;
+        }
+        let project_id = self.project.id;
+        let read = dir.clone();
+        let task = cx
+            .background_executor()
+            .spawn(async move { tree::children(&read) });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                let error = match result {
+                    Ok(children) => {
+                        if let Some(project) = this.project_mut(project_id) {
+                            project.directories.insert(dir.clone(), children);
+                        }
+                        None
+                    }
+                    Err(e) => Some(e.to_string()),
+                };
+                if this.project.id == project_id {
+                    this.rebuild_rows();
+                }
+                if let Some(error) = error {
+                    this.error(error, cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Refresh everything a filesystem change invalidates: the folder that
+    /// changed, the quick-open index, and the git dots.
+    fn rescan(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
+        self.reload_directory(dir, cx);
+        self.reindex(cx);
+        self.refresh_git(cx);
+    }
+
+    /// Run a launcher — Reveal, Open, Terminal — off the UI thread.
+    fn spawn_launch<F>(&mut self, work: F, cx: &mut Context<Self>)
+    where
+        F: FnOnce() -> io::Result<()> + Send + 'static,
+    {
+        let task = cx.background_executor().spawn(async move { work() });
+        cx.spawn(async move |this, cx| {
+            if let Err(error) = task.await {
+                let _ = this.update(cx, |this, cx| this.error(error.to_string(), cx));
+            }
+        })
+        .detach();
+    }
+
+    /// Run a change to the filesystem off the UI thread. On success the folder
+    /// that changed is re-read; on failure the tree is left alone. A newly
+    /// created file is opened once it exists on disk.
+    fn spawn_change<F>(
+        &mut self,
+        dir: PathBuf,
+        open_created: bool,
+        work: F,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) where
+        F: FnOnce() -> io::Result<PathBuf> + Send + 'static,
+    {
+        let task = cx.background_executor().spawn(async move { work() });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                match result {
+                    Ok(created) => {
+                        this.rescan(dir, cx);
+                        if open_created {
+                            this.open_file(created, window, cx);
+                        }
+                    }
+                    Err(error) => this.error(error.to_string(), cx),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Rename off the UI thread. `spawn_change`'s shape is not enough here:
+    /// the caches that key off the old path have to move with the entry.
+    fn spawn_rename(
+        &mut self,
+        from: PathBuf,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let source = from.clone();
+        let task = cx
+            .background_executor()
+            .spawn(async move { fs_op::rename(&source, &name) });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                match result {
+                    Ok(renamed) => {
+                        this.remap_paths(&from, &renamed);
+                        this.rebuild_rows();
+                        let dir = renamed
+                            .parent()
+                            .map(Path::to_path_buf)
+                            .unwrap_or_else(|| renamed.clone());
+                        this.rescan(dir, cx);
+                        this.update_title(window);
+                    }
+                    Err(error) => this.error(error.to_string(), cx),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// How many open buffers under `path` hold edits that are not on disk.
+    fn unsaved_under(&self, path: &Path) -> usize {
+        self.project
+            .documents
+            .iter()
+            .filter(|(key, document)| key.starts_with(path) && document.dirty)
+            .count()
+    }
+
+    /// Deleting is irreversible, so it always asks first. Trashing is
+    /// recoverable and only asks when it would drop unsaved edits.
+    fn confirm_removal(
+        &mut self,
+        path: PathBuf,
+        trashed: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.saving || self.prompting || self.project_loading {
+            return;
+        }
+        let name = name(&path);
+        let unsaved = self.unsaved_under(&path);
+        let detail = match (trashed, unsaved) {
+            (true, unsaved) => {
+                format!("{name} 及其内容将移到废纸篓，其中 {unsaved} 个文件有未保存的修改。")
+            }
+            (false, 0) => format!("{name} 及其内容将被永久删除，无法撤销。"),
+            (false, unsaved) => format!(
+                "{name} 及其内容将被永久删除，无法撤销。其中 {unsaved} 个文件有未保存的修改。"
+            ),
+        };
+        let confirm = if trashed { "移到废纸篓" } else { "删除" };
+        self.prompting = true;
+        cx.notify();
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            confirm,
+            Some(&detail),
+            &[confirm, "取消"],
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            let answer = answer.await.unwrap_or(1);
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.prompting = false;
+                if answer == 0 {
+                    this.spawn_removal(path, trashed, window, cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Remove an entry off the UI thread, then drop everything that pointed at
+    /// it. A buffer for a file that no longer exists cannot stay open.
+    fn spawn_removal(
+        &mut self,
+        path: PathBuf,
+        trashed: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let target = path.clone();
+        let task = cx.background_executor().spawn(async move {
+            if trashed {
+                fs_op::trash(&target)
+            } else {
+                fs_op::delete(&target)
+            }
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                match result {
+                    Ok(()) => {
+                        let dir = path
+                            .parent()
+                            .map(Path::to_path_buf)
+                            .unwrap_or_else(|| path.clone());
+                        this.forget_paths(&path);
+                        this.rescan(dir, cx);
+                        this.update_title(window);
+                        let verb = if trashed {
+                            "已移到废纸篓"
+                        } else {
+                            "已删除"
+                        };
+                        this.toast(&format!("{verb} {}", name(&path)), cx);
+                    }
+                    Err(error) => this.error(error.to_string(), cx),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Forget everything that lived under `path`, which is no longer on disk.
+    fn forget_paths(&mut self, path: &Path) {
+        self.project
+            .documents
+            .retain(|key, _| !key.starts_with(path));
+        if self
+            .project
+            .active
+            .as_ref()
+            .is_some_and(|key| key.starts_with(path))
+        {
+            self.project.active = None;
+        }
+        if self
+            .project
+            .image
+            .as_ref()
+            .is_some_and(|(key, _)| key.starts_with(path))
+        {
+            self.project.image = None;
+        }
+        self.project.expanded.retain(|key| !key.starts_with(path));
+        self.project
+            .directories
+            .retain(|key, _| !key.starts_with(path));
+    }
+
+    /// Re-key the state that pointed at `from`, now that it lives at `to`. A
+    /// renamed folder takes its whole subtree with it.
+    fn remap_paths(&mut self, from: &Path, to: &Path) {
+        fn moved(path: &Path, from: &Path, to: &Path) -> Option<PathBuf> {
+            let rest = path.strip_prefix(from).ok()?;
+            Some(if rest.as_os_str().is_empty() {
+                to.to_path_buf()
+            } else {
+                to.join(rest)
+            })
+        }
+        let documents = std::mem::take(&mut self.project.documents);
+        self.project.documents = documents
+            .into_iter()
+            .map(|(path, document)| (moved(&path, from, to).unwrap_or(path), document))
+            .collect();
+        if let Some(active) = self.project.active.take() {
+            self.project.active = Some(moved(&active, from, to).unwrap_or(active));
+        }
+        if let Some((image, render)) = self.project.image.take() {
+            self.project.image = Some((moved(&image, from, to).unwrap_or(image), render));
+        }
+        let expanded = std::mem::take(&mut self.project.expanded);
+        self.project.expanded = expanded
+            .into_iter()
+            .map(|path| moved(&path, from, to).unwrap_or(path))
+            .collect();
+        let directories = std::mem::take(&mut self.project.directories);
+        self.project.directories = directories
+            .into_iter()
+            .map(|(path, entries)| (moved(&path, from, to).unwrap_or(path), entries))
+            .collect();
+    }
+
+    /// Open the context menu over `path`, flipped when it would overhang the
+    /// window's bottom or right edge.
+    fn open_menu(
+        &mut self,
+        path: PathBuf,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // The project root has no row of its own, so only its header can name
+        // it, and a menu opened there drops the entry-level actions.
+        let root = self
+            .project
+            .workspace
+            .as_ref()
+            .is_some_and(|w| w.root == path);
+        let size = window.viewport_size();
+        let (x, y) = (f32::from(position.x), f32::from(position.y));
+        let height = menu_height(root);
+        let x = if x + MENU_WIDTH + 8. > f32::from(size.width) {
+            (x - MENU_WIDTH).max(8.)
+        } else {
+            x
+        };
+        let y = if y + height + 8. > f32::from(size.height) {
+            (y - height).max(8.)
+        } else {
+            y
+        };
+        self.menu = Some(TreeMenu {
+            path,
+            root,
+            position: point(px(x), px(y)),
+            selected: visible_menu_items(root).first().copied().unwrap_or(0),
+        });
+        cx.notify();
+    }
+
+    fn close_menu(&mut self, cx: &mut Context<Self>) {
+        if self.menu.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    fn menu_item_enabled(&self, item: MenuItem) -> bool {
+        match item {
+            MenuItem::Paste => self.clipboard.is_some(),
+            _ => true,
+        }
+    }
+
+    /// Move the keyboard highlight to the next or previous visible entry.
+    fn move_menu_selection(&mut self, down: bool) {
+        let Some(menu) = self.menu.as_ref() else {
+            return;
+        };
+        let visible = visible_menu_items(menu.root);
+        let current = visible.iter().position(|&index| index == menu.selected);
+        let next = match (current, down) {
+            (Some(current), true) => (current + 1).min(visible.len().saturating_sub(1)),
+            (Some(current), false) => current.saturating_sub(1),
+            (None, true) => 0,
+            (None, false) => visible.len().saturating_sub(1),
+        };
+        let Some(&index) = visible.get(next) else {
+            return;
+        };
+        if let Some(menu) = self.menu.as_mut() {
+            menu.selected = index;
+        }
+    }
+
+    fn run_menu_item(&mut self, item: MenuItem, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(menu) = self.menu.take() else {
+            return;
+        };
+        if !self.menu_item_enabled(item) {
+            cx.notify();
+            return;
+        }
+        let path = menu.path;
+        match item {
+            MenuItem::NewFile => self.begin_create(path, EntryKind::File, window, cx),
+            MenuItem::NewFolder => self.begin_create(path, EntryKind::Directory, window, cx),
+            MenuItem::FindInFolder => self.show_search_in(path, window, cx),
+            MenuItem::Rename => self.begin_rename(path, window, cx),
+            MenuItem::Cut | MenuItem::Copy => {
+                let cut = item == MenuItem::Cut;
+                self.clipboard = Some(FileClipboard {
+                    path: path.clone(),
+                    cut,
+                });
+                let verb = if cut { "已剪切" } else { "已复制" };
+                self.toast(&format!("{verb} {}", name(&path)), cx);
+            }
+            MenuItem::Duplicate => {
+                let source = path.clone();
+                self.spawn_change(path, false, move || fs_op::duplicate(&source), window, cx);
+            }
+            MenuItem::Paste => {
+                let Some(clipboard) = self.clipboard.clone() else {
+                    return;
+                };
+                let into = path.clone();
+                self.spawn_change(
+                    path,
+                    false,
+                    move || fs_op::paste(&clipboard.path, &into, clipboard.cut),
+                    window,
+                    cx,
+                );
+                // A cut is spent once it lands; a copy can be pasted again.
+                if clipboard.cut {
+                    self.clipboard = None;
+                }
+            }
+            // Trashing is recoverable, so it only stops to warn about edits
+            // that are not on disk yet. Deleting never is.
+            MenuItem::Trash if self.unsaved_under(&path) > 0 => {
+                self.confirm_removal(path, true, window, cx)
+            }
+            MenuItem::Trash => self.spawn_removal(path, true, window, cx),
+            MenuItem::Delete => self.confirm_removal(path, false, window, cx),
+            MenuItem::Reveal => {
+                let target = path.clone();
+                self.spawn_launch(move || fs_op::reveal(&target), cx);
+            }
+            MenuItem::OpenDefault => {
+                let target = path.clone();
+                self.spawn_launch(move || fs_op::open_default(&target), cx);
+            }
+            MenuItem::OpenTerminal => {
+                let target = path.clone();
+                self.spawn_launch(move || fs_op::open_terminal(&target), cx);
+            }
+        }
+    }
+
+    /// Splice a text field into the tree for a new entry under `parent`. The
+    /// entry is created on Enter; Escape creates nothing.
+    fn begin_create(
+        &mut self,
+        parent: PathBuf,
+        kind: EntryKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.project.workspace.is_none() || self.project_loading || self.prompting {
+            return;
+        }
+        self.editing = None;
+        // The field needs a row to sit in, so open the folder it will go into.
+        // A folder that was never opened has no children cached yet, which is
+        // exactly the case `toggle_directory` also reads on demand.
+        if !self.project.expanded.contains(&parent) {
+            self.toggle_directory(parent.clone(), cx);
+        }
+        let placeholder = match kind {
+            EntryKind::Directory => "文件夹名称",
+            EntryKind::File => "文件名称",
+        };
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
+        let subscription = Self::subscribe_edit(&input, window, cx);
+        self.editing = Some(InlineEdit {
+            parent,
+            kind,
+            renaming: None,
+            row: 0,
+            input: input.clone(),
+            _subscription: subscription,
+        });
+        self.rebuild_rows();
+        if let Some(edit) = &self.editing {
+            self.project
+                .tree_scroll
+                .scroll_to_item(edit.row, ScrollStrategy::Nearest);
+        }
+        input.update(cx, |input, cx| input.focus(window, cx));
+        cx.notify();
+    }
+
+    /// Turn a tree row into a text field holding the entry's current name. The
+    /// row already exists, so unlike creating there is nothing to splice in.
+    fn begin_rename(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        if self.project_loading || self.prompting || self.editing.is_some() {
+            return;
+        }
+        let Some(row) = self.project.rows.iter().find(|row| row.entry.path == path) else {
+            return;
+        };
+        let (kind, name) = (row.entry.kind, row.entry.name.clone());
+        let Some(parent) = path.parent().map(Path::to_path_buf) else {
+            return;
+        };
+        let input = cx.new(|cx| InputState::new(window, cx));
+        // Preselect the whole name, so typing replaces it the way Finder does.
+        input.update(cx, |input, cx| {
+            input.set_value(name, window, cx);
+            input.select_all(window, cx);
+        });
+        let subscription = Self::subscribe_edit(&input, window, cx);
+        self.editing = Some(InlineEdit {
+            parent,
+            kind,
+            renaming: Some(path),
+            row: 0,
+            input: input.clone(),
+            _subscription: subscription,
+        });
+        self.rebuild_rows();
+        if let Some(edit) = &self.editing {
+            self.project
+                .tree_scroll
+                .scroll_to_item(edit.row, ScrollStrategy::Nearest);
+        }
+        input.update(cx, |input, cx| input.focus(window, cx));
+        cx.notify();
+    }
+
+    /// Enter and Escape for the field, shared by naming and renaming.
+    fn subscribe_edit(
+        input: &Entity<InputState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Subscription {
+        cx.subscribe_in(
+            input,
+            window,
+            move |this: &mut Self, input, event: &InputEvent, window, cx| {
+                if this
+                    .editing
+                    .as_ref()
+                    .is_none_or(|edit| &edit.input != input)
+                {
+                    return;
+                }
+                match event {
+                    InputEvent::PressEnter { .. } => this.commit_edit(window, cx),
+                    // A row that was never named should not linger once the
+                    // pointer moves on.
+                    InputEvent::Blur => this.cancel_create(window, cx),
+                    _ => {}
+                }
+            },
+        )
+    }
+
+    /// Keep `Document::dirty` in step with the buffer it belongs to. The
+    /// document is found by editor rather than by path, so renaming an open
+    /// file does not have to tear the subscription down and build it again —
+    /// which would be a trap, because a `Subscription` unsubscribes whatever
+    /// currently sits at its key when it is dropped.
+    fn subscribe_document(
+        editor: &Entity<EditorState>,
+        project_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Subscription {
+        let editor = editor.clone();
+        cx.subscribe_in(
+            &editor,
+            window,
+            move |this, editor, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::Change) {
+                    if let Some(doc) = this
+                        .project_mut(project_id)
+                        .and_then(|p| p.documents.values_mut().find(|doc| &doc.editor == editor))
+                    {
+                        doc.dirty = editor.read(cx).value() != doc.saved;
+                    }
+                    this.update_title(window);
+                    cx.notify();
+                }
+            },
+        )
+    }
+
+    fn cancel_create(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.editing.take().is_none() {
+            return;
+        }
+        self.rebuild_rows();
+        self.tree_focus.focus(window, cx);
+        cx.notify();
+    }
+
+    fn commit_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(edit) = &self.editing else {
+            return;
+        };
+        let name = edit.input.read(cx).value().to_string();
+        let (parent, kind, renaming) = (edit.parent.clone(), edit.kind, edit.renaming.clone());
+        self.editing = None;
+        self.rebuild_rows();
+        self.tree_focus.focus(window, cx);
+        match renaming {
+            Some(source) => self.spawn_rename(source, name, window, cx),
+            None => {
+                let dir = parent.clone();
+                let create = move || match kind {
+                    EntryKind::Directory => fs_op::create_dir(&dir, &name),
+                    EntryKind::File => fs_op::create_file(&dir, &name),
+                };
+                self.spawn_change(parent, kind == EntryKind::File, create, window, cx);
+            }
+        }
+    }
+
+    /// `Find in Folder`: the project search narrowed to one subtree.
+    fn show_search_in(&mut self, dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_search(false, window, cx);
+        if self.panel != Some(Panel::Search) {
+            return;
+        }
+        self.search.scope = Some(dir);
+        self.start_search(cx);
         cx.notify();
     }
 
@@ -800,24 +1632,9 @@ impl Folio {
                                 .base_state()
                                 .update(cx, |base, cx| base.set_soft_wrap(false, window, cx));
                         });
-                        let key = path.clone();
                         let project_id = this.project.id;
-                        let subscription = cx.subscribe_in(
-                            &editor,
-                            window,
-                            move |this, editor, event: &InputEvent, window, cx| {
-                                if matches!(event, InputEvent::Change) {
-                                    if let Some(doc) = this
-                                        .project_mut(project_id)
-                                        .and_then(|p| p.documents.get_mut(&key))
-                                    {
-                                        doc.dirty = editor.read(cx).value() != doc.saved;
-                                    }
-                                    this.update_title(window);
-                                    cx.notify();
-                                }
-                            },
-                        );
+                        let subscription =
+                            Self::subscribe_document(&editor, project_id, window, cx);
                         editor.focus_handle(cx).focus(window, cx);
                         this.project.documents.insert(
                             path.clone(),
@@ -1013,6 +1830,9 @@ impl Folio {
             return;
         }
         self.panel = Some(Panel::Search);
+        // Only "Find in Folder" narrows the scan; reopening the panel starts
+        // from the whole project again.
+        self.search.scope = None;
         if replace {
             self.search.show_replace = true;
         }
@@ -1035,6 +1855,7 @@ impl Folio {
                 self.filter(cx);
             }
             Panel::Search => {
+                self.search.scope = None;
                 self.search_query
                     .update(cx, |query, cx| query.focus(window, cx));
                 self.start_search(cx);
@@ -1114,7 +1935,10 @@ impl Folio {
                     if this.search_request.load(Ordering::Relaxed) != request {
                         return None;
                     }
-                    let files = this.project.files.clone();
+                    let mut files = this.project.files.clone();
+                    if let Some(scope) = &this.search.scope {
+                        files.retain(|path| path.starts_with(scope));
+                    }
                     let open = this
                         .project
                         .documents
@@ -1404,6 +2228,10 @@ impl Folio {
     }
 
     fn tree_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // While a row is being named the keyboard belongs to its text field.
+        if self.editing.is_some() {
+            return;
+        }
         let Some(row) = self.project.rows.get(self.project.selected_row).cloned() else {
             return;
         };
@@ -1670,6 +2498,7 @@ impl Folio {
     fn render_project_header(&self, project: &Project, cx: &mut Context<Self>) -> AnyElement {
         let root = project.workspace.as_ref().unwrap().root.clone();
         let keyboard_root = root.clone();
+        let menu_root = root.clone();
         let label = name(&root);
         let current = project.id == self.project.id;
         let expanded = current && project.expanded.contains(&root);
@@ -1696,6 +2525,28 @@ impl Folio {
             .hover(|el| el.text_color(cx.theme().accent_foreground))
             .on_click(
                 cx.listener(move |this, _, window, cx| this.select_project(&root, window, cx)),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    // The menu always acts on the project it opened over, so
+                    // make that project current and open before offering it.
+                    if this
+                        .project
+                        .workspace
+                        .as_ref()
+                        .is_none_or(|w| w.root != menu_root)
+                    {
+                        this.switch_project(&menu_root, window, cx);
+                        this.project.expanded.insert(menu_root.clone());
+                        this.rebuild_rows();
+                    }
+                    if !this.project.expanded.contains(&menu_root) {
+                        this.toggle_directory(menu_root.clone(), cx);
+                    }
+                    this.open_menu(menu_root.clone(), event.position, window, cx);
+                    cx.stop_propagation();
+                }),
             )
             .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
                 let current = this
@@ -1789,8 +2640,12 @@ impl Folio {
             cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
                 range
                     .map(|i| {
+                        if this.editing.as_ref().is_some_and(|edit| edit.row == i) {
+                            return this.render_inline_edit(cx);
+                        }
                         let row = this.project.rows[i].clone();
                         let path = row.entry.path.clone();
+                        let menu_path = path.clone();
                         let selected = this.project.active.as_ref() == Some(&path);
                         let status = this
                             .project
@@ -1833,6 +2688,27 @@ impl Folio {
                                     EntryKind::File => this.open_file(path.clone(), window, cx),
                                 }
                             }))
+                            .on_mouse_down(
+                                MouseButton::Right,
+                                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                                    // Naming another row abandons the field that
+                                    // was open, which shifts every index below it.
+                                    if this.editing.is_some() {
+                                        this.cancel_create(window, cx);
+                                    }
+                                    let index = this
+                                        .project
+                                        .rows
+                                        .iter()
+                                        .position(|row| row.entry.path == menu_path)
+                                        .unwrap_or(i);
+                                    this.project.selected_row =
+                                        index.min(this.project.rows.len().saturating_sub(1));
+                                    this.tree_focus.focus(window, cx);
+                                    this.open_menu(menu_path.clone(), event.position, window, cx);
+                                    cx.stop_propagation();
+                                }),
+                            )
                             .child(
                                 Icon::new(icon)
                                     .xsmall()
@@ -1848,6 +2724,7 @@ impl Folio {
                                     },
                                 ))
                             })
+                            .into_any_element()
                     })
                     .collect()
             }),
@@ -1855,6 +2732,143 @@ impl Folio {
         .track_scroll(&self.project.tree_scroll)
         .flex_1()
         .into_any_element()
+    }
+
+    /// The text field that names a new entry, drawn in the row it will occupy.
+    fn render_inline_edit(&self, cx: &Context<Self>) -> AnyElement {
+        let Some(edit) = &self.editing else {
+            return div().into_any_element();
+        };
+        let depth = self
+            .project
+            .rows
+            .get(edit.row)
+            .map(|row| row.depth)
+            .unwrap_or(0);
+        div()
+            .id("inline-edit")
+            .w_full()
+            .h(px(27.))
+            .pl(px(14. + depth as f32 * 14.))
+            .pr_3()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(
+                Icon::new(if edit.kind == EntryKind::Directory {
+                    IconName::Folder
+                } else {
+                    IconName::File
+                })
+                .xsmall()
+                .text_color(cx.theme().muted_foreground),
+            )
+            .child(div().flex_1().min_w_0().child(
+                // No border and no background, so the field reads as part
+                // of the row rather than a box dropped into the tree.
+                Input::new(&edit.input).appearance(false).h(px(20.)),
+            ))
+            .into_any_element()
+    }
+
+    /// Swallows the click that dismisses the menu, so the tree underneath does
+    /// not also act on it.
+    fn render_menu_backdrop(&self, cx: &Context<Self>) -> AnyElement {
+        div()
+            .id("tree-menu-backdrop")
+            .absolute()
+            .inset_0()
+            .occlude()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| this.close_menu(cx)),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, _, _, cx| this.close_menu(cx)),
+            )
+            .on_scroll_wheel(cx.listener(|this, _, _, cx| this.close_menu(cx)))
+            .into_any_element()
+    }
+
+    /// The right-click menu. Drawn last in the root stack so it covers the tree
+    /// and the lookup panel, and darker than the sidebar it opens over so the
+    /// edge is visible without relying on the shadow alone.
+    fn render_menu(&self, menu: &TreeMenu, cx: &Context<Self>) -> AnyElement {
+        let clipboard = self.clipboard.is_some();
+        div()
+            .id("tree-menu")
+            .absolute()
+            .left(menu.position.x)
+            .top(menu.position.y)
+            .w(px(MENU_WIDTH))
+            .occlude()
+            .rounded_md()
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().background)
+            .shadow_lg()
+            .p_1()
+            .flex()
+            .flex_col()
+            .text_size(px(12.))
+            .text_color(cx.theme().foreground)
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .children(
+                visible_menu_items(menu.root)
+                    .into_iter()
+                    .enumerate()
+                    .flat_map(|(position, index)| {
+                        let (item, label, shortcut) = MENU_ITEMS[index];
+                        let enabled = match item {
+                            MenuItem::Paste => clipboard,
+                            _ => true,
+                        };
+                        // A separator only ever sits between two entries.
+                        let separator =
+                            (position > 0 && MENU_SEPARATORS.contains(&index)).then(|| {
+                                div()
+                                    .h(px(1.))
+                                    .my(px(4.))
+                                    .bg(cx.theme().border)
+                                    .into_any_element()
+                            });
+                        let row = div()
+                            .id(("menu-item", index))
+                            .role(Role::Button)
+                            .aria_label(label)
+                            .h(px(MENU_ROW))
+                            .px_2()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_4()
+                            .rounded_sm()
+                            .when(index == menu.selected, |el| el.bg(cx.theme().list_active))
+                            .when(enabled, |el| {
+                                el.cursor_pointer()
+                                    .hover(|el| el.bg(cx.theme().list_hover))
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.run_menu_item(item, window, cx)
+                                    }))
+                            })
+                            .when(!enabled, |el| {
+                                el.cursor_default()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .opacity(0.5)
+                            })
+                            .child(div().child(label))
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(shortcut_label(shortcut)),
+                            )
+                            .into_any_element();
+                        separator.into_iter().chain(std::iter::once(row))
+                    }),
+            )
+            .into_any_element()
     }
 
     fn relative_path(&self, path: &Path) -> String {
@@ -2121,6 +3135,35 @@ impl Folio {
             .flex_col()
             .gap_2()
             .child(Input::new(&self.search_query).focus_bordered(false))
+            .when_some(self.search.scope.clone(), |el, scope| {
+                let relative = self.relative_path(&scope);
+                let label = if relative.is_empty() {
+                    name(&scope)
+                } else {
+                    relative
+                };
+                el.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .px_2()
+                        .text_size(px(11.))
+                        .text_color(cx.theme().muted_foreground)
+                        .child(format!("范围：{label}"))
+                        .child(Self::icon_button(
+                            "search-scope-clear",
+                            IconName::Close,
+                            "在整个项目中搜索",
+                            |this, _, cx| {
+                                this.search.scope = None;
+                                this.start_search(cx);
+                                cx.notify();
+                            },
+                            cx,
+                        )),
+                )
+            })
             .when(self.search.show_replace, |el| {
                 el.child(
                     div()
@@ -2606,6 +3649,57 @@ impl Render for Folio {
                 }
             }))
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                // The menu sits on top of everything, so it gets first refusal
+                // on every key while it is open.
+                if this.menu.is_some() {
+                    match event.keystroke.key.as_str() {
+                        "escape" => this.close_menu(cx),
+                        "up" => this.move_menu_selection(false),
+                        "down" => this.move_menu_selection(true),
+                        "enter" => {
+                            if let Some(item) = this
+                                .menu
+                                .as_ref()
+                                .and_then(|menu| MENU_ITEMS.get(menu.selected))
+                                .map(|(item, _, _)| *item)
+                            {
+                                this.run_menu_item(item, window, cx);
+                            }
+                        }
+                        _ => {
+                            let Some(visible) =
+                                this.menu.as_ref().map(|menu| visible_menu_items(menu.root))
+                            else {
+                                return;
+                            };
+                            let Some(item) = visible
+                                .iter()
+                                .filter_map(|index| MENU_ITEMS.get(*index))
+                                .find(|(_, _, shortcut)| {
+                                    matches_shortcut(&event.keystroke, shortcut)
+                                })
+                                .map(|(item, _, _)| *item)
+                            else {
+                                // Anything else keeps its usual meaning.
+                                return;
+                            };
+                            this.run_menu_item(item, window, cx);
+                        }
+                    }
+                    cx.stop_propagation();
+                    cx.notify();
+                    return;
+                }
+                // Escape has to be caught here: the input owns the key context
+                // while a row is being named.
+                if this.editing.is_some() {
+                    if event.keystroke.key == "escape" {
+                        this.cancel_create(window, cx);
+                        cx.stop_propagation();
+                        cx.notify();
+                    }
+                    return;
+                }
                 let Some(panel) = this.panel else {
                     return;
                 };
@@ -2645,6 +3739,12 @@ impl Render for Folio {
             )
             .when_some(self.panel, |el, panel| {
                 el.child(self.render_panel(panel, cx))
+            })
+            .when(self.menu.is_some(), |el| {
+                el.child(self.render_menu_backdrop(cx))
+            })
+            .when_some(self.menu.as_ref(), |el, menu| {
+                el.child(self.render_menu(menu, cx))
             })
             .when_some(self.message.clone(), |el, message| {
                 el.child(
@@ -3197,6 +4297,236 @@ mod tests {
         view.update_in(cx, |app, _, _| {
             assert_eq!(app.total_hits(), 3, "the search re-runs after a replace");
             assert_eq!(app.search.results.len(), 3);
+        });
+    }
+
+    /// The tree context menu end to end: the row it splices in, the entry it
+    /// writes, and the clipboard it moves entries with. Reveal / Open in
+    /// Default App / Open in Terminal are left alone — they hand the path to
+    /// the OS, which during a test run would open Finder and a terminal.
+    #[gpui::test]
+    fn tree_context_menu_creates_moves_and_duplicates_entries(cx: &mut TestAppContext) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let src = root.join("src");
+        std::fs::create_dir(&src).unwrap();
+        std::fs::write(src.join("lib.rs"), "// child\n").unwrap();
+        cx.update(gpui_component::init);
+        let cx = cx.add_empty_window();
+        let view = cx.update(|window, cx| {
+            cx.new(|cx| {
+                let mut app = Folio::new(window, cx);
+                app.recent_task = None;
+                app.recent_file = root.join("recent.json");
+                app
+            })
+        });
+        view.update_in(cx, |app, window, cx| {
+            app.request(Next::Open(root.clone()), window, cx)
+        });
+        cx.run_until_parked();
+
+        view.update_in(cx, |app, window, cx| {
+            assert!(
+                !app.menu_item_enabled(MenuItem::Paste),
+                "paste stays disabled until something is on the clipboard"
+            );
+            app.open_menu(src.clone(), point(px(120.), px(200.)), window, cx);
+            assert!(app.menu.is_some());
+            // The harness never draws, so build the element tree by hand to
+            // exercise the menu's rendering.
+            let _ = app.render(window, cx);
+            app.move_menu_selection(true);
+            assert_eq!(app.menu.as_ref().unwrap().selected, 1);
+            assert!(app.menu_item_enabled(MENU_ITEMS[1].0));
+
+            app.run_menu_item(MenuItem::NewFile, window, cx);
+            assert!(app.menu.is_none(), "choosing an item closes the menu");
+            let edit = app.editing.as_ref().expect("the row is being named");
+            assert_eq!(edit.kind, EntryKind::File);
+            assert_eq!(edit.parent, src);
+            // The field is spliced in as the folder's first child, one level
+            // deeper than the folder's own row.
+            assert_eq!(app.project.rows[edit.row - 1].entry.path, src);
+            assert_eq!(app.project.rows[edit.row].depth, 1);
+            // That row draws a text field instead of an entry; render it too.
+            let _ = app.render(window, cx);
+        });
+
+        // Enter is what creates the entry, so nothing exists yet.
+        assert!(!src.join("笔记.md").exists());
+        view.update_in(cx, |app, window, cx| {
+            let input = app.editing.as_ref().unwrap().input.clone();
+            input.update(cx, |input, cx| input.set_value("笔记.md", window, cx));
+            app.commit_edit(window, cx);
+            assert!(app.editing.is_none());
+        });
+        cx.run_until_parked();
+        let note = src.join("笔记.md");
+        assert!(note.is_file(), "the named file must exist on disk");
+        view.update_in(cx, |app, _, _| {
+            assert!(app.project.rows.iter().any(|row| row.entry.path == note));
+            assert_eq!(app.project.active.as_ref(), Some(&note));
+        });
+
+        // Escape abandons the row without touching the filesystem.
+        let before = std::fs::read_dir(&src).unwrap().count();
+        view.update_in(cx, |app, window, cx| {
+            app.begin_create(src.clone(), EntryKind::Directory, window, cx);
+            assert!(app.editing.is_some());
+            app.cancel_create(window, cx);
+            assert!(app.editing.is_none());
+        });
+        assert_eq!(std::fs::read_dir(&src).unwrap().count(), before);
+
+        // A name the filesystem cannot hold is reported, not written.
+        view.update_in(cx, |app, window, cx| {
+            app.begin_create(src.clone(), EntryKind::File, window, cx);
+            let input = app.editing.as_ref().unwrap().input.clone();
+            input.update(cx, |input, cx| input.set_value("a/b", window, cx));
+            app.commit_edit(window, cx);
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |app, _, _| {
+            assert!(
+                app.message
+                    .as_deref()
+                    .is_some_and(|message| message.contains("路径分隔符")),
+                "an unusable name must surface as a message"
+            );
+        });
+
+        // Cut then paste moves the entry and empties the clipboard.
+        view.update_in(cx, |app, window, cx| {
+            app.open_menu(note.clone(), point(px(120.), px(200.)), window, cx);
+            app.run_menu_item(MenuItem::Cut, window, cx);
+            assert_eq!(app.clipboard.as_ref().map(|entry| entry.cut), Some(true));
+            app.open_menu(root.clone(), point(px(40.), px(40.)), window, cx);
+            app.run_menu_item(MenuItem::Paste, window, cx);
+            assert!(app.clipboard.is_none(), "a cut is spent once it lands");
+        });
+        cx.run_until_parked();
+        let moved = root.join("笔记.md");
+        assert!(moved.is_file() && !note.exists());
+
+        // Copy leaves the source behind, so the name is taken in `src` again.
+        view.update_in(cx, |app, window, cx| {
+            app.open_menu(moved.clone(), point(px(40.), px(40.)), window, cx);
+            app.run_menu_item(MenuItem::Copy, window, cx);
+            app.open_menu(src.clone(), point(px(40.), px(40.)), window, cx);
+            app.run_menu_item(MenuItem::Paste, window, cx);
+            assert_eq!(app.clipboard.as_ref().map(|entry| entry.cut), Some(false));
+        });
+        cx.run_until_parked();
+        assert!(src.join("笔记.md").is_file() && moved.is_file());
+
+        view.update_in(cx, |app, window, cx| {
+            app.open_menu(moved.clone(), point(px(40.), px(40.)), window, cx);
+            app.run_menu_item(MenuItem::Duplicate, window, cx);
+        });
+        cx.run_until_parked();
+        assert!(root.join("笔记 副本.md").is_file());
+
+        // Find in Folder narrows the project search to the folder it opened on.
+        view.update_in(cx, |app, window, cx| {
+            app.open_menu(src.clone(), point(px(40.), px(40.)), window, cx);
+            app.run_menu_item(MenuItem::FindInFolder, window, cx);
+            assert_eq!(app.panel, Some(Panel::Search));
+            assert_eq!(app.search.scope.as_deref(), Some(src.as_path()));
+        });
+
+        // Reopening the panel from the keyboard clears that scope again.
+        view.update_in(cx, |app, window, cx| {
+            app.show_search(false, window, cx);
+            assert!(app.search.scope.is_none());
+        });
+
+        // The project root is the workspace's identity, so its menu drops the
+        // entries that would rename or remove it.
+        let labels = |root: bool| {
+            visible_menu_items(root)
+                .into_iter()
+                .map(|index| MENU_ITEMS[index].1)
+                .collect::<Vec<_>>()
+        };
+        for dropped in ["Rename", "Move to Trash", "Delete Immediately"] {
+            assert!(!labels(true).contains(&dropped), "{dropped} on the root");
+            assert!(
+                labels(false).contains(&dropped),
+                "{dropped} inside a folder"
+            );
+        }
+        view.update_in(cx, |app, window, cx| {
+            app.open_menu(root.clone(), point(px(40.), px(40.)), window, cx);
+            assert!(app.menu.as_ref().unwrap().root);
+            app.open_menu(src.clone(), point(px(40.), px(40.)), window, cx);
+            assert!(!app.menu.as_ref().unwrap().root);
+            app.close_menu(cx);
+        });
+
+        // Rename moves the entry and takes the caches keyed off its path with
+        // it, including an open buffer.
+        let library = src.join("lib.rs");
+        view.update_in(cx, |app, window, cx| {
+            app.open_file(library.clone(), window, cx)
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |app, window, cx| {
+            app.open_menu(library.clone(), point(px(120.), px(200.)), window, cx);
+            app.run_menu_item(MenuItem::Rename, window, cx);
+            let edit = app.editing.as_ref().expect("the row is being renamed");
+            assert_eq!(edit.renaming.as_deref(), Some(library.as_path()));
+            // The field takes over the entry's own row instead of adding one.
+            assert_eq!(app.project.rows[edit.row].entry.path, library);
+            let input = edit.input.clone();
+            input.update(cx, |input, cx| input.set_value("core.rs", window, cx));
+            app.commit_edit(window, cx);
+        });
+        cx.run_until_parked();
+        let core = src.join("core.rs");
+        assert!(core.is_file() && !library.exists());
+        // The open buffer moved with it under its new key, and the entries that
+        // were not renamed stayed where they were.
+        view.update_in(cx, |app, _, _| {
+            assert!(app.project.documents.contains_key(&core));
+            assert_eq!(app.project.active.as_ref(), Some(&core));
+            assert!(app.project.documents.contains_key(&src.join("笔记.md")));
+        });
+
+        // Trashing is recoverable, so it only stops when it would drop edits
+        // that are not on disk. Cancelling must leave the folder alone.
+        view.update_in(cx, |app, window, cx| {
+            // The test harness cannot drive the editor's change events, so put
+            // the open buffer into the state a real edit would leave it in.
+            app.project.documents.get_mut(&core).unwrap().dirty = true;
+            assert_eq!(app.unsaved_under(&src), 1);
+            app.open_menu(src.clone(), point(px(40.), px(40.)), window, cx);
+            app.run_menu_item(MenuItem::Trash, window, cx);
+        });
+        assert!(cx.has_pending_prompt());
+        cx.simulate_prompt_answer("取消");
+        cx.run_until_parked();
+        assert!(src.is_dir() && core.is_file());
+
+        // Delete always asks, because nothing about it can be undone.
+        let doomed = root.join("doomed");
+        std::fs::create_dir(&doomed).unwrap();
+        std::fs::write(doomed.join("inner.txt"), "x").unwrap();
+        view.update_in(cx, |app, window, cx| {
+            app.open_menu(doomed.clone(), point(px(40.), px(40.)), window, cx);
+            app.run_menu_item(MenuItem::Delete, window, cx);
+        });
+        assert!(cx.has_pending_prompt());
+        cx.simulate_prompt_answer("删除");
+        cx.run_until_parked();
+        assert!(!doomed.exists(), "the whole subtree must go");
+        view.update_in(cx, |app, _, _| {
+            assert!(
+                app.message
+                    .as_deref()
+                    .is_some_and(|message| message.contains("已删除")),
+                "a successful delete reports back instead of erroring"
+            );
         });
     }
 }

@@ -1,4 +1,4 @@
-use folio::{buffer, recent, search, tree, workspace::Workspace};
+use folio::{buffer, fs_op, recent, search, tree, workspace::Workspace};
 use std::fs;
 
 #[test]
@@ -206,5 +206,119 @@ fn git_status_and_save_failures_keep_existing_data() {
                 .resolve(&root.join("escape"))
                 .is_err()
         );
+    }
+}
+
+#[test]
+fn context_menu_file_operations_never_clobber() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("项目 ops");
+    fs::create_dir_all(&root).unwrap();
+
+    // Names that would escape the containing folder, or address nothing.
+    assert!(fs_op::validate_name("").is_err());
+    assert!(fs_op::validate_name("   ").is_err());
+    assert!(fs_op::validate_name("..").is_err());
+    assert!(fs_op::validate_name("a/b").is_err());
+    assert!(fs_op::validate_name("笔记.md").is_ok());
+
+    let file = fs_op::create_file(&root, "笔记.md").unwrap();
+    // Creating again must fail rather than truncate what is already there.
+    assert!(fs_op::create_file(&root, "笔记.md").is_err());
+    assert!(fs_op::create_dir(&root, "笔记.md").is_err());
+    fs::write(&file, "hello").unwrap();
+
+    assert!(fs_op::create_dir(&root, "稿件").is_ok());
+    assert!(fs_op::create_dir(&root, "稿件").is_err());
+
+    // Duplicates land beside the original and bump the suffix instead of
+    // colliding with an earlier copy.
+    let copy = fs_op::duplicate(&file).unwrap();
+    assert_eq!(copy.file_name().unwrap().to_string_lossy(), "笔记 副本.md");
+    assert_eq!(fs::read_to_string(&copy).unwrap(), "hello");
+    let second = fs_op::duplicate(&file).unwrap();
+    assert_eq!(
+        second.file_name().unwrap().to_string_lossy(),
+        "笔记 副本 2.md"
+    );
+
+    // A folder duplicate carries its whole tree.
+    fs::create_dir_all(root.join("src/inner")).unwrap();
+    fs::write(root.join("src/inner/deep.txt"), "deep").unwrap();
+    let tree_copy = fs_op::duplicate(&root.join("src")).unwrap();
+    assert_eq!(
+        fs::read_to_string(tree_copy.join("inner/deep.txt")).unwrap(),
+        "deep"
+    );
+
+    let dest = root.join("dest");
+    fs::create_dir(&dest).unwrap();
+    let pasted = fs_op::paste(&copy, &dest, false).unwrap();
+    assert!(copy.is_file(), "a copy leaves the source in place");
+    assert_eq!(pasted.file_name().unwrap(), copy.file_name().unwrap());
+    // The name is taken, so a second paste refuses instead of overwriting.
+    assert!(fs_op::paste(&copy, &dest, false).is_err());
+
+    // A cut moves the entry and leaves nothing behind.
+    fs::remove_file(&pasted).unwrap();
+    let moved = fs_op::paste(&copy, &dest, true).unwrap();
+    assert!(!copy.exists());
+    assert!(moved.is_file());
+
+    assert!(fs_op::paste(&moved, &dest, false).is_err());
+    let folder = root.join("src");
+    assert!(fs_op::paste(&folder, &folder, false).is_err());
+    assert!(fs_op::paste(&folder, &folder.join("inner"), false).is_err());
+}
+
+#[test]
+fn rename_refuses_to_clobber_and_delete_removes_whole_trees() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("项目 rename");
+    fs::create_dir_all(root.join("src/inner")).unwrap();
+    fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
+    fs::write(root.join("src/inner/deep.txt"), "deep").unwrap();
+    fs::write(root.join("taken.rs"), "// taken\n").unwrap();
+
+    // A rename inside the same folder keeps the contents.
+    let renamed = fs_op::rename(&root.join("taken.rs"), "free.rs").unwrap();
+    assert_eq!(renamed, root.join("free.rs"));
+    assert_eq!(fs::read_to_string(&renamed).unwrap(), "// taken\n");
+    assert!(!root.join("taken.rs").exists());
+
+    // Names that are already taken, or that cannot exist, are refused.
+    fs::write(root.join("other.rs"), "").unwrap();
+    assert!(fs_op::rename(&root.join("free.rs"), "other.rs").is_err());
+    assert!(fs_op::rename(&root.join("free.rs"), "a/b").is_err());
+    assert!(fs_op::rename(&root.join("free.rs"), "..").is_err());
+    assert!(root.join("free.rs").is_file());
+
+    // A no-op rename is allowed rather than treated as a collision.
+    assert_eq!(
+        fs_op::rename(&root.join("free.rs"), "free.rs").unwrap(),
+        root.join("free.rs")
+    );
+
+    // Folders rename with their subtree.
+    let moved = fs_op::rename(&root.join("src"), "source").unwrap();
+    assert_eq!(
+        fs::read_to_string(moved.join("inner/deep.txt")).unwrap(),
+        "deep"
+    );
+    assert!(!root.join("src").exists());
+
+    // Delete takes a whole tree, and a missing path is an error rather than a
+    // silent success.
+    fs_op::delete(&moved).unwrap();
+    assert!(!moved.exists());
+    assert!(fs_op::delete(&moved).is_err());
+
+    #[cfg(unix)]
+    {
+        // A case-only rename asks for a name that already "exists" on a
+        // case-insensitive volume, but it is the entry being renamed.
+        fs::write(root.join("case.rs"), "x").unwrap();
+        let upper = fs_op::rename(&root.join("case.rs"), "Case.rs").unwrap();
+        assert_eq!(upper.file_name().unwrap().to_string_lossy(), "Case.rs");
     }
 }
