@@ -1755,6 +1755,10 @@ impl InputBaseState {
     }
 
     pub(super) fn backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selections.len() > 1 {
+            self.delete_at_every_selection(false, window, cx);
+            return;
+        }
         if self.selections.primary().is_empty() {
             self.select_to(self.previous_boundary(self.cursor()), cx)
         }
@@ -1763,6 +1767,10 @@ impl InputBaseState {
     }
 
     pub(super) fn delete(&mut self, _: &Delete, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selections.len() > 1 {
+            self.delete_at_every_selection(true, window, cx);
+            return;
+        }
         if self.selections.primary().is_empty() {
             self.select_to(self.next_boundary(self.cursor()), cx)
         }
@@ -1881,17 +1889,21 @@ impl InputBaseState {
         let insert_newline = self.mode.is_multi_line() && (!self.submit_on_enter || action.shift);
 
         if insert_newline {
-            // Get current line indent
-            let indent = if self.mode.is_code_editor() {
-                self.indent_of_next_line()
+            if self.selections.len() > 1 {
+                self.insert_line_break_at_every_selection(window, cx);
             } else {
-                "".to_string()
-            };
+                // Get current line indent
+                let indent = if self.mode.is_code_editor() {
+                    self.indent_of_next_line()
+                } else {
+                    "".to_string()
+                };
 
-            // Add newline and indent
-            let new_line_text = format!("\n{}", indent);
-            self.replace_text_in_range_silent(None, &new_line_text, window, cx);
-            self.pause_blink_cursor(cx);
+                // Add newline and indent
+                let new_line_text = format!("\n{}", indent);
+                self.replace_text_in_range_silent(None, &new_line_text, window, cx);
+                self.pause_blink_cursor(cx);
+            }
         } else {
             // Single line input or submit-on-enter: just emit the event
             // (e.g.: in a dialog to confirm, or a chat textarea to send).
@@ -1923,6 +1935,12 @@ impl InputBaseState {
 
         if self.ime_marked_range.is_some() {
             self.unmark_text(window, cx);
+        }
+
+        // An escape with a set of cursors takes it back to the one cursor,
+        // rather than reaching past the editor with it.
+        if self.collapse_selections(cx) {
+            return;
         }
 
         if self.clean_on_escape {
@@ -2230,16 +2248,32 @@ impl InputBaseState {
     }
 
     pub(super) fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
-        if self.selections.primary().is_empty() {
+        // Any of them, not just the one the cursor is in: a set can hold a
+        // caret and a selection at once, and the selection is the text.
+        if self.selections.all().iter().all(|s| s.is_empty()) {
             return;
         }
 
-        let selected_text = self.text.slice(self.selections.primary()).to_string();
+        // Every selection, one per line: copying all of them and pasting into
+        // somewhere else has to give back what was on screen.
+        let selected_text = self
+            .selections
+            .in_text_order()
+            .iter()
+            .map(|selection| self.text.slice(*selection).to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
         cx.write_to_clipboard(ClipboardItem::new_string(selected_text));
     }
 
     pub(super) fn cut(&mut self, _: &Cut, window: &mut Window, cx: &mut Context<Self>) {
-        if self.selections.primary().is_empty() {
+        if self.selections.all().iter().all(|s| s.is_empty()) {
+            return;
+        }
+
+        if self.selections.len() > 1 {
+            self.copy(&Copy, window, cx);
+            self.replace_in_every_selection("", window, cx);
             return;
         }
 
@@ -2252,7 +2286,11 @@ impl InputBaseState {
     pub(super) fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(clipboard) = cx.read_from_clipboard() {
             let new_text = clipboard.text().unwrap_or_default();
-            self.replace_text_in_range_silent(None, &new_text, window, cx);
+            if self.selections.len() > 1 {
+                self.replace_in_every_selection(&new_text, window, cx);
+            } else {
+                self.replace_text_in_range_silent(None, &new_text, window, cx);
+            }
             self.scroll_to(self.cursor(), None, cx);
         }
     }
@@ -2931,6 +2969,18 @@ impl EntityInputHandler for InputBaseState {
 
         if self.blink_cursor.read(cx).visible() {
             self.pause_blink_cursor(cx);
+        }
+
+        // More than one cursor means the keystroke lands at each of them, which
+        // is what having them is for. This is the path the platform types
+        // through, so this is where it has to fan out; the silent flag marks
+        // the editor's own use of itself — undo, a command that has already
+        // decided what to replace, and each of the edits below — and those stay
+        // where they are put.
+        if self.selections.len() > 1 && !self.silent_replace_text && self.ime_marked_range.is_none()
+        {
+            self.replace_in_every_selection(new_text, window, cx);
+            return;
         }
 
         // NOTE: The normalization keeps the UTF-16 length, but may change the

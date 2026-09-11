@@ -20,7 +20,7 @@ use crate::{
 };
 
 use super::{
-    InputBaseState, TextDecoration,
+    InputBaseState, Selection, TextDecoration,
     layout::{LastLayout, WhitespaceIndicators},
     mode::InputMode,
 };
@@ -448,7 +448,12 @@ impl TextElement {
         scroll_size: Size<Pixels>,
         _: &mut Window,
         cx: &mut App,
-    ) -> (Option<Bounds<Pixels>>, Point<Pixels>, Option<usize>) {
+    ) -> (
+        Option<Bounds<Pixels>>,
+        Vec<Bounds<Pixels>>,
+        Point<Pixels>,
+        Option<usize>,
+    ) {
         let state = self.state.read(cx);
 
         let line_height = last_layout.line_height;
@@ -612,9 +617,59 @@ impl TextElement {
             bounds.size.height,
         );
 
+        // Every caret but the one the cursor is in, placed exactly as that one
+        // is: its x carries the horizontal scroll already, its y is adjusted
+        // with the text at paint time. The primary is the last of the set, so
+        // it is the one the block above placed.
+        let cursor_height = 0.85 * line_height;
+        let cursor_scroll_x = state
+            .deferred_scroll_offset
+            .map(|offset| offset.x)
+            .unwrap_or(scroll_offset.x);
+        let extra_cursor_bounds: Vec<Bounds<Pixels>> = if state.masked {
+            // A masked editor has one line and one caret; nothing adds another.
+            Vec::new()
+        } else {
+            state
+                .selections
+                .all()
+                .iter()
+                .rev()
+                .skip(1)
+                .filter_map(|selection| {
+                    let row = state.text.offset_to_point(selection.end).row;
+                    // A caret on a row that is scrolled out of sight has no
+                    // position to be drawn at, and `caret_for` would place it
+                    // at the start of a line it cannot see.
+                    if !visible_buffer_lines.contains(&row) {
+                        return None;
+                    }
+                    let pos = caret_for(row, selection.end, false);
+                    let cursor_x = bounds.left() + pos.x + line_number_width + cursor_scroll_x;
+                    let cursor_x = if last_layout.text_align == TextAlign::Right {
+                        cursor_x.min(bounds.right() - CURSOR_WIDTH)
+                    } else {
+                        cursor_x
+                    };
+                    Some(Bounds::new(
+                        point(
+                            cursor_x,
+                            bounds.top() + pos.y + ((line_height - cursor_height) / 2.),
+                        ),
+                        size(CURSOR_WIDTH, cursor_height),
+                    ))
+                })
+                .collect()
+        };
+
         bounds.origin = bounds.origin + scroll_offset;
 
-        (cursor_bounds, scroll_offset, current_row)
+        (
+            cursor_bounds,
+            extra_cursor_bounds,
+            scroll_offset,
+            current_row,
+        )
     }
 
     /// Layout the match range to a Path.
@@ -821,43 +876,53 @@ impl TextElement {
         paths
     }
 
+    /// Every selection that has something in it, as one path each. The primary
+    /// is one of them; the carets that have no range are not here, they are
+    /// drawn from `layout_cursor`.
     fn layout_selections(
         &self,
         last_layout: &LastLayout,
-        bounds: &mut Bounds<Pixels>,
+        bounds: &Bounds<Pixels>,
         window: &mut Window,
         cx: &mut App,
-    ) -> Option<Path<Pixels>> {
+    ) -> Vec<Path<Pixels>> {
         let state = self.state.read(cx);
         if !state.focus_handle.is_focused(window) {
-            return None;
+            return Vec::new();
         }
 
-        let mut selected_range = state.selections.primary();
-        if let Some(ime_marked_range) = &state.ime_marked_range {
-            if !ime_marked_range.is_empty() {
-                selected_range = (ime_marked_range.end..ime_marked_range.end).into();
+        // A composition in progress is drawn by the platform, not as a
+        // selection, so the caret it leaves behind is the only thing to draw.
+        let ime_marked_range = state
+            .ime_marked_range
+            .filter(|range| !range.is_empty())
+            .map(|range| Selection::new(range.end, range.end));
+
+        let mut paths = Vec::with_capacity(state.selections.len());
+        for selection in state.selections.all() {
+            let mut selected_range = ime_marked_range.unwrap_or(*selection);
+            if selected_range.is_empty() {
+                continue;
             }
+
+            if state.masked {
+                selected_range.start = masked_display_offset(&state.text, selected_range.start);
+                selected_range.end = masked_display_offset(&state.text, selected_range.end);
+            }
+
+            let (start_ix, end_ix) = if selected_range.start < selected_range.end {
+                (selected_range.start, selected_range.end)
+            } else {
+                (selected_range.end, selected_range.start)
+            };
+
+            let range = start_ix.max(last_layout.visible_range_offset.start)
+                ..end_ix.min(last_layout.visible_range_offset.end);
+
+            paths.extend(Self::layout_match_range(range, last_layout, bounds));
         }
-        if selected_range.is_empty() {
-            return None;
-        }
 
-        if state.masked {
-            selected_range.start = masked_display_offset(&state.text, selected_range.start);
-            selected_range.end = masked_display_offset(&state.text, selected_range.end);
-        }
-
-        let (start_ix, end_ix) = if selected_range.start < selected_range.end {
-            (selected_range.start, selected_range.end)
-        } else {
-            (selected_range.end, selected_range.start)
-        };
-
-        let range = start_ix.max(last_layout.visible_range_offset.start)
-            ..end_ix.min(last_layout.visible_range_offset.end);
-
-        Self::layout_match_range(range, &last_layout, bounds)
+        paths
     }
 
     /// Calculate the visible range of lines in the viewport.
@@ -1551,10 +1616,13 @@ pub(super) struct PrepaintState {
     /// Size of the scrollable area by entire lines.
     scroll_size: Size<Pixels>,
     cursor_bounds: Option<Bounds<Pixels>>,
+    /// The carets that are not the one the cursor is in, when there is more
+    /// than one selection. The primary's own bounds above drive the scroll.
+    extra_cursor_bounds: Vec<Bounds<Pixels>>,
     cursor_scroll_offset: Point<Pixels>,
     /// row index (zero based), no wrap, same line as the cursor.
     current_row: Option<usize>,
-    selection_path: Option<Path<Pixels>>,
+    selection_paths: Vec<Path<Pixels>>,
     hover_highlight_path: Option<Path<Pixels>>,
     search_match_paths: Vec<(Path<Pixels>, bool)>,
     document_color_paths: Vec<(Path<Pixels>, Hsla)>,
@@ -1578,6 +1646,18 @@ impl PrepaintState {
             bounds.origin.y += self.cursor_scroll_offset.y;
             bounds
         })
+    }
+
+    /// The same adjustment for every other caret.
+    fn extra_cursor_bounds_with_scroll(&self) -> Vec<Bounds<Pixels>> {
+        self.extra_cursor_bounds
+            .iter()
+            .map(|bounds| {
+                let mut bounds = *bounds;
+                bounds.origin.y += self.cursor_scroll_offset.y;
+                bounds
+            })
+            .collect()
     }
 }
 
@@ -1965,12 +2045,12 @@ impl Element for TextElement {
         let input_bounds = bounds;
         let original_x = bounds.origin.x;
 
-        let (cursor_bounds, cursor_scroll_offset, current_row) =
+        let (cursor_bounds, extra_cursor_bounds, cursor_scroll_offset, current_row) =
             self.layout_cursor(&last_layout, &mut bounds, scroll_size, window, cx);
         last_layout.cursor_bounds = cursor_bounds;
 
         let search_match_paths = self.layout_search_matches(&last_layout, &mut bounds, cx);
-        let selection_path = self.layout_selections(&last_layout, &mut bounds, window, cx);
+        let selection_paths = self.layout_selections(&last_layout, &bounds, window, cx);
         let hover_highlight_path = self.layout_hover_highlight(&last_layout, &mut bounds, cx);
         let document_color_paths =
             self.layout_document_colors(&document_colors, &last_layout, &bounds, cx);
@@ -2047,9 +2127,10 @@ impl Element for TextElement {
             scroll_size,
             line_numbers,
             cursor_bounds,
+            extra_cursor_bounds,
             cursor_scroll_offset,
             current_row,
-            selection_path,
+            selection_paths,
             search_match_paths,
             hover_highlight_path,
             hover_definition_hitbox,
@@ -2152,8 +2233,8 @@ impl Element for TextElement {
                 }
             }
 
-            if let Some(path) = prepaint.selection_path.take() {
-                window.paint_path(path, editor_style.selection);
+            for path in prepaint.selection_paths.iter() {
+                window.paint_path(path.clone(), editor_style.selection);
             }
 
             // Paint hover highlight
@@ -2249,6 +2330,10 @@ impl Element for TextElement {
         // Paint blinking cursor
         if focused && show_cursor {
             if let Some(cursor_bounds) = prepaint.cursor_bounds_with_scroll() {
+                window.paint_quad(fill(cursor_bounds, editor_style.caret));
+            }
+            // The rest of the carets blink with it: one editor, one clock.
+            for cursor_bounds in prepaint.extra_cursor_bounds_with_scroll() {
                 window.paint_quad(fill(cursor_bounds, editor_style.caret));
             }
         }
