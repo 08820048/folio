@@ -3,7 +3,7 @@ use crate::preview::{self, Content};
 use folio::{
     buffer, diff, editorconfig, fs_op, git,
     recent::{self, RecentProject},
-    search,
+    search, session,
     settings::{self, Settings},
     tree::{self, Entry, EntryKind},
     workspace::Workspace,
@@ -17,7 +17,7 @@ use gpui_component::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     io,
     path::{Path, PathBuf},
     sync::{
@@ -698,7 +698,72 @@ pub struct Folio {
     project_loading: bool,
     saving: bool,
     prompting: bool,
+    /// Where the last session and the unsaved buffers are written.
+    session_file: PathBuf,
+    unsaved_file: PathBuf,
+    /// What is left of a session being put back. One step at a time, because
+    /// opening a project and opening a file are both asynchronous and neither
+    /// can be started while the other is in flight.
+    restore: VecDeque<Restore>,
+    /// The file a recovered buffer belongs to, waiting for its own open to
+    /// land. Keyed by path so that an open the user started in the meantime
+    /// cannot pick it up.
+    restoring: Option<(PathBuf, String)>,
+    /// How many buffers were recovered, for the message that says so.
+    recovered: usize,
+    /// What was last written to the unsaved file, so that the timer only
+    /// rewrites it when there is something new to write.
+    written_unsaved: session::UnsavedBuffers,
+    written_session: session::Session,
     _subscriptions: Vec<Subscription>,
+}
+
+/// How often the app writes down what is open and what is unsaved. Often
+/// enough that a crash costs seconds of work, rarely enough that it is not
+/// doing file work while the user types.
+const UNSAVED_EVERY: Duration = Duration::from_secs(5);
+
+/// The two files a session lives in, and what has changed in them.
+struct Writes {
+    session_file: PathBuf,
+    unsaved_file: PathBuf,
+    session: Option<session::Session>,
+    unsaved: Option<session::UnsavedBuffers>,
+}
+
+impl Writes {
+    fn is_empty(&self) -> bool {
+        self.session.is_none() && self.unsaved.is_none()
+    }
+
+    /// Write both, and hand them back so the caller can remember what landed.
+    ///
+    /// Errors are dropped rather than reported: a config directory that cannot
+    /// be written to is not worth a message every few seconds, and the next
+    /// tick tries again.
+    fn write(self) -> Writes {
+        if let Some(session) = &self.session {
+            let _ = session::Session::save(session, &self.session_file);
+        }
+        if let Some(unsaved) = &self.unsaved {
+            let _ = session::save_unsaved(&self.unsaved_file, unsaved);
+        }
+        self
+    }
+}
+
+/// One step of putting a session back.
+enum Restore {
+    /// A project that was open.
+    Project(PathBuf),
+    /// A file of one, in the order the strip had them.
+    File(PathBuf),
+    /// The file the project was showing, after its tabs — it is open by then,
+    /// so this only makes it the one on screen.
+    Activate(PathBuf),
+    /// A file that had edits which never reached the disk: opened, and then
+    /// given them back.
+    Unsaved(PathBuf, String),
 }
 
 impl Folio {
@@ -815,6 +880,13 @@ impl Folio {
             project_loading: false,
             saving: false,
             prompting: false,
+            session_file: config_dir().join("session.json"),
+            unsaved_file: config_dir().join("unsaved.json"),
+            restore: VecDeque::new(),
+            restoring: None,
+            recovered: 0,
+            written_unsaved: session::UnsavedBuffers::new(),
+            written_session: session::Session::default(),
             _subscriptions: vec![
                 subscription,
                 search_subscription,
@@ -826,6 +898,17 @@ impl Folio {
         this.refresh_recent(RecentAction::Load, cx);
         this.tree_focus.focus(window, cx);
         this
+    }
+
+    /// Start keeping the session: put back what was open last time, and write
+    /// down what is open from here on.
+    ///
+    /// Not done in the constructor because it reads the config directory, and a
+    /// window built without one — a test's — should not be reading the machine's
+    /// session and opening its projects.
+    pub fn start_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.start_restore(window, cx);
+        self.watch_unsaved(cx);
     }
 
     fn request(&mut self, next: Next, window: &mut Window, cx: &mut Context<Self>) {
@@ -1000,6 +1083,7 @@ impl Folio {
                     self.settings_bounds = open;
                 }
                 self.save_window_state();
+                self.finish_session();
                 cx.quit();
             }
             Next::Close => {
@@ -1211,6 +1295,9 @@ impl Folio {
                     Err(e) => this.error(format!("Could not open the project: {e}"), cx),
                 }
                 cx.notify();
+                // Nothing left to put back is the common case: this is the same
+                // path a project the user opened takes.
+                this.next_restore(window, cx);
             });
         })
         .detach();
@@ -3152,6 +3239,10 @@ impl Folio {
             self.update_title(window);
             self.follow_diff(window, cx);
             cx.notify();
+            // Two ways into this function open nothing, and so never reach the
+            // completion below: whatever is left of a session being put back
+            // has to be started from here instead.
+            self.next_restore(window, cx);
             return;
         }
         if let Some(doc) = self.project.documents.get(&path) {
@@ -3160,9 +3251,11 @@ impl Folio {
             self.loading = false;
             editor.focus_handle(cx).focus(window, cx);
             self.apply_goto(&path, window, cx);
+            self.apply_recovered(&path, window, cx);
             self.update_title(window);
             self.follow_diff(window, cx);
             cx.notify();
+            self.next_restore(window, cx);
             return;
         }
         let Some(workspace) = self.project.workspace.clone() else {
@@ -3248,17 +3341,54 @@ impl Folio {
                             },
                         );
                         this.apply_goto(&path, window, cx);
-                        this.project.active = Some(path);
+                        this.project.active = Some(path.clone());
                         this.message = None;
+                        this.apply_recovered(&path, window, cx);
                         this.update_title(window);
                         this.follow_diff(window, cx);
                     }
                     Err(e) => this.error(e.to_string(), cx),
                 }
                 cx.notify();
+                this.next_restore(window, cx);
             });
         })
         .detach();
+    }
+
+    /// Give a recovered buffer its edits back, if this is the file they were
+    /// waiting for. Answers whether it did.
+    ///
+    /// Both ways into `open_file` call this: a file that is already open has no
+    /// read to wait for, and a file that is not has one — and the edits belong
+    /// to the buffer either way. The text stays unsaved, with what is on disk
+    /// still the text it was read from, so saving it goes through the same
+    /// conflict check as any other edit.
+    fn apply_recovered(
+        &mut self,
+        path: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some((waiting, text)) = self.restoring.take() else {
+            return false;
+        };
+        if waiting != path {
+            // Something else was opened in between. The edits go back where
+            // they were rather than into the wrong file.
+            self.restoring = Some((waiting, text));
+            return false;
+        }
+        let Some(document) = self.project.documents.get(path) else {
+            return false;
+        };
+        let editor = document.editor.clone();
+        editor.update(cx, |editor, cx| editor.set_value(text, window, cx));
+        if let Some(document) = self.project.documents.get_mut(path) {
+            document.dirty = true;
+        }
+        self.recovered += 1;
+        true
     }
 
     fn update_title(&self, window: &mut Window) {
@@ -3406,6 +3536,173 @@ impl Folio {
                 cx.notify();
             });
         }));
+    }
+
+    /// Queue up what was open the last time, and start putting it back.
+    ///
+    /// The session is read here rather than in a task — one small file, the way
+    /// the settings are read — and anything in it that is no longer on disk was
+    /// dropped as it was read.
+    fn start_restore(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let session = session::Session::load(&self.session_file);
+        let unsaved = session::load_unsaved(&self.unsaved_file);
+
+        for project in &session.projects {
+            self.restore
+                .push_back(Restore::Project(project.root.clone()));
+            self.restore
+                .extend(project.tabs.iter().cloned().map(Restore::File));
+            // Recovered buffers belong to this project, and are opened while it
+            // is the one being shown: a file of a parked project has nowhere to
+            // appear, and would be read into whichever project happened to be
+            // current. Before the file the project was showing, so that
+            // recovering one cannot change which file is on screen.
+            for (path, text) in &unsaved {
+                if path.starts_with(&project.root) {
+                    self.restore
+                        .push_back(Restore::Unsaved(path.clone(), text.clone()));
+                }
+            }
+            if let Some(active) = &project.active {
+                self.restore.push_back(Restore::Activate(active.clone()));
+            }
+        }
+
+        if !self.restore.is_empty() {
+            self.next_restore(window, cx);
+        }
+    }
+
+    /// Work through the restore queue, one step at a time.
+    ///
+    /// Each step starts the next when it lands: opening a project and opening a
+    /// file are both asynchronous, and either starting while the other is in
+    /// flight would have the one in flight thrown away.
+    fn next_restore(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(step) = self.restore.pop_front() else {
+            match self.recovered {
+                0 => {}
+                1 => self.toast("Recovered an unsaved file", cx),
+                count => self.toast(&format!("Recovered {count} unsaved files"), cx),
+            }
+            self.recovered = 0;
+            return;
+        };
+        match step {
+            Restore::Project(root) => self.open_project(root, window, cx),
+            Restore::File(path) => self.open_file(path, window, cx),
+            Restore::Activate(path) => {
+                // Already open, so this is not an open at all: it is the focus
+                // and the strip's idea of which file is being read, both of
+                // which the last file opened would otherwise have taken.
+                if let Some(document) = self.project.documents.get(&path) {
+                    document.editor.read(cx).focus_handle(cx).focus(window, cx);
+                    self.project.active = Some(path.clone());
+                    self.apply_goto(&path, window, cx);
+                    self.update_title(window);
+                    cx.notify();
+                }
+                self.next_restore(window, cx);
+            }
+            Restore::Unsaved(path, text) => {
+                self.restoring = Some((path.clone(), text));
+                self.open_file(path, window, cx);
+            }
+        }
+    }
+
+    /// The projects that are open, in the order they were opened, with the
+    /// files each one has showing.
+    fn collect_session(&self) -> session::Session {
+        let mut projects = Vec::new();
+        for root in &self.project_order {
+            let Some(project) = self.project_for(root) else {
+                continue;
+            };
+            let Some(workspace) = project.workspace.as_ref() else {
+                continue;
+            };
+            projects.push(session::SessionProject {
+                root: workspace.root.clone(),
+                tabs: project.tabs.clone(),
+                active: project.active.clone(),
+            });
+        }
+        session::Session { projects }
+    }
+
+    /// The project with this root, whichever list it is in.
+    fn project_for(&self, root: &Path) -> Option<&Project> {
+        std::iter::once(&self.project)
+            .chain(self.parked.iter())
+            .find(|project| {
+                project
+                    .workspace
+                    .as_ref()
+                    .is_some_and(|workspace| workspace.root == root)
+            })
+    }
+
+    /// Every buffer with edits that are not on disk, across every project.
+    fn collect_unsaved(&self, cx: &App) -> session::UnsavedBuffers {
+        std::iter::once(&self.project)
+            .chain(self.parked.iter())
+            .flat_map(|project| project.documents.iter())
+            .filter(|(_, document)| document.dirty)
+            .map(|(path, document)| (path.clone(), document.editor.read(cx).value().to_string()))
+            .collect()
+    }
+
+    /// What has changed since the last write, if anything.
+    fn pending_writes(&self, cx: &App) -> Writes {
+        let session = self.collect_session();
+        let unsaved = self.collect_unsaved(cx);
+        Writes {
+            session_file: self.session_file.clone(),
+            unsaved_file: self.unsaved_file.clone(),
+            session: (session != self.written_session).then_some(session),
+            unsaved: (unsaved != self.written_unsaved).then_some(unsaved),
+        }
+    }
+
+    /// Write down what is open and what is unsaved, while the app is running.
+    ///
+    /// On a timer rather than from every place that changes something: what
+    /// this is for is the case where there is no clean exit to write at.
+    fn watch_unsaved(&mut self, cx: &mut Context<Self>) {
+        let executor = cx.background_executor().clone();
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(UNSAVED_EVERY).await;
+                let Ok(writes) = this.update(cx, |this, cx| this.pending_writes(cx)) else {
+                    // The window is gone, and with it anything worth writing.
+                    break;
+                };
+                if writes.is_empty() {
+                    continue;
+                }
+                let written = executor.spawn(async move { writes.write() }).await;
+                // Remembered only once the write has landed, so a failure is
+                // retried on the next tick rather than assumed done.
+                let _ = this.update(cx, |this, _| {
+                    if let Some(session) = written.session {
+                        this.written_session = session;
+                    }
+                    if let Some(unsaved) = written.unsaved {
+                        this.written_unsaved = unsaved;
+                    }
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// The last write, on the way out: the session as it stands, and no
+    /// unsaved file at all — whatever was not saved was either saved or
+    /// deliberately let go of at the prompt.
+    fn finish_session(&mut self) {
+        let _ = session::Session::save(&self.collect_session(), &self.session_file);
+        let _ = session::clear_unsaved(&self.unsaved_file);
     }
 
     fn filter(&mut self, cx: &App) {
@@ -8141,6 +8438,163 @@ mod tests {
             });
             assert_eq!(base.read(cx).value(), "if x {\n  \n}\n");
         });
+    }
+
+    /// A session is put back: the projects that were open, the files each was
+    /// showing in the order the strip had them, and the buffer whose edits
+    /// never reached the disk.
+    #[gpui::test]
+    fn a_session_is_put_back(cx: &mut TestAppContext) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let a = root.join("A");
+        let b = root.join("B");
+        for dir in [&a, &b] {
+            std::fs::create_dir(dir).unwrap();
+        }
+        let a_main = a.join("main.rs");
+        let a_notes = a.join("notes.md");
+        let b_lib = b.join("lib.rs");
+        std::fs::write(&a_main, "// a\n").unwrap();
+        std::fs::write(&a_notes, "// notes\n").unwrap();
+        std::fs::write(&b_lib, "// b\n").unwrap();
+
+        let config = root.join("config");
+        std::fs::create_dir(&config).unwrap();
+        let session_file = config.join("session.json");
+        let unsaved_file = config.join("unsaved.json");
+        session::Session {
+            projects: vec![
+                session::SessionProject {
+                    root: a.clone(),
+                    tabs: vec![a_main.clone(), a_notes.clone()],
+                    active: Some(a_main.clone()),
+                },
+                session::SessionProject {
+                    root: b.clone(),
+                    tabs: vec![b_lib.clone()],
+                    active: Some(b_lib.clone()),
+                },
+            ],
+        }
+        .save(&session_file)
+        .unwrap();
+        let mut unsaved = session::UnsavedBuffers::new();
+        unsaved.insert(a_notes.clone(), "// recovered\n".to_string());
+        session::save_unsaved(&unsaved_file, &unsaved).unwrap();
+
+        cx.update(gpui_component::init);
+        let cx = cx.add_empty_window();
+        let view = cx.update(|window, cx| {
+            cx.new(|cx| {
+                let mut app = Folio::new(window, cx);
+                app.recent_task = None;
+                app.recent_file = config.join("recent.json");
+                app.settings_file = config.join("settings.json");
+                app.window_file = config.join("window.json");
+                app.session_file = session_file.clone();
+                app.unsaved_file = unsaved_file.clone();
+                app.settings = Settings::default();
+                app.applied_ignored = app.settings.ignored.clone();
+                app
+            })
+        });
+        view.update_in(cx, |app, window, cx| app.start_session(window, cx));
+        // A project and each of its files are separate turns of the executor,
+        // so the queue drains over several of them.
+        for _ in 0..8 {
+            cx.run_until_parked();
+        }
+
+        view.update_in(cx, |app, _, cx| {
+            assert_eq!(app.project_order, vec![a.clone(), b.clone()]);
+            // The second project is the one being shown; the first is parked
+            // with everything it had.
+            assert_eq!(app.parked.len(), 1);
+            let first = &app.parked[0];
+            assert_eq!(first.tabs, vec![a_main.clone(), a_notes.clone()]);
+            assert_eq!(first.active.as_ref(), Some(&a_main));
+            // The buffer that had unsaved edits came back dirty, with them.
+            let notes = &first.documents[&a_notes];
+            assert!(notes.dirty);
+            assert_eq!(notes.editor.read(cx).value().as_ref(), "// recovered\n");
+            // And the one that did not is clean.
+            assert!(!first.documents[&a_main].dirty);
+
+            assert_eq!(app.project.tabs, vec![b_lib.clone()]);
+            assert_eq!(app.project.active.as_ref(), Some(&b_lib));
+        });
+    }
+
+    /// What is open, and what is unsaved, get written down while the app runs;
+    /// a clean exit takes the unsaved file with it, which is what leaves the
+    /// file behind only when there was no clean exit.
+    #[gpui::test]
+    fn the_session_and_unsaved_edits_are_written_down(cx: &mut TestAppContext) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let file = root.join("main.rs");
+        std::fs::write(&file, "// original\n").unwrap();
+        let config = root.join("config");
+        std::fs::create_dir(&config).unwrap();
+        let session_file = config.join("session.json");
+        let unsaved_file = config.join("unsaved.json");
+
+        cx.update(gpui_component::init);
+        let cx = cx.add_empty_window();
+        let view = cx.update(|window, cx| {
+            cx.new(|cx| {
+                let mut app = Folio::new(window, cx);
+                app.recent_task = None;
+                app.recent_file = config.join("recent.json");
+                app.settings_file = config.join("settings.json");
+                app.window_file = config.join("window.json");
+                app.session_file = session_file.clone();
+                app.unsaved_file = unsaved_file.clone();
+                app.settings = Settings::default();
+                app.applied_ignored = app.settings.ignored.clone();
+                app
+            })
+        });
+        view.update_in(cx, |app, window, cx| {
+            app.request(Next::Open(root.clone()), window, cx)
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |app, window, cx| {
+            app.open_file(file.clone(), window, cx)
+        });
+        cx.run_until_parked();
+        // Nothing has been written yet: the timer has not come round.
+        assert!(!session_file.exists());
+
+        view.update_in(cx, |app, window, cx| {
+            let base = app.project.documents[&file]
+                .editor
+                .read(cx)
+                .base_state()
+                .clone();
+            base.update(cx, |base, cx| base.replace_all("// edited\n", window, cx));
+        });
+        cx.run_until_parked();
+
+        view.update_in(cx, |app, _, cx| {
+            assert!(app.project.documents[&file].dirty);
+            app.pending_writes(cx).write();
+        });
+
+        let session = session::Session::load(&session_file);
+        assert_eq!(session.projects.len(), 1);
+        assert_eq!(session.projects[0].tabs, vec![file.clone()]);
+        assert_eq!(session.projects[0].active.as_ref(), Some(&file));
+        assert_eq!(session::load_unsaved(&unsaved_file)[&file], "// edited\n");
+
+        // Saving it would have emptied the unsaved file; quitting leaves it
+        // behind either way, which is what the next launch reads.
+        view.update_in(cx, |app, _, _| {
+            app.finish_session();
+            assert!(session_file.exists());
+        });
+        assert!(session::load_unsaved(&unsaved_file).is_empty());
     }
 
     /// The shortcut strings the menus print are matched against real

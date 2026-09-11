@@ -89,6 +89,24 @@ projects live in a local JSON file capped at eight entries; removing one does
 not touch the project's files. On macOS the data directory is
 `~/Library/Application Support/Folio/`.
 
+## Sessions
+
+What was open is put back when the app starts: every project that was open, in
+the order it was opened, with the files each had showing in the order the strip
+had them, and the one that was being read left on screen. A project that is no
+longer a folder, or a file that is no longer there, is dropped as the session is
+read rather than failing it — a session written yesterday may name a directory
+that was deleted today. Closing every project still lands on the launcher.
+
+Unsaved edits are the other half of it. Every few seconds, while there are any,
+they are written to a file beside the session, so a crash, a force quit or a
+power cut costs seconds rather than the work. A clean exit takes that file with
+it, which is what leaves it behind only when there was no clean exit. The next
+launch opens those buffers with their edits in them, marks them unsaved, and
+says how many it recovered. They are unsaved in the ordinary way: `⌘S` writes
+them, and the usual conflict check still protects whatever changed on disk in
+the meantime.
+
 ## Project tree
 
 Right-click a folder row, or a project header, and the menu opens at the
@@ -445,7 +463,9 @@ ignore list reaching both the tree and the index, the diff parser on
 hand-written hunks and against a real repository, the line-comment markers and
 the two rules that decide where a bracket may pair, the `.editorconfig` reader
 — its globs, its sections applied in order, `unset` removing a property, `root`
-ending the search and the nearest file winning — and project search (case,
+ending the search and the nearest file winning — the session files against real
+bytes (a round trip, paths that are gone being dropped, a corrupt file reading
+as an empty session), and project search (case,
 whole word, regex, long-line windowing, CRLF, multi-byte columns, capture-group
 replacement, skipping binary and oversized files). `desktop-tests` uses the
 GPUI test executor for the rest: repeated expand and collapse, recents written
@@ -463,6 +483,8 @@ reordering in both directions, brackets pairing and stepping over, Enter
 laying out a pair of brackets over three lines, folding the innermost block at
 the caret and where the caret goes when the line under it stops being drawn,
 a project's `.editorconfig` deciding what indentation an opened file gets,
+a session put back with its projects, tab order, active file and recovered
+buffer, and the writing down of what is open and unsaved,
 comment toggling, the
 multi-cursor commands with the edit that lands at every selection they make,
 a rectangle becoming a selection on every line it covers and stopping at the
@@ -542,7 +564,10 @@ or never inserted because the character in front of it was a word — gets the
 break and no extra level. Folding is not remembered across a restart, and there
 is no fold-all: the two keys fold and unfold one block. A brace group in an
 `.editorconfig` pattern holding a range rather than a list, `{1..3}`, is the
-one part of that format not read. The changes view is a unified diff — there is
+one part of that format not read. The session is written every few seconds, so a
+crash can lose the last few seconds of tab changes, and a recovered buffer whose
+project is no longer in the session is dropped rather than shown. The changes
+view is a unified diff — there is
 no side-by-side — and its counts count rows, so a changed line reads as one
 gone and one arrived. Window geometry is written when a window closes and again
 on quit, so a force-killed process loses wherever the windows were — the same

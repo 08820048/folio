@@ -164,6 +164,7 @@ fn main() {
                 },
                 |window, cx| {
                     let view = cx.new(|cx| Folio::new(window, cx));
+                    view.update(cx, |app, cx| app.start_session(window, cx));
                     let weak = view.downgrade();
                     window.on_window_should_close(cx, move |window, cx| {
                         let _ = weak.update(cx, |this, cx| this.close_window(window, cx));
