@@ -1,7 +1,7 @@
 use crate::assets::FolioIcon;
 use crate::preview::{self, Content};
 use folio::{
-    blame, buffer, diff, editorconfig, fs_op, git, lsp,
+    blame, buffer, diff, editorconfig, fs_op, git,
     recent::{self, RecentProject},
     search, session,
     settings::{self, Settings},
@@ -12,20 +12,14 @@ use gpui::{prelude::*, *};
 use gpui_component::{
     ActiveTheme, Disableable, Icon, IconName, Root, Sizable, Theme, TitleBar,
     button::{Button, ButtonVariants},
-    input::{
-        self, DefinitionProvider, EditorState, HoverProvider, Input, InputBaseState, InputEvent,
-        InputState, Position, Rope, TabSize,
-    },
+    input::{self, EditorState, Input, InputBaseState, InputEvent, InputState, Position, TabSize},
     native_menu::NativeMenu,
 };
-use lsp_types::{Hover, LocationLink};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     io,
     path::{Path, PathBuf},
-    rc::Rc,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -209,7 +203,6 @@ actions!(
         OpenAbout,
         ToggleDiff,
         ToggleBlame,
-        GoToDefinition,
         CheckForUpdates,
         ToggleComment,
         Fold,
@@ -254,9 +247,6 @@ struct Document {
     saved: SharedString,
     dirty: bool,
     large: bool,
-    /// The grammar it was opened with, which is what a language server is
-    /// chosen by.
-    language: &'static str,
     _subscription: Subscription,
 }
 #[derive(Clone)]
@@ -650,14 +640,6 @@ struct Project {
     indexing: bool,
     /// Set while the active file is being shown as changes rather than code.
     diff: Option<DiffView>,
-    /// The language servers this project has running, by grammar: one each,
-    /// kept for as long as the project is, because what they cost is indexing
-    /// it and what they give back comes from having done that.
-    lsp: HashMap<&'static str, LanguageServer>,
-    /// The ones that would not start, by grammar, with what they said about it.
-    /// Kept so that neither the start nor the explanation is repeated on every
-    /// file of that language.
-    lsp_unavailable: HashMap<&'static str, String>,
 }
 
 pub struct Folio {
@@ -728,14 +710,7 @@ pub struct Folio {
     /// opening a project and opening a file are both asynchronous and neither
     /// can be started while the other is in flight.
     restore: VecDeque<Restore>,
-    /// A jump a language server asked for, in the counting the protocol uses.
-    ///
-    /// Kept apart from `goto` because the two count characters differently —
-    /// the protocol in UTF-16 code units, the editor in characters — and the
-    /// conversion needs the file being opened, which is not in hand until it
-    /// has been.
-    goto_utf16: Option<(PathBuf, lsp_types::Position)>,
-    /// Where the blame being shown for the file being read, when it is on.
+    /// The blame being shown for the file being read, when it is on.
     blame: Option<BlameView>,
     /// Which blame read is the current one: a read of one file can land after
     /// the user has moved to another.
@@ -762,93 +737,6 @@ const UNSAVED_EVERY: Duration = Duration::from_secs(5);
 struct BlameView {
     path: PathBuf,
     blame: blame::Blame,
-}
-
-/// A language server running for a project.
-struct LanguageServer {
-    /// Shared rather than counted locally: the requests are made on the
-    /// background threads, which is where the blocking reads belong.
-    client: Arc<lsp::Client>,
-    /// What the protocol calls this language, which is not what the editor
-    /// calls its grammar.
-    language: &'static str,
-}
-
-/// One document's view of a language server: what to ask about, and who to ask.
-struct EditorLsp {
-    client: Arc<lsp::Client>,
-    path: PathBuf,
-    /// What the protocol calls this language, which is not what the editor
-    /// calls its grammar.
-    language: &'static str,
-}
-
-impl EditorLsp {
-    /// Ask about a position, after telling the server what the document holds.
-    fn request(&self, method: &str, text: &str, position: lsp::Position) -> anyhow::Result<Value> {
-        self.client.sync(&self.path, text, self.language)?;
-        Ok(self.client.request(
-            method,
-            json!({
-                "textDocument": {"uri": lsp::uri(&self.path)},
-                "position": {"line": position.line, "character": position.character},
-            }),
-        )?)
-    }
-
-    /// The same three things every time: the text, where in it, and the state.
-    fn split(&self) -> (Arc<lsp::Client>, PathBuf, &'static str) {
-        (self.client.clone(), self.path.clone(), self.language)
-    }
-}
-
-impl HoverProvider for EditorLsp {
-    fn hover(
-        &self,
-        text: &Rope,
-        offset: usize,
-        _: &mut Window,
-        cx: &mut App,
-    ) -> Task<anyhow::Result<Option<Hover>>> {
-        let text = text.to_string();
-        let position = lsp::position_of(&text, offset);
-        let (client, path, language) = self.split();
-        cx.background_executor().spawn(async move {
-            let request = EditorLsp {
-                client,
-                path,
-                language,
-            };
-            let result = request.request("textDocument/hover", &text, position)?;
-            if result.is_null() {
-                return Ok(None);
-            }
-            Ok(serde_json::from_value::<Hover>(result).ok())
-        })
-    }
-}
-
-impl DefinitionProvider for EditorLsp {
-    fn definitions(
-        &self,
-        text: &Rope,
-        offset: usize,
-        _: &mut Window,
-        cx: &mut App,
-    ) -> Task<anyhow::Result<Vec<LocationLink>>> {
-        let text = text.to_string();
-        let position = lsp::position_of(&text, offset);
-        let (client, path, language) = self.split();
-        cx.background_executor().spawn(async move {
-            let request = EditorLsp {
-                client,
-                path,
-                language,
-            };
-            let result = request.request("textDocument/definition", &text, position)?;
-            Ok(lsp::definition_links(&result))
-        })
-    }
 }
 
 /// The two files a session lives in, and what has changed in them.
@@ -1012,7 +900,6 @@ impl Folio {
             unsaved_file: config_dir().join("unsaved.json"),
             restore: VecDeque::new(),
             blame: None,
-            goto_utf16: None,
             blame_request: 0,
             restoring: None,
             recovered: 0,
@@ -1291,48 +1178,21 @@ impl Folio {
     /// `Position`'s column counts characters, which is what `search::Hit`
     /// records, so this is a direct hand-off. Cleared whether or not it applied.
     fn apply_goto(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) {
-        let own = self.goto.clone().filter(|(target, _)| target == path);
-        if let Some((target, position)) = own {
-            self.goto = None;
-            if let Some(document) = self.project.documents.get(&target) {
-                let editor = document.editor.clone();
-                editor.update(cx, |state, cx| {
-                    state.base_state().clone().update(cx, |base, cx| {
-                        base.set_cursor_position(position, window, cx)
-                    });
-                });
-            }
-        }
-
-        // The other kind of jump, and the reason it is kept apart: a language
-        // server counts characters in UTF-16 code units where the editor counts
-        // them in characters, and converting needs the file that has just been
-        // opened.
-        let Some((target, position)) = self.goto_utf16.clone() else {
+        let Some((target, position)) = self.goto.clone() else {
             return;
         };
         if target != path {
             return;
         }
-        self.goto_utf16 = None;
+        self.goto = None;
         let Some(document) = self.project.documents.get(&target) else {
             return;
         };
-        let base = document.editor.read(cx).base_state().clone();
-        let text = base.read(cx).value().to_string();
-        let position = lsp::char_position(
-            &text,
-            lsp::Position {
-                line: position.line as usize,
-                character: position.character as usize,
-            },
-        );
-        base.update(cx, |base, cx| {
-            base.set_cursor_position(
-                Position::new(position.line as u32, position.character as u32),
-                window,
-                cx,
-            )
+        let editor = document.editor.clone();
+        editor.update(cx, |state, cx| {
+            state.base_state().clone().update(cx, |base, cx| {
+                base.set_cursor_position(position, window, cx)
+            });
         });
     }
 
@@ -2874,25 +2734,6 @@ impl Folio {
         ))
     }
 
-    /// The hover a language server answered with, and where to draw it.
-    ///
-    /// The bounds are the symbol's, in the window's coordinates, because that
-    /// is what the editor lays them out in — so the card is drawn from the
-    /// root of the window rather than from inside the code area.
-    fn hover_card(&self, cx: &App) -> Option<(Bounds<Pixels>, Vec<String>)> {
-        let path = self.project.active.as_ref()?;
-        let document = self.project.documents.get(path)?;
-        let base = document.editor.read(cx).base_state().clone();
-        let base = base.read(cx);
-        let popover = base.hover_popover()?;
-        let bounds = base.range_to_bounds(&popover.symbol_range)?;
-        let lines = lsp::hover_lines(&serde_json::to_value(&popover.hover).ok()?);
-        if lines.is_empty() {
-            return None;
-        }
-        Some((bounds, lines))
-    }
-
     /// `⇧⌘D`: show the active file as its changes against HEAD, or go back to
     /// reading it.
     fn toggle_diff(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -3602,7 +3443,6 @@ impl Folio {
                                 saved,
                                 dirty: false,
                                 large,
-                                language,
                                 _subscription: subscription,
                             },
                         );
@@ -3612,10 +3452,6 @@ impl Folio {
                         this.apply_recovered(&path, window, cx);
                         this.update_title(window);
                         this.follow_diff(window, cx);
-                        // Hover and F12 need a server, and a server takes a
-                        // while to index the project, so it is started now
-                        // rather than when one of them is first asked for.
-                        this.start_language_server(language, window, cx);
                         // The blame belongs to the file that was open, and it
                         // is not this one.
                         if this.blame.is_some() {
@@ -3975,218 +3811,6 @@ impl Folio {
             }
         })
         .detach();
-    }
-
-    /// Start the language server for a grammar, if this machine has one and the
-    /// project is not already running it, and hand the providers that talk to
-    /// it to every open document of that grammar.
-    ///
-    /// Starting one is the slow part — a server indexes the project before it
-    /// can answer anything — so it happens once, in the background, the first
-    /// time a file of that language is opened.
-    fn start_language_server(
-        &mut self,
-        grammar: &'static str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.project.lsp.contains_key(grammar)
-            || self.project.lsp_unavailable.contains_key(grammar)
-        {
-            return;
-        }
-        let Some(server) = lsp::server_for(grammar) else {
-            return;
-        };
-        let Some(root) = self.project.workspace.as_ref().map(|w| w.root.clone()) else {
-            return;
-        };
-        let project_id = self.project.id;
-        let protocol_language = server.language;
-        let task = cx
-            .background_executor()
-            .spawn(async move { lsp::Client::start(&server, &root) });
-        cx.spawn_in(window, async move |this, cx| {
-            let result = task.await;
-            let _ = this.update_in(cx, |this, _, cx| {
-                let client = match result {
-                    Ok(client) => client,
-                    Err(error) => {
-                        // An executable on `PATH` is not a server that runs.
-                        // What the failure said is worth passing on — a
-                        // rustup-installed `rust-analyzer` is a shim that will
-                        // explain, when asked, that the toolchain it points at
-                        // has no such component.
-                        this.project
-                            .lsp_unavailable
-                            .insert(grammar, error.to_string());
-                        cx.notify();
-                        return;
-                    }
-                };
-                if this.project.id != project_id {
-                    return;
-                }
-                let server = LanguageServer {
-                    client: Arc::new(client),
-                    language: protocol_language,
-                };
-                let paths: Vec<PathBuf> = this
-                    .project
-                    .documents
-                    .iter()
-                    .filter(|(_, document)| document.language == grammar)
-                    .map(|(path, _)| path.clone())
-                    .collect();
-                for path in paths {
-                    this.attach_language_server(&path, &server, cx);
-                }
-                this.project.lsp.insert(grammar, server);
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    /// Give one document the providers that ask a server about it.
-    fn attach_language_server(
-        &mut self,
-        path: &Path,
-        server: &LanguageServer,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(document) = self.project.documents.get(path) else {
-            return;
-        };
-        let base = document.editor.read(cx).base_state().clone();
-        let provider = Rc::new(EditorLsp {
-            client: server.client.clone(),
-            path: path.to_path_buf(),
-            language: server.language,
-        });
-        let this = cx.entity().downgrade();
-        base.update(cx, |base, cx| {
-            base.lsp.hover_provider = Some(provider.clone());
-            base.lsp.definition_provider = Some(provider);
-            // What a definition resolves to is a file somewhere: this is where
-            // the editor hands that back to the application to open.
-            base.lsp.show_document = Some(Rc::new(move |params, window, cx| {
-                let Some(path) = lsp::path_of(params.uri.as_str()) else {
-                    return false;
-                };
-                let position = params.selection.map(|range| range.start);
-                let handle = window.window_handle();
-                handle
-                    .update(cx, |_, window, cx| {
-                        this.update(cx, |app, cx| app.jump_to(path, position, window, cx))
-                            .is_ok()
-                    })
-                    .unwrap_or(false)
-            }));
-            // Providers assigned at runtime are picked up on the next render.
-            base.refresh(cx);
-        });
-    }
-
-    /// `F12`: ask the language server where the thing under the caret is
-    /// defined, and go there.
-    fn go_to_definition(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(path) = self.project.active.clone() else {
-            return;
-        };
-        let Some(document) = self.project.documents.get(&path) else {
-            return;
-        };
-        let grammar = document.language;
-        if let Some(reason) = self.project.lsp_unavailable.get(grammar) {
-            // Asked again rather than started again: whatever was wrong the
-            // first time is still wrong.
-            let reason = reason.clone();
-            self.error(format!("No language server for this file: {reason}"), cx);
-            return;
-        }
-        let Some(server) = self.project.lsp.get(grammar) else {
-            // The first press starts it rather than doing nothing: the server
-            // is the slow part, and it is wanted either way.
-            if lsp::server_for(grammar).is_some() {
-                self.start_language_server(grammar, window, cx);
-                self.toast("Starting the language server", cx);
-            } else {
-                self.toast("No language server for this file", cx);
-            }
-            return;
-        };
-
-        let base = document.editor.read(cx).base_state().clone();
-        let text = base.read(cx).value().to_string();
-        let offset = base.read(cx).cursor();
-        let server = LanguageServer {
-            client: server.client.clone(),
-            language: server.language,
-        };
-        let task = cx.background_executor().spawn(async move {
-            let request = EditorLsp {
-                client: server.client,
-                path: path.clone(),
-                language: server.language,
-            };
-            request.request(
-                "textDocument/definition",
-                &text,
-                lsp::position_of(&text, offset),
-            )
-        });
-        cx.spawn_in(window, async move |this, cx| {
-            let result = task.await;
-            let _ = this.update_in(cx, |this, window, cx| {
-                let links = match result {
-                    Ok(result) => lsp::definition_links(&result),
-                    Err(e) => {
-                        this.error(format!("Could not read the definition: {e}"), cx);
-                        return;
-                    }
-                };
-                match links.first().and_then(lsp::target) {
-                    Some((path, position)) => {
-                        this.jump_to(path, Some(position), window, cx);
-                    }
-                    None => this.toast("No definition here", cx),
-                }
-            });
-        })
-        .detach();
-    }
-
-    /// Go where a language server said: a file of one of the open projects, and
-    /// a position in it.
-    fn jump_to(
-        &mut self,
-        path: PathBuf,
-        position: Option<lsp_types::Position>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let project = std::iter::once(&self.project)
-            .chain(self.parked.iter())
-            .filter_map(|project| project.workspace.as_ref())
-            .find(|workspace| path.starts_with(&workspace.root))
-            .map(|workspace| workspace.root.clone());
-        let Some(root) = project else {
-            // Standard library sources, dependencies outside the folder: real
-            // answers that this application has nowhere to show.
-            self.toast("That definition is outside the project", cx);
-            return;
-        };
-        if self
-            .project
-            .workspace
-            .as_ref()
-            .is_none_or(|w| w.root != root)
-        {
-            self.switch_project(&root, window, cx);
-        }
-        self.goto_utf16 = position.map(|position| (path.clone(), position));
-        self.open_file(path, window, cx);
     }
 
     /// The last write, on the way out: the session as it stands, and no
@@ -6826,9 +6450,6 @@ impl Render for SettingsView {
 
 impl Render for Folio {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // What the language server says about the symbol the pointer is over,
-        // if it is over one.
-        let hover = self.hover_card(cx);
         div()
             .id("folio")
             .key_context("Folio")
@@ -6886,11 +6507,6 @@ impl Render for Folio {
             .on_action(cx.listener(|this, _: &ToggleDiff, window, cx| this.toggle_diff(window, cx)))
             .on_action(
                 cx.listener(|this, _: &ToggleBlame, window, cx| this.toggle_blame(window, cx)),
-            )
-            .on_action(
-                cx.listener(|this, _: &GoToDefinition, window, cx| {
-                    this.go_to_definition(window, cx)
-                }),
             )
             .on_action(cx.listener(|this, _: &OpenAbout, _, cx| this.show_about(cx)))
             .on_action(cx.listener(|this, _: &CheckForUpdates, _, cx| this.check_for_updates(cx)))
@@ -7099,32 +6715,6 @@ impl Render for Folio {
             )
             .when_some(self.panel, |el, panel| {
                 el.child(self.render_panel(panel, cx))
-            })
-            // What the server says about the symbol the pointer is over, drawn
-            // under the line it is on. It is anchored to the window rather than
-            // to the code area because the editor reports where the symbol is
-            // in the window.
-            .when_some(hover, |el, (bounds, lines)| {
-                el.child(
-                    div()
-                        .absolute()
-                        .left(bounds.origin.x)
-                        .top(bounds.origin.y + bounds.size.height)
-                        .max_w(px(560.))
-                        .p_2()
-                        .occlude()
-                        .rounded_md()
-                        .border_1()
-                        .border_color(cx.theme().border)
-                        .bg(cx.theme().sidebar)
-                        .shadow_md()
-                        .text_size(ui(11.))
-                        .children(
-                            lines
-                                .into_iter()
-                                .map(|line| div().whitespace_nowrap().child(line)),
-                        ),
-                )
             })
             .when(self.menu.is_some(), |el| {
                 el.child(self.render_menu_backdrop(cx))

@@ -39,7 +39,7 @@ AI 写代码已经很普遍，开发者更多是：**打开仓库、读懂改动
 - 实时协作、多人光标  
 - 内置 AI Agent / 补全云服务（可列为远期可选，不进 MVP）  
 - 远程开发、容器内编辑  
-- 完整 LSP IDE（重构、Code Action、Inlay 全开）  
+- LSP（语言服务器）：连只读的 hover / 跳转定义也不做，完整 LSP IDE（重构、Code Action、Inlay 全开）更不做
 - 对标 VS Code / Cursor / Zed 的功能广度  
   
 ---  
@@ -381,7 +381,7 @@ UI 线程禁止做：磁盘全量扫描、全文件 parse、git status 全量阻
   
 ### 以后视需求  
   
-blame、只读 LSP（hover / 跳转定义）、会话恢复、多仓库窗口。  
+blame、会话恢复、多仓库窗口。  
   
 ---  
   
