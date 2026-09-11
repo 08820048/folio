@@ -55,15 +55,15 @@ fn main() {
                 KeyBinding::new(&format!("{modifier}-q"), Quit, Some("Folio")),
                 // The settings window has its own context: `⌘W` closes that
                 // window rather than the project behind it.
-                KeyBinding::new(
-                    &format!("{modifier}-w"),
-                    CloseSettings,
-                    Some("FolioSettings"),
-                ),
+                KeyBinding::new(&format!("{modifier}-w"), CloseWindow, Some("FolioSettings")),
                 KeyBinding::new(&format!("{modifier}-q"), Quit, Some("FolioSettings")),
+                KeyBinding::new(&format!("{modifier}-w"), CloseWindow, Some("FolioAbout")),
+                KeyBinding::new(&format!("{modifier}-q"), Quit, Some("FolioAbout")),
             ]);
             cx.set_menus([
                 Menu::new("Folio").items([
+                    MenuItem::action("About Folio", OpenAbout),
+                    MenuItem::separator(),
                     MenuItem::action("Settings…", OpenSettings),
                     MenuItem::separator(),
                     MenuItem::action("Quit Folio", Quit),

@@ -196,7 +196,8 @@ actions!(
         GoToLine,
         ToggleSidebar,
         OpenSettings,
-        CloseSettings,
+        CloseWindow,
+        OpenAbout,
         ToggleDiff,
         ToggleComment,
         PairParen,
@@ -667,6 +668,7 @@ pub struct Folio {
     settings_file: PathBuf,
     /// Held so the settings window can be focused instead of opened twice.
     settings_window: Option<WindowHandle<Root>>,
+    about_window: Option<WindowHandle<Root>>,
     settings_view: Option<Entity<SettingsView>>,
     /// The system appearance, kept so a theme change can be applied without
     /// borrowing a particular window.
@@ -792,6 +794,7 @@ impl Folio {
             applied_ignored: settings_ignored,
             settings_file,
             settings_window: None,
+            about_window: None,
             settings_view: None,
             appearance,
             main_bounds,
@@ -2928,6 +2931,45 @@ impl Folio {
                     .flatten();
             }
             Err(error) => self.error(format!("Could not open the settings: {error}"), cx),
+        }
+        cx.notify();
+    }
+
+    /// The About window. It holds the name and the version and nothing that
+    /// needs updating: automatic updates are not part of this application.
+    fn show_about(&mut self, cx: &mut Context<Self>) {
+        if let Some(window) = self.about_window
+            && window
+                .update(cx, |_, window, _| window.activate_window())
+                .is_ok()
+        {
+            return;
+        }
+        let bounds = WindowBounds::centered(size(px(360.), px(220.)), cx);
+        let opened = cx.open_window(
+            WindowOptions {
+                window_bounds: Some(bounds),
+                // Drawn by the app like the settings window's, so it carries
+                // the theme rather than AppKit's title bar material. Fixed in
+                // size, because there is nothing in it to make room for.
+                titlebar: Some(TitlebarOptions {
+                    title: Some("About Folio".into()),
+                    appears_transparent: true,
+                    traffic_light_position: None,
+                }),
+                app_owns_titlebar_drag: true,
+                is_resizable: false,
+                is_movable: true,
+                ..Default::default()
+            },
+            |window, cx| {
+                let view = cx.new(|_| AboutView);
+                cx.new(|cx| Root::new(view, window, cx))
+            },
+        );
+        match opened {
+            Ok(window) => self.about_window = Some(window),
+            Err(error) => self.error(format!("Could not open the About window: {error}"), cx),
         }
         cx.notify();
     }
@@ -5161,6 +5203,54 @@ impl Folio {
     }
 }
 
+/// The About window: the name, the version and what the application is.
+struct AboutView;
+
+impl Render for AboutView {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id("about")
+            .key_context("FolioAbout")
+            .size_full()
+            .flex()
+            .flex_col()
+            .bg(cx.theme().background)
+            .text_color(cx.theme().foreground)
+            .text_size(ui(13.))
+            .child(
+                TitleBar::new()
+                    .bg(cx.theme().background)
+                    .border_color(cx.theme().border)
+                    .child(div().h_full().flex_1()),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap_2()
+                    .child(div().text_size(ui(22.)).child("Folio"))
+                    // Read from the manifest rather than written out here, so
+                    // it cannot drift from the version that was built.
+                    .child(
+                        div()
+                            .text_size(ui(12.))
+                            .text_color(cx.theme().muted_foreground)
+                            .child(format!("Version {}", env!("CARGO_PKG_VERSION"))),
+                    )
+                    .child(
+                        div()
+                            .text_size(ui(11.))
+                            .text_color(cx.theme().muted_foreground)
+                            .child("A local code reading editor, built with Rust and GPUI."),
+                    ),
+            )
+    }
+}
+
 /// The `⌘,` window: a plain form over `Folio`'s settings. It owns its own text
 /// fields and pushes every change back through the app view, so there is one
 /// copy of the settings and one place that applies them.
@@ -5807,7 +5897,7 @@ impl Render for SettingsView {
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .text_size(ui(13.))
-            .on_action(cx.listener(|_, _: &CloseSettings, window, _| window.remove_window()))
+            .on_action(cx.listener(|_, _: &CloseWindow, window, _| window.remove_window()))
             .on_action(cx.listener(|this, _: &Quit, window, cx| {
                 if let Some(folio) = this.folio.upgrade() {
                     folio.update(cx, |folio, cx| folio.request(Next::Quit, window, cx));
@@ -5901,6 +5991,7 @@ impl Render for Folio {
             }))
             .on_action(cx.listener(|this, _: &OpenSettings, _, cx| this.show_settings(cx)))
             .on_action(cx.listener(|this, _: &ToggleDiff, window, cx| this.toggle_diff(window, cx)))
+            .on_action(cx.listener(|this, _: &OpenAbout, _, cx| this.show_about(cx)))
             .on_action(
                 cx.listener(|this, _: &ToggleComment, window, cx| this.toggle_comment(window, cx)),
             )
@@ -7515,6 +7606,19 @@ mod tests {
             start("don\n", 3..3, window, cx);
             app.pair_quote("'", window, cx);
             assert_eq!(value(cx), "don'\n");
+        });
+    }
+
+    /// The About window builds. Its version comes from the manifest, so there
+    /// is nothing to assert about it that the compiler has not already.
+    #[gpui::test]
+    fn the_about_view_renders(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let cx = cx.add_empty_window();
+        let about = cx.update(|_, cx| cx.new(|_| AboutView));
+        about.update_in(cx, |view, window, cx| {
+            // The harness never draws on its own.
+            let _ = view.render(window, cx);
         });
     }
 
