@@ -3889,6 +3889,49 @@ impl Folio {
         cx.notify();
     }
 
+    /// A left or right while the panel is open. It switches the mode tab
+    /// — Files sits to the left of Contents, and the arrows follow that
+    /// order — but only when the focused query's caret is already against
+    /// the edge the key points at. Anywhere inside the text, or with the
+    /// focus somewhere the panel cannot see, the key keeps its ordinary
+    /// meaning. Returns whether the tab switched.
+    fn panel_arrow(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let left = key == "left";
+        let neighbor = match (self.panel, left) {
+            (Some(Panel::Search), true) => Some(Panel::Files),
+            (Some(Panel::Files), false) => Some(Panel::Search),
+            _ => None,
+        };
+        let Some(neighbor) = neighbor else {
+            return false;
+        };
+        if !self.panel_caret_at_edge(left, window, cx) {
+            return false;
+        }
+        self.select_panel(neighbor, window, cx);
+        true
+    }
+
+    /// Whether the caret of the query the panel's focus sits in is against
+    /// the edge `left` names — offset 0, or the end of the text — with
+    /// nothing selected. Only a panel input counts, so a caret in the
+    /// editor behind the panel never spends an arrow on the tabs.
+    fn panel_caret_at_edge(&self, left: bool, window: &Window, cx: &App) -> bool {
+        let at_edge = |input: &Entity<InputState>| {
+            if !input.focus_handle(cx).is_focused(window) {
+                return false;
+            }
+            let base = input.read(cx).base_state().read(cx);
+            base.selected_value().is_empty()
+                && base.cursor() == if left { 0 } else { base.value().len() }
+        };
+        match self.panel {
+            Some(Panel::Files) => at_edge(&self.query),
+            Some(Panel::Search) => at_edge(&self.search_query) || at_edge(&self.replace_query),
+            None => false,
+        }
+    }
+
     fn close_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.panel = None;
         if let Some(doc) = self
@@ -6696,6 +6739,11 @@ impl Render for Folio {
                             }
                         }
                     }
+                    "left" | "right" => {
+                        if !this.panel_arrow(event.keystroke.key.as_str(), window, cx) {
+                            return;
+                        }
+                    }
                     _ => return,
                 }
                 cx.stop_propagation();
@@ -7879,6 +7927,120 @@ mod tests {
             assert!(app.project.tabs.is_empty());
             assert!(app.project.documents.is_empty());
         });
+    }
+
+    /// Left and right in the panel switch the mode tabs from the caret's
+    /// edges, and keep their ordinary meaning everywhere else.
+    #[gpui::test]
+    fn panel_arrows_switch_the_mode_tabs(cx: &mut TestAppContext) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        std::fs::write(root.join("main.rs"), "// original\n").unwrap();
+        cx.update(gpui_component::init);
+        let cx = cx.add_empty_window();
+        let view = cx.update(|window, cx| {
+            cx.new(|cx| {
+                let mut app = Folio::new(window, cx);
+                app.recent_task = None;
+                app.recent_file = root.join("recent.json");
+                app.settings_file = root.join("settings.json");
+                app.window_file = root.join("window.json");
+                app.settings = Settings::default();
+                app.applied_ignored = app.settings.ignored.clone();
+                app
+            })
+        });
+        view.update_in(cx, |app, window, cx| {
+            app.request(Next::Open(root.clone()), window, cx)
+        });
+        cx.run_until_parked();
+
+        // The query is focused and empty when the panel opens, so the caret
+        // sits on both edges at once: right takes Files to Contents, and
+        // left, which would leave the first tab, does not move.
+        view.update_in(cx, |app, window, cx| {
+            app.show_quick_open(false, window, cx);
+            assert_eq!(app.panel, Some(Panel::Files));
+            assert!(
+                !app.panel_arrow("left", window, cx),
+                "left at the first tab stays"
+            );
+            assert_eq!(app.panel, Some(Panel::Files));
+            assert!(
+                app.panel_arrow("right", window, cx),
+                "right at the edge takes the tab to Contents"
+            );
+            assert_eq!(app.panel, Some(Panel::Search));
+            assert!(
+                !app.panel_arrow("right", window, cx),
+                "right at the last tab stays"
+            );
+            assert!(
+                app.panel_arrow("left", window, cx),
+                "left at the edge takes the tab back to Files"
+            );
+            assert_eq!(app.panel, Some(Panel::Files));
+        });
+
+        // A caret inside the text keeps the key, and so does a selection.
+        view.update_in(cx, |app, window, cx| {
+            app.show_quick_open(false, window, cx);
+            let query = app.query.clone();
+            query.update(cx, |query, cx| {
+                query.set_value("ab", window, cx);
+                query
+                    .base_state()
+                    .update(cx, |base, cx| base.set_selected_range(1..1, cx));
+            });
+            assert!(
+                !app.panel_arrow("right", window, cx),
+                "a caret inside the text keeps right"
+            );
+            assert_eq!(app.panel, Some(Panel::Files));
+            query.update(cx, |query, cx| query.select_all(window, cx));
+            assert!(
+                !app.panel_arrow("right", window, cx),
+                "a selection keeps the key"
+            );
+            assert_eq!(app.panel, Some(Panel::Files));
+            query.update(cx, |query, cx| {
+                query
+                    .base_state()
+                    .update(cx, |base, cx| base.set_selected_range(2..2, cx));
+            });
+            assert!(
+                app.panel_arrow("right", window, cx),
+                "the caret at the end spends the key on the tab"
+            );
+            assert_eq!(app.panel, Some(Panel::Search));
+        });
+
+        // A focus outside the panel inputs keeps the key too: the editor
+        // behind the overlay must not spend its arrows on the tabs.
+        view.update_in(cx, |app, window, cx| {
+            app.open_file(root.join("main.rs"), window, cx);
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |app, window, cx| {
+            app.show_search(false, window, cx);
+            app.project.documents[&root.join("main.rs")]
+                .editor
+                .focus_handle(cx)
+                .focus(window, cx);
+            assert!(
+                !app.panel_arrow("left", window, cx),
+                "a focus outside the panel keeps left"
+            );
+            assert_eq!(app.panel, Some(Panel::Search));
+            app.search_query
+                .update(cx, |query, cx| query.focus(window, cx));
+            assert!(
+                app.panel_arrow("left", window, cx),
+                "the query's empty text puts the caret on both edges again"
+            );
+            assert_eq!(app.panel, Some(Panel::Files));
+        });
+        cx.run_until_parked();
     }
 
     /// The changes view: `⇧⌘D` shows the active file's diff against HEAD,

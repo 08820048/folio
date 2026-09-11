@@ -390,7 +390,10 @@ project starts. Results are grouped per file with line numbers and a context
 preview, and matches are drawn in the accent colour. Long lines are windowed
 around the match and marked with an ellipsis, leading indentation is dropped
 and tabs expand to four spaces, so the previews line up. `↑ ↓` chooses, `Enter`
-opens the file with the cursor on the match, and `Esc` closes.
+opens the file with the cursor on the match, and `Esc` closes. `← →` switch
+between the Files and Contents tabs when the focused query's caret is against
+the edge the key points at — the text's end for `→`, its start for `←` — and
+inside the text they keep moving the caret, as does a focus outside the panel.
 
 Three filters, following editor convention, apply to both find and replace:
 
@@ -488,7 +491,8 @@ GPUI test executor for the rest: repeated expand and collapse, recents written
 in order, stale callbacks across projects, picker exclusivity, dirty buffers
 kept across projects and the save conflict on quit, image decoding and
 switching between an image and a dirty text buffer, edits made during a save,
-project search reading unsaved content, landing the cursor on a hit, and the
+project search reading unsaved content, landing the cursor on a hit, the panel
+arrows switching Files and Contents at the caret's edges, and the
 open-buffer-in-memory versus closed-file-on-disk split in replace, the tree
 menu driving create, rename, cut, paste, duplicate, delete and Find in Folder
 — including the entries the root menu omits, both windows' geometry being
