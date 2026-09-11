@@ -7834,10 +7834,19 @@ mod tests {
 
     /// The shortcut strings the menus print are matched against real
     /// keystrokes, and the capture-phase claim for the project search rests on
-    /// this one matching. The key dispatch itself cannot be exercised here —
-    /// keystrokes never reach the view in this harness, which was checked by
-    /// simulating one the app definitely binds and watching nothing happen —
-    /// so what is pinned is the predicate rather than the dispatch.
+    /// this one matching. The key dispatch itself cannot be exercised here, so
+    /// what is pinned is the predicate rather than the dispatch.
+    ///
+    /// Why it cannot, since `simulate_keystrokes` is the obvious thing to try.
+    /// Dispatch resolves against the drawn frame, and nothing is drawn in a
+    /// test window: `add_empty_window` has no root view, so the tests that need
+    /// a tree build one by hand. Giving the window a root view with
+    /// `add_window_view` does make the harness draw — and then the first draw
+    /// with an input focused panics inside gpui-component, which asks the
+    /// window for its `NSView` to set a text content type and gets "Test
+    /// Windows are not backed by a real platform window". An editor is an
+    /// input, and opening a file focuses one, so there is no order that both
+    /// draws and keeps a focus. Both halves were checked against the editor.
     #[test]
     fn a_keystroke_matches_the_shortcut_it_prints() {
         let keystroke = |source: &str| Keystroke::parse(source).unwrap();
