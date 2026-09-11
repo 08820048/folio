@@ -12,7 +12,7 @@ fn main() {
         .run(|cx| {
             gpui_component::init(cx);
             syntax::register_extra_languages();
-            gpui_component::set_locale("zh-CN");
+            gpui_component::set_locale("en");
             let _ = cx
                 .text_system()
                 .add_fonts(vec![std::borrow::Cow::Borrowed(include_bytes!(
@@ -36,10 +36,23 @@ fn main() {
                 ),
                 KeyBinding::new(&format!("{modifier}-g"), GoToLine, Some("Folio")),
                 KeyBinding::new(&format!("{modifier}-b"), ToggleSidebar, Some("Folio")),
+                KeyBinding::new(&format!("{modifier}-,"), OpenSettings, Some("Folio")),
                 KeyBinding::new(&format!("{modifier}-q"), Quit, Some("Folio")),
+                // The settings window has its own context: `⌘W` closes that
+                // window rather than the project behind it.
+                KeyBinding::new(
+                    &format!("{modifier}-w"),
+                    CloseSettings,
+                    Some("FolioSettings"),
+                ),
+                KeyBinding::new(&format!("{modifier}-q"), Quit, Some("FolioSettings")),
             ]);
             cx.set_menus([
-                Menu::new("Folio").items([MenuItem::action("Quit Folio", Quit)]),
+                Menu::new("Folio").items([
+                    MenuItem::action("Settings…", OpenSettings),
+                    MenuItem::separator(),
+                    MenuItem::action("Quit Folio", Quit),
+                ]),
                 Menu::new("File").items([
                     MenuItem::action("Open Project…", OpenProject),
                     MenuItem::action("Quick Open…", QuickOpen),
@@ -65,18 +78,15 @@ fn main() {
                     MenuItem::action("Go to Line…", GoToLine),
                 ]),
             ]);
-            let bounds = std::fs::read(config_dir().join("window.json"))
-                .ok()
-                .and_then(|raw| serde_json::from_slice::<[f32; 4]>(&raw).ok())
-                .filter(|v| v.iter().all(|x| x.is_finite()) && v[2] >= 640. && v[3] >= 480.)
-                .map(|[x, y, w, h]| {
-                    WindowBounds::Windowed(Bounds::new(point(px(x), px(y)), size(px(w), px(h))))
-                })
+            let state = WindowState::load(&config_dir().join("window.json"));
+            let bounds = state
+                .main
+                .and_then(|values| restore_bounds(values, MAIN_WINDOW_MIN))
                 .unwrap_or_else(|| WindowBounds::centered(size(px(960.), px(680.)), cx));
             cx.open_window(
                 WindowOptions {
                     window_bounds: Some(bounds),
-                    window_min_size: Some(size(px(640.), px(480.))),
+                    window_min_size: Some(MAIN_WINDOW_MIN),
                     ..TitleBar::window_options()
                 },
                 |window, cx| {

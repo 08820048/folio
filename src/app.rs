@@ -4,15 +4,17 @@ use folio::{
     buffer, fs_op, git,
     recent::{self, RecentProject},
     search,
+    settings::{self, Settings},
     tree::{self, Entry, EntryKind},
     workspace::Workspace,
 };
 use gpui::{prelude::*, *};
 use gpui_component::{
-    ActiveTheme, Disableable, Icon, IconName, Sizable, Theme, TitleBar,
+    ActiveTheme, Disableable, Icon, IconName, Root, Sizable, Theme, TitleBar,
     button::{Button, ButtonVariants},
     input::{Editor, EditorState, Input, InputEvent, InputState, Position, TabSize},
 };
+use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     io,
@@ -24,13 +26,66 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-fn sync_appearance(appearance: WindowAppearance, window: &mut Window, cx: &mut App) {
-    Theme::change(appearance, Some(window), cx);
+/// Fonts tried for the glyphs the code font has no coverage for. GPUI's own
+/// fallback stack names no CJK family at all, so without this a Chinese
+/// character in a file is drawn in whatever the platform happens to pick —
+/// usually a proportional face, which breaks the character grid. The mono CJK
+/// families come first for that reason; the rest are platform defaults.
+const CJK_FALLBACKS: &[&str] = &[
+    "Sarasa Mono SC",
+    "Sarasa Term SC",
+    "Source Han Mono SC",
+    "Noto Sans Mono CJK SC",
+    "Noto Sans Mono CJK TC",
+    "PingFang SC",
+    "Hiragino Sans GB",
+    "Microsoft YaHei",
+    "Noto Sans CJK SC",
+];
+
+/// How wide a text field in the settings is. Wide enough for a font name or a
+/// short list of ignored folders, and the same everywhere so the fields line
+/// up down the right-hand side.
+const FIELD_WIDTH: f32 = 240.;
+
+/// A type size in the interface scale. The design is drawn at 13px, so
+/// `ui(11.)` is the 11px label from the spec, and it grows with the interface
+/// size setting instead of staying pinned.
+fn ui(size: f32) -> Rems {
+    // The argument is a pixel size, not a ratio. Passing one here silently
+    // divides it twice and renders the whole interface at a fraction of a
+    // pixel, which is hard to spot and easy to do.
+    debug_assert!(
+        (8. ..=64.).contains(&size),
+        "ui({size}) is not a size in the 13px design scale"
+    );
+    rems(size / 13.)
+}
+
+/// Apply the theme. `window` is the window being refreshed, when the caller
+/// has one — the settings window changes the theme for every window, so it
+/// passes `None` and refreshes them itself.
+fn sync_appearance(
+    appearance: WindowAppearance,
+    settings: &Settings,
+    mut window: Option<&mut Window>,
+    cx: &mut App,
+) {
+    Theme::change(appearance, window.as_deref_mut(), cx);
     let theme = Theme::global_mut(cx);
     let dark = theme.is_dark();
-    theme.mono_font_family = "JetBrains Mono".into();
-    theme.mono_font_size = px(14.);
-    theme.font_size = px(13.);
+    theme.mono_font_family = settings
+        .code_font_family
+        .clone()
+        .unwrap_or_else(|| "JetBrains Mono".to_string())
+        .into();
+    theme.mono_font_size = px(settings.code_font_size);
+    theme.font_size = px(settings.font_size);
+    // `Theme::change` has already put its own family back, so leaving this
+    // alone is what "system default" means.
+    if let Some(family) = settings.font_family.clone() {
+        theme.font_family = family.into();
+    }
     theme.background = rgb(if dark { 0x181A1C } else { 0xFAFAF8 }).into();
     theme.foreground = rgb(if dark { 0xDCDDD8 } else { 0x282D2B }).into();
     theme.sidebar = rgb(if dark { 0x1D1F21 } else { 0xF0F1ED }).into();
@@ -51,7 +106,9 @@ fn sync_appearance(appearance: WindowAppearance, window: &mut Window, cx: &mut A
     highlight.style.editor_gutter_background = Some(background);
     highlight.style.editor_active_line = Some(rgb(if dark { 0x212628 } else { 0xEFF2EB }).into());
     highlight.style.editor_line_number = Some(muted);
-    window.refresh();
+    if let Some(window) = window {
+        window.refresh();
+    }
 }
 
 actions!(
@@ -65,6 +122,8 @@ actions!(
         ProjectReplace,
         GoToLine,
         ToggleSidebar,
+        OpenSettings,
+        CloseSettings,
         Quit
     ]
 );
@@ -343,6 +402,26 @@ pub struct Folio {
     search_query: Entity<InputState>,
     replace_query: Entity<InputState>,
     search: SearchState,
+    /// Loaded once at startup and written back whenever the panel changes it.
+    settings: Settings,
+    /// The ignore rules the tree's cached listings were built with. Tracked
+    /// separately because callers edit `settings` before applying it, so
+    /// comparing against that field would never see a change.
+    applied_ignored: Vec<String>,
+    settings_file: PathBuf,
+    /// Held so the settings window can be focused instead of opened twice.
+    settings_window: Option<WindowHandle<Root>>,
+    settings_view: Option<Entity<SettingsView>>,
+    /// The system appearance, kept so a theme change can be applied without
+    /// borrowing a particular window.
+    appearance: WindowAppearance,
+    /// The main window's bounds. Recorded here because `⌘Q` can arrive from
+    /// the settings window, and the geometry to persist is never its own.
+    main_bounds: Bounds<Pixels>,
+    /// Where the settings window was, as last saved. `None` means it has never
+    /// been placed, so it opens centred.
+    settings_bounds: Option<[f32; 4]>,
+    window_file: PathBuf,
     /// Bumped for every new search; a running scan compares it to stop early.
     search_request: Arc<AtomicU64>,
     /// Set when a search result is opened, so the cursor lands on the match once
@@ -358,11 +437,26 @@ pub struct Folio {
 
 impl Folio {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        sync_appearance(window.appearance(), window, cx);
-        let appearance_subscription = cx.observe_window_appearance(window, |_, window, cx| {
-            sync_appearance(window.appearance(), window, cx);
-            cx.notify();
-        });
+        // A corrupt settings file falls back to the defaults rather than
+        // stopping the app, but the user is told instead of it being silently
+        // replaced on the next write.
+        let settings_file = config_dir().join("settings.json");
+        let (settings, settings_error) = match settings::load(&settings_file) {
+            Ok(settings) => (settings, None),
+            Err(error) => (
+                Settings::default(),
+                Some(format!("Could not read settings: {error}")),
+            ),
+        };
+        let appearance = window.appearance();
+        let main_bounds = window.window_bounds().get_bounds();
+        sync_appearance(appearance, &settings, Some(window), cx);
+        let appearance_subscription =
+            cx.observe_window_appearance(window, |this: &mut Self, window, cx| {
+                this.appearance = window.appearance();
+                sync_appearance(this.appearance, &this.settings, Some(window), cx);
+                cx.notify();
+            });
         let query = cx
             .new(|cx| InputState::new(window, cx).placeholder("Search file names, or type :line"));
         let subscription = cx.subscribe_in(
@@ -379,6 +473,7 @@ impl Folio {
         );
         let bounds_subscription =
             cx.observe_window_bounds(window, |this: &mut Self, window, cx| {
+                this.main_bounds = window.window_bounds().get_bounds();
                 this.sidebar_width = this
                     .sidebar_width
                     .min((f32::from(window.viewport_size().width) * 0.4).max(160.));
@@ -409,6 +504,9 @@ impl Folio {
             },
         );
         let recent_file = config_dir().join("recent.json");
+        let window_file = config_dir().join("window.json");
+        let settings_bounds = WindowState::load(&window_file).settings;
+        let settings_ignored = settings.ignored.clone();
         let mut this = Self {
             project: Project::default(),
             parked: vec![],
@@ -418,7 +516,7 @@ impl Folio {
             recent_task: None,
             tree_focus: cx.focus_handle(),
             quick_scroll: UniformListScrollHandle::new(),
-            sidebar: true,
+            sidebar: settings.sidebar,
             sidebar_width: 240.,
             resizing: false,
             generation: 0,
@@ -433,9 +531,18 @@ impl Folio {
             search_query,
             replace_query,
             search: SearchState::default(),
+            settings,
+            applied_ignored: settings_ignored,
+            settings_file,
+            settings_window: None,
+            settings_view: None,
+            appearance,
+            main_bounds,
+            settings_bounds,
+            window_file,
             search_request: Arc::new(AtomicU64::new(0)),
             goto: None,
-            message: None,
+            message: settings_error,
             loading: false,
             project_loading: false,
             saving: false,
@@ -504,23 +611,19 @@ impl Folio {
     fn perform(&mut self, next: Next, window: &mut Window, cx: &mut Context<Self>) {
         match next {
             Next::Quit => {
-                let bounds = window.window_bounds().get_bounds();
-                let values = [
-                    f32::from(bounds.origin.x),
-                    f32::from(bounds.origin.y),
-                    f32::from(bounds.size.width),
-                    f32::from(bounds.size.height),
-                ];
-                let save_window = || -> std::io::Result<()> {
-                    std::fs::create_dir_all(config_dir())?;
-                    std::fs::write(
-                        config_dir().join("window.json"),
-                        serde_json::to_vec(&values)?,
-                    )
-                };
-                if let Err(error) = save_window() {
-                    eprintln!("Could not save the window position: {error}");
+                // A settings window still open is the authority on its own
+                // geometry; otherwise whatever it last reported stands.
+                let open = self.settings_window.and_then(|window| {
+                    window
+                        .update(cx, |_, window, _| {
+                            bounds_values(window.window_bounds().get_bounds())
+                        })
+                        .ok()
+                });
+                if open.is_some() {
+                    self.settings_bounds = open;
                 }
+                self.save_window_state();
                 cx.quit();
             }
             Next::Close => {
@@ -674,9 +777,10 @@ impl Folio {
         self.message = None;
         cx.notify();
         let generation = self.generation;
+        let ignored = self.settings.ignored.clone();
         let task = cx.background_executor().spawn(async move {
             let workspace = Workspace::open(&path)?;
-            let children = tree::children(&workspace.root)?;
+            let children = tree::children(&workspace.root, &ignored)?;
             Ok::<_, std::io::Error>((workspace, children))
         });
         cx.spawn_in(window, async move |this, cx| {
@@ -753,9 +857,10 @@ impl Folio {
         self.project.indexing = true;
         let project_id = self.project.id;
         let root = workspace.root.clone();
+        let ignored = self.settings.ignored.clone();
         let task = cx
             .background_executor()
-            .spawn(async move { tree::index(&root) });
+            .spawn(async move { tree::index(&root, &ignored) });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
@@ -907,9 +1012,10 @@ impl Folio {
                 self.project.directories.insert(path.clone(), vec![]);
                 let project_id = self.project.id;
                 let dir = path.clone();
+                let ignored = self.settings.ignored.clone();
                 let task = cx
                     .background_executor()
-                    .spawn(async move { tree::children(&dir) });
+                    .spawn(async move { tree::children(&dir, &ignored) });
                 cx.spawn(async move |this, cx| {
                     let result = task.await;
                     let _ = this.update(cx, |this, cx| {
@@ -948,9 +1054,10 @@ impl Folio {
         }
         let project_id = self.project.id;
         let read = dir.clone();
+        let ignored = self.settings.ignored.clone();
         let task = cx
             .background_executor()
-            .spawn(async move { tree::children(&read) });
+            .spawn(async move { tree::children(&read, &ignored) });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
@@ -1188,6 +1295,24 @@ impl Folio {
         self.project
             .directories
             .retain(|key, _| !key.starts_with(path));
+    }
+
+    /// Note where the settings window was and persist it alongside the main
+    /// window's geometry.
+    fn remember_settings_bounds(&mut self, bounds: Bounds<Pixels>) {
+        self.settings_bounds = Some(bounds_values(bounds));
+        self.save_window_state();
+    }
+
+    /// Persist both windows' geometry. Written whenever either window goes
+    /// away, so the app never depends on quitting being the last thing to
+    /// happen.
+    fn save_window_state(&self) {
+        WindowState {
+            main: Some(bounds_values(self.main_bounds)),
+            settings: self.settings_bounds,
+        }
+        .save(&self.window_file);
     }
 
     /// Re-key the state that pointed at `from`, now that it lives at `to`. A
@@ -1543,6 +1668,151 @@ impl Folio {
         cx.notify();
     }
 
+    /// `⌘,`: the settings window. Focuses the one already open rather than
+    /// opening a second, and reopens it if it was closed.
+    fn show_settings(&mut self, cx: &mut Context<Self>) {
+        if let Some(window) = self.settings_window
+            && window
+                .update(cx, |_, window, _| window.activate_window())
+                .is_ok()
+        {
+            return;
+        }
+        let bounds = self
+            .settings_bounds
+            .and_then(|values| restore_bounds(values, SETTINGS_WINDOW_MIN))
+            .unwrap_or_else(|| WindowBounds::centered(SETTINGS_WINDOW_DEFAULT, cx));
+        let folio = cx.entity().downgrade();
+        let settings = self.settings.clone();
+        let opened = cx.open_window(
+            WindowOptions {
+                window_bounds: Some(bounds),
+                window_min_size: Some(SETTINGS_WINDOW_MIN),
+                // The title bar is drawn by the app, exactly as the main
+                // window does it. Leaving it to AppKit instead makes it use
+                // the system titlebar material, which samples what is behind
+                // the window and lands nowhere near the theme.
+                titlebar: Some(TitlebarOptions {
+                    title: Some("Settings".into()),
+                    appears_transparent: true,
+                    traffic_light_position: None,
+                }),
+                app_owns_titlebar_drag: true,
+                is_resizable: true,
+                is_movable: true,
+                ..Default::default()
+            },
+            move |window, cx| {
+                let view = cx.new(|cx| SettingsView::new(folio.clone(), settings, window, cx));
+                // Recorded as the window goes away, so the geometry survives
+                // even when the app is not quit from this window.
+                window.on_window_should_close(cx, move |window, cx| {
+                    let bounds = window.window_bounds().get_bounds();
+                    if let Some(folio) = folio.upgrade() {
+                        folio.update(cx, |folio, _| folio.remember_settings_bounds(bounds));
+                    }
+                    true
+                });
+                cx.new(|cx| Root::new(view, window, cx))
+            },
+        );
+        match opened {
+            Ok(window) => {
+                self.settings_window = Some(window);
+                // Kept so `apply_settings` can tell the form to repaint. The
+                // window callback runs inside this update, so the view is
+                // reached through the opened root rather than registered from
+                // within it.
+                self.settings_view = window
+                    .update(cx, |root, _, _| {
+                        root.view().clone().downcast::<SettingsView>().ok()
+                    })
+                    .ok()
+                    .flatten();
+            }
+            Err(error) => self.error(format!("Could not open the settings: {error}"), cx),
+        }
+        cx.notify();
+    }
+
+    /// Everything the settings window changes lands here: clamp, apply, then
+    /// persist. Writing the file is small enough to do on every step.
+    fn apply_settings(&mut self, cx: &mut Context<Self>) {
+        self.settings = self.settings.clone().clamped();
+        // Only the ignore rules invalidate cached directory listings.
+        let ignored_changed = self.settings.ignored != self.applied_ignored;
+        self.applied_ignored = self.settings.ignored.clone();
+        // Every window shares one theme, and the change may have come from
+        // either of them, so apply it without borrowing a window and repaint
+        // them all.
+        sync_appearance(self.appearance, &self.settings, None, cx);
+        // The sidebar setting is the stored state the `⌘B` toggle writes back.
+        self.sidebar = self.settings.sidebar;
+        if ignored_changed {
+            self.reload_tree(cx);
+        }
+        // Deferred: the change may have come *from* the settings window, and
+        // updating a view that is already mid-update is a re-entrant borrow.
+        if let Some(view) = self.settings_view.clone() {
+            let settings = self.settings.clone();
+            cx.defer(move |cx| {
+                view.update(cx, |view, cx| view.set_settings(settings, cx));
+            });
+        }
+        let file = self.settings_file.clone();
+        let settings = self.settings.clone();
+        let task = cx
+            .background_executor()
+            .spawn(async move { settings::save(&file, &settings) });
+        cx.spawn(async move |this, cx| {
+            if let Err(error) = task.await {
+                let _ = this.update(cx, |this, cx| {
+                    this.error(format!("Could not save settings: {error}"), cx)
+                });
+            }
+        })
+        .detach();
+        cx.refresh_windows();
+        cx.notify();
+    }
+
+    /// The ignore rules changed, so every cached listing is suspect. One
+    /// background pass re-reads the folders the tree is currently holding.
+    fn reload_tree(&mut self, cx: &mut Context<Self>) {
+        let Some(root) = self.project.workspace.as_ref().map(|w| w.root.clone()) else {
+            return;
+        };
+        let project_id = self.project.id;
+        let mut wanted: Vec<PathBuf> = self.project.expanded.iter().cloned().collect();
+        wanted.push(root);
+        wanted.sort();
+        wanted.dedup();
+        let ignored = self.settings.ignored.clone();
+        let task = cx.background_executor().spawn(async move {
+            let mut cache = HashMap::new();
+            for dir in wanted {
+                if let Ok(children) = tree::children(&dir, &ignored) {
+                    cache.insert(dir, children);
+                }
+            }
+            cache
+        });
+        cx.spawn(async move |this, cx| {
+            let cache = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if let Some(project) = this.project_mut(project_id) {
+                    project.directories = cache;
+                }
+                if this.project.id == project_id {
+                    this.rebuild_rows();
+                    this.reindex(cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn open_file(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         if self.saving || self.project_loading || self.prompting {
             return;
@@ -1616,14 +1886,18 @@ impl Folio {
                             buffer::language(&path)
                         };
                         let saved: SharedString = text.into();
+                        let tabs = TabSize {
+                            tab_size: this.settings.tab_size,
+                            hard_tabs: this.settings.hard_tabs,
+                        };
                         let editor = cx.new(|cx| {
                             EditorState::new(language, window, cx)
                                 .default_value(saved.clone())
                                 .line_number(true)
                                 .folding(false)
                                 .tab_size(TabSize {
-                                    tab_size: 4,
-                                    hard_tabs: false,
+                                    tab_size: tabs.tab_size,
+                                    hard_tabs: tabs.hard_tabs,
                                 })
                         });
                         editor.update(cx, |state, cx| {
@@ -2342,10 +2616,10 @@ impl Folio {
                                     .flex()
                                     .flex_col()
                                     .gap_1()
-                                    .child(div().text_size(px(32.)).child("Folio"))
+                                    .child(div().text_size(ui(32.)).child("Folio"))
                                     .child(
                                         div()
-                                            .text_size(px(13.))
+                                            .text_size(ui(13.))
                                             .text_color(cx.theme().muted_foreground)
                                             .child("Read the code, change a few lines."),
                                     ),
@@ -2373,7 +2647,7 @@ impl Folio {
                                 div()
                                     .flex()
                                     .justify_between()
-                                    .text_size(px(11.))
+                                    .text_size(ui(11.))
                                     .text_color(cx.theme().muted_foreground)
                                     .child("Recent Projects")
                                     .child("⌘ O"),
@@ -2382,7 +2656,7 @@ impl Folio {
                                 el.child(
                                     div()
                                         .py_4()
-                                        .text_size(px(13.))
+                                        .text_size(ui(13.))
                                         .text_color(cx.theme().muted_foreground)
                                         .child("Start from a local folder."),
                                 )
@@ -2442,14 +2716,14 @@ impl Folio {
                                                     ))
                                                     .child(
                                                         div()
-                                                            .text_size(px(11.))
+                                                            .text_size(ui(11.))
                                                             .text_color(cx.theme().muted_foreground)
                                                             .child(relative_time(item.last_opened)),
                                                     ),
                                             )
                                             .child(
                                                 div()
-                                                    .text_size(px(11.))
+                                                    .text_size(ui(11.))
                                                     .text_color(cx.theme().muted_foreground)
                                                     .truncate()
                                                     .child(
@@ -2468,7 +2742,7 @@ impl Folio {
                     )
                     .child(
                         div()
-                            .text_size(px(11.))
+                            .text_size(ui(11.))
                             .text_color(cx.theme().muted_foreground)
                             .child("Or drop a folder here"),
                     ),
@@ -2515,7 +2789,7 @@ impl Folio {
             .flex()
             .items_center()
             .gap_2()
-            .text_size(px(12.))
+            .text_size(ui(12.))
             .text_color(if current {
                 cx.theme().foreground
             } else {
@@ -2674,7 +2948,7 @@ impl Folio {
                             .flex()
                             .items_center()
                             .gap_2()
-                            .text_size(px(12.))
+                            .text_size(ui(12.))
                             .cursor_default()
                             .when(selected || i == this.project.selected_row, |el| {
                                 el.bg(cx.theme().list_active)
@@ -2811,7 +3085,7 @@ impl Folio {
             .p_1()
             .flex()
             .flex_col()
-            .text_size(px(12.))
+            .text_size(ui(12.))
             .text_color(cx.theme().foreground)
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .children(
@@ -2860,7 +3134,7 @@ impl Folio {
                             .child(div().child(label))
                             .child(
                                 div()
-                                    .text_size(px(11.))
+                                    .text_size(ui(11.))
                                     .text_color(cx.theme().muted_foreground)
                                     .child(shortcut_label(shortcut)),
                             )
@@ -2993,7 +3267,7 @@ impl Folio {
             .items_center()
             .rounded_sm()
             .cursor_pointer()
-            .text_size(px(11.))
+            .text_size(ui(11.))
             .text_color(if active {
                 cx.theme().accent_foreground
             } else {
@@ -3043,7 +3317,7 @@ impl Folio {
             .rounded_sm()
             .cursor_pointer()
             .font_family("JetBrains Mono")
-            .text_size(px(11.))
+            .text_size(ui(11.))
             .text_color(if active {
                 cx.theme().accent_foreground
             } else {
@@ -3081,7 +3355,7 @@ impl Folio {
             .child(
                 div()
                     .px_2()
-                    .text_size(px(11.))
+                    .text_size(ui(11.))
                     .text_color(cx.theme().muted_foreground)
                     .child(if self.project.indexing {
                         "Indexing files…"
@@ -3107,7 +3381,7 @@ impl Folio {
                                         .px_2()
                                         .flex()
                                         .items_center()
-                                        .text_size(px(12.))
+                                        .text_size(ui(12.))
                                         .rounded_sm()
                                         .when(i == this.match_selected, |el| {
                                             el.bg(cx.theme().list_active)
@@ -3148,7 +3422,7 @@ impl Folio {
                         .items_center()
                         .gap_1()
                         .px_2()
-                        .text_size(px(11.))
+                        .text_size(ui(11.))
                         .text_color(cx.theme().muted_foreground)
                         .child(format!("In {label}"))
                         .child(Self::icon_button(
@@ -3239,7 +3513,7 @@ impl Folio {
             .flex()
             .items_center()
             .gap_2()
-            .text_size(px(11.))
+            .text_size(ui(11.))
             .text_color(if error {
                 cx.theme().warning
             } else {
@@ -3261,7 +3535,7 @@ impl Folio {
             .flex()
             .items_center()
             .gap_2()
-            .text_size(px(12.))
+            .text_size(ui(12.))
             .cursor_default()
             .when(selected, |el| el.bg(cx.theme().list_active))
             .hover(|el| el.bg(cx.theme().list_hover));
@@ -3291,7 +3565,7 @@ impl Folio {
                     .child(
                         div()
                             .flex_shrink_0()
-                            .text_size(px(11.))
+                            .text_size(ui(11.))
                             .text_color(cx.theme().muted_foreground)
                             .child(format!("{count}")),
                     )
@@ -3318,7 +3592,7 @@ impl Folio {
                             .flex_shrink_0()
                             .text_right()
                             .font_family("JetBrains Mono")
-                            .text_size(px(11.))
+                            .text_size(ui(11.))
                             .text_color(cx.theme().muted_foreground)
                             .child(format!("{line}")),
                     )
@@ -3398,14 +3672,14 @@ impl Folio {
                             cx,
                         ))
                     })
-                    .child(div().text_size(px(12.)).child(project))
+                    .child(div().text_size(ui(12.)).child(project))
                     .when(relative.is_some(), |el| {
                         el.child(div().text_color(cx.theme().muted_foreground).child("/"))
                     })
                     .child(
                         div()
                             .flex_1()
-                            .text_size(px(12.))
+                            .text_size(ui(12.))
                             .text_color(cx.theme().muted_foreground)
                             .truncate()
                             .child(relative.unwrap_or_default()),
@@ -3420,7 +3694,7 @@ impl Folio {
                     .when(self.loading, |el| {
                         el.child(
                             div()
-                                .text_size(px(11.))
+                                .text_size(ui(11.))
                                 .text_color(cx.theme().muted_foreground)
                                 .child("Loading…"),
                         )
@@ -3517,7 +3791,7 @@ impl Folio {
                                         div()
                                             .px_4()
                                             .py_1()
-                                            .text_size(px(11.))
+                                            .text_size(ui(11.))
                                             .text_color(cx.theme().muted_foreground)
                                             .child("Large file · syntax highlighting off"),
                                     )
@@ -3527,7 +3801,7 @@ impl Folio {
                                         .h_full()
                                         .bordered(false)
                                         .readonly(self.saving || self.loading || self.prompting)
-                                        .text_size(px(14.))
+                                        .text_size(ui(14.))
                                         .font_family("JetBrains Mono")
                                         .line_height(gpui::relative(1.6))
                                         .rounded_none(),
@@ -3545,7 +3819,7 @@ impl Folio {
                                     div()
                                         .px_4()
                                         .py_2()
-                                        .text_size(px(11.))
+                                        .text_size(ui(11.))
                                         .text_color(cx.theme().muted_foreground)
                                         .child(format!(
                                             "{} · {} × {} · static preview",
@@ -3566,13 +3840,13 @@ impl Folio {
                                         .items_center()
                                         .child(
                                             div()
-                                                .text_size(px(24.))
+                                                .text_size(ui(24.))
                                                 .text_color(cx.theme().accent_foreground)
                                                 .child("Some room to read a little code."),
                                         )
                                         .child(
                                             div()
-                                                .text_size(px(12.))
+                                                .text_size(ui(12.))
                                                 .text_color(cx.theme().muted_foreground)
                                                 .child("Pick a file on the left, or press ⌘ P"),
                                         ),
@@ -3584,11 +3858,704 @@ impl Folio {
     }
 }
 
+/// The `⌘,` window: a plain form over `Folio`'s settings. It owns its own text
+/// fields and pushes every change back through the app view, so there is one
+/// copy of the settings and one place that applies them.
+/// A page of settings. These are the leaves of the sidebar tree, and each one
+/// is one screen of rows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Page {
+    Interface,
+    Type,
+    Indentation,
+    Sidebar,
+    Ignored,
+}
+
+impl Page {
+    fn title(self) -> &'static str {
+        match self {
+            Page::Interface => "Interface",
+            Page::Type => "Type",
+            Page::Indentation => "Indentation",
+            Page::Sidebar => "Sidebar",
+            Page::Ignored => "Ignored Folders",
+        }
+    }
+
+    fn key(self) -> &'static str {
+        match self {
+            Page::Interface => "interface",
+            Page::Type => "type",
+            Page::Indentation => "indentation",
+            Page::Sidebar => "sidebar",
+            Page::Ignored => "ignored",
+        }
+    }
+
+    fn subtitle(self) -> &'static str {
+        match self {
+            Page::Interface => "How the interface itself looks",
+            Page::Type => "The font code is drawn in",
+            Page::Indentation => "Tabs, spaces and how wide they are",
+            Page::Sidebar => "How the window is arranged",
+            Page::Ignored => "Which files a project shows",
+        }
+    }
+}
+
+/// A heading in the sidebar and the pages under it. Zed's shape: the headings
+/// collapse, and only the pages are screens.
+struct Group {
+    title: &'static str,
+    pages: &'static [Page],
+}
+
+const GROUPS: &[Group] = &[
+    Group {
+        title: "Appearance",
+        pages: &[Page::Interface],
+    },
+    Group {
+        title: "Editor",
+        pages: &[Page::Type, Page::Indentation],
+    },
+    Group {
+        title: "Window & Layout",
+        pages: &[Page::Sidebar],
+    },
+    Group {
+        title: "Files",
+        pages: &[Page::Ignored],
+    },
+];
+
+struct SettingsView {
+    folio: WeakEntity<Folio>,
+    /// A snapshot of what is stored. The view renders this instead of reading
+    /// the app view: the settings window is built from inside `Folio`'s own
+    /// update, and rendering it while that is in flight would be a re-entrant
+    /// read. It is only ever written through `set_settings` and `change`.
+    settings: Settings,
+    /// Which page is showing, and which headings are open. A view of its own
+    /// rather than part of the stored settings: it is where you were, not what
+    /// you chose.
+    page: Page,
+    expanded: [bool; GROUPS.len()],
+    font_query: Entity<InputState>,
+    code_font_query: Entity<InputState>,
+    ignore_query: Entity<InputState>,
+    _subscriptions: Vec<Subscription>,
+}
+
+impl SettingsView {
+    fn new(
+        folio: WeakEntity<Folio>,
+        settings: Settings,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let font_query = cx.new(|cx| InputState::new(window, cx).placeholder("System default"));
+        let code_font_query =
+            cx.new(|cx| InputState::new(window, cx).placeholder("JetBrains Mono"));
+        let ignore_query =
+            cx.new(|cx| InputState::new(window, cx).placeholder("node_modules, target"));
+        font_query.update(cx, |input, cx| {
+            input.set_value(settings.font_family.clone().unwrap_or_default(), window, cx)
+        });
+        code_font_query.update(cx, |input, cx| {
+            input.set_value(
+                settings.code_font_family.clone().unwrap_or_default(),
+                window,
+                cx,
+            )
+        });
+        ignore_query.update(cx, |input, cx| {
+            input.set_value(settings.ignored.join(", "), window, cx)
+        });
+        // All three fields settle the same way, and each one re-reads all of
+        // them, so a value typed in one is not dropped by settling another.
+        // Enter and clicking away both count as settled.
+        let subscriptions = [&font_query, &code_font_query, &ignore_query]
+            .into_iter()
+            .map(|input| {
+                cx.subscribe_in(
+                    input,
+                    window,
+                    |this: &mut Self, _, event: &InputEvent, window, cx| {
+                        if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                            this.commit_text(window, cx);
+                        }
+                    },
+                )
+            })
+            .collect();
+        Self {
+            folio,
+            settings,
+            page: Page::Interface,
+            // Open to begin with: five pages do not need hiding, and a tree
+            // that starts folded reads as a list of nothing.
+            expanded: [true; GROUPS.len()],
+            font_query,
+            code_font_query,
+            ignore_query,
+            _subscriptions: subscriptions,
+        }
+    }
+
+    /// Adopt what the app view settled on. Called after every apply, so a
+    /// value the app clamped or rejected shows up here too.
+    fn set_settings(&mut self, settings: Settings, cx: &mut Context<Self>) {
+        if self.settings != settings {
+            self.settings = settings;
+            cx.notify();
+        }
+    }
+
+    /// Apply a change through the app view, so the theme, the tree, the file
+    /// and the other window all move together. The snapshot is updated first
+    /// so this window draws the new value on its next frame either way.
+    fn change(&mut self, change: impl FnOnce(&mut Settings), cx: &mut Context<Self>) {
+        change(&mut self.settings);
+        self.settings = self.settings.clone().clamped();
+        if let Some(folio) = self.folio.upgrade() {
+            let settings = self.settings.clone();
+            folio.update(cx, |folio, cx| {
+                folio.settings = settings;
+                folio.apply_settings(cx);
+            });
+        }
+        cx.notify();
+    }
+
+    /// Pull the text fields into the settings. All three are read together, so
+    /// committing one does not drop what was typed in another.
+    fn commit_text(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let font = self.font_query.read(cx).value().trim().to_string();
+        let code_font = self.code_font_query.read(cx).value().trim().to_string();
+        let ignored = self.ignore_query.read(cx).value().to_string();
+        self.change(
+            move |settings| {
+                settings.font_family = (!font.is_empty()).then_some(font);
+                settings.code_font_family = (!code_font.is_empty()).then_some(code_font);
+                settings.ignored = ignored
+                    .split(',')
+                    .map(|name| name.trim().to_string())
+                    .filter(|name| !name.is_empty())
+                    .collect();
+            },
+            cx,
+        );
+        let _ = window;
+    }
+
+    /// A row: a fixed-width label, then the control.
+    /// A settings row, the shape Zed gives them: what the setting is called
+    /// and what it does stacked on the left, its control flush right, and a
+    /// hairline underneath to separate it from the next one.
+    fn row(
+        title: &'static str,
+        description: &'static str,
+        control: AnyElement,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        div()
+            .px_6()
+            .py_3()
+            .flex()
+            .items_center()
+            .gap_6()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_size(ui(12.))
+                            .text_color(cx.theme().foreground)
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .text_size(ui(11.))
+                            .text_color(cx.theme().muted_foreground)
+                            .child(description),
+                    ),
+            )
+            .child(div().flex_shrink_0().child(control))
+            .into_any_element()
+    }
+
+    /// A field in a row. Wide enough for a font name or a short path list, and
+    /// the same width everywhere so the controls line up down the column.
+    fn field(&self, input: &Entity<InputState>) -> AnyElement {
+        div()
+            .w(px(FIELD_WIDTH))
+            .child(Input::new(input).focus_bordered(false))
+            .into_any_element()
+    }
+
+    /// A sidebar row that opens and closes the pages under it. Clicking the
+    /// row itself does the toggling, which is what the chevron promises.
+    fn group_row(&self, index: usize, cx: &Context<Self>) -> AnyElement {
+        let group = &GROUPS[index];
+        let open = self.expanded[index];
+        // A heading counts as current while one of its pages is showing, so
+        // the open page is never hidden inside a collapsed-looking heading.
+        let current = group.pages.contains(&self.page);
+        div()
+            .id(format!("settings-group-{}", index))
+            .role(Role::Button)
+            .aria_label(group.title)
+            .aria_expanded(open)
+            .focusable()
+            .tab_index(0)
+            .h(px(30.))
+            .px_2()
+            .flex()
+            .items_center()
+            .gap_2()
+            .rounded_sm()
+            .cursor_pointer()
+            .text_size(ui(12.))
+            .text_color(if current {
+                cx.theme().foreground
+            } else {
+                cx.theme().muted_foreground
+            })
+            .hover(|el| el.bg(cx.theme().list_hover))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.expanded[index] = !this.expanded[index];
+                cx.notify();
+            }))
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                    this.expanded[index] = !this.expanded[index];
+                    cx.notify();
+                    cx.stop_propagation();
+                }
+            }))
+            .child(
+                Icon::new(if open {
+                    IconName::ChevronDown
+                } else {
+                    IconName::ChevronRight
+                })
+                .xsmall(),
+            )
+            .child(group.title)
+            .into_any_element()
+    }
+
+    /// A page under a heading. Indented to sit under it, the way Zed nests
+    /// them.
+    fn page_row(&self, page: Page, cx: &Context<Self>) -> AnyElement {
+        let selected = self.page == page;
+        div()
+            .id(format!("settings-page-{}", page.key()))
+            .role(Role::Button)
+            .aria_label(page.title())
+            .focusable()
+            .tab_index(0)
+            .h(px(28.))
+            .pl(px(26.))
+            .pr_2()
+            .flex()
+            .items_center()
+            .rounded_sm()
+            .cursor_pointer()
+            .text_size(ui(12.))
+            .text_color(if selected {
+                cx.theme().foreground
+            } else {
+                cx.theme().muted_foreground
+            })
+            .when(selected, |el| el.bg(cx.theme().list_active))
+            .hover(|el| el.bg(cx.theme().list_hover))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.page = page;
+                cx.notify();
+            }))
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                    this.page = page;
+                    cx.notify();
+                    cx.stop_propagation();
+                }
+            }))
+            .child(page.title())
+            .into_any_element()
+    }
+
+    /// The sidebar. Same surface as the pane beside it — the split is shown by
+    /// the hairline, not by two shades.
+    fn render_sidebar(&self, cx: &Context<Self>) -> AnyElement {
+        div()
+            .w(px(204.))
+            .h_full()
+            .flex_shrink_0()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .p_2()
+            .bg(cx.theme().background)
+            .border_r_1()
+            .border_color(cx.theme().border)
+            .children(GROUPS.iter().enumerate().flat_map(|(index, group)| {
+                let open = self.expanded[index];
+                std::iter::once(self.group_row(index, cx)).chain(open.then(|| {
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .children(group.pages.iter().map(|page| self.page_row(*page, cx)))
+                        .into_any_element()
+                }))
+            }))
+            .into_any_element()
+    }
+
+    /// The bordered control the settings rows are built from: a rounded
+    /// outline with its actions split by hairline dividers, the shape Zed's
+    /// settings use. One box reads as one control where loose buttons read as
+    /// three, and it keeps the row's hit area in one piece.
+    fn control_box(children: Vec<AnyElement>, cx: &Context<Self>) -> AnyElement {
+        div()
+            .h(px(28.))
+            .flex()
+            .items_center()
+            .rounded_md()
+            .border_1()
+            .border_color(cx.theme().border)
+            // So a hovered end segment stops at the rounded corners.
+            .overflow_hidden()
+            .children(children)
+            .into_any_element()
+    }
+
+    fn control_divider(cx: &Context<Self>) -> AnyElement {
+        div()
+            .w(px(1.))
+            .h_full()
+            .flex_shrink_0()
+            .bg(cx.theme().border)
+            .into_any_element()
+    }
+
+    /// One segment of a control. `selected` only means something in a group
+    /// that shows state; a stepper's segments are never selected.
+    fn control_segment(
+        id: String,
+        label: &'static str,
+        selected: bool,
+        width: Pixels,
+        content: AnyElement,
+        activate: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let activate = std::rc::Rc::new(activate);
+        let keyboard = activate.clone();
+        div()
+            .id(id)
+            .role(Role::Button)
+            .aria_label(if selected {
+                format!("{label} (on)")
+            } else {
+                label.to_string()
+            })
+            .focusable()
+            .tab_index(0)
+            .w(width)
+            .h_full()
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .text_size(ui(11.))
+            .text_color(if selected {
+                cx.theme().accent_foreground
+            } else {
+                cx.theme().muted_foreground
+            })
+            .when(selected, |el| el.bg(cx.theme().list_active))
+            .hover(|el| {
+                el.bg(cx.theme().list_hover)
+                    .text_color(cx.theme().foreground)
+            })
+            .focus_visible(|el| el.text_color(cx.theme().accent_foreground))
+            .on_click(cx.listener(move |this, _, window, cx| activate(this, window, cx)))
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                    keyboard(this, window, cx);
+                    cx.stop_propagation();
+                }
+            }))
+            .child(content)
+            .into_any_element()
+    }
+
+    /// A numeric setting: the value between a `−` and a `+`, in one box.
+    fn stepper(
+        &self,
+        id: &'static str,
+        value: String,
+        step: fn(&mut Settings, f32),
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let button = |id: String, icon: IconName, label: &'static str, delta: f32| {
+            Self::control_segment(
+                id,
+                label,
+                false,
+                px(30.),
+                Icon::new(icon).xsmall().into_any_element(),
+                move |this, _, cx| this.change(move |settings| step(settings, delta), cx),
+                cx,
+            )
+        };
+        Self::control_box(
+            vec![
+                button(
+                    format!("settings-down-{id}"),
+                    IconName::Minus,
+                    "Decrease",
+                    -1.,
+                ),
+                Self::control_divider(cx),
+                div()
+                    .w(px(58.))
+                    .h_full()
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(ui(12.))
+                    .child(value)
+                    .into_any_element(),
+                Self::control_divider(cx),
+                button(format!("settings-up-{id}"), IconName::Plus, "Increase", 1.),
+            ],
+            cx,
+        )
+    }
+
+    /// A two-choice setting, in the same box as a stepper.
+    fn choice(
+        &self,
+        id: &'static str,
+        left: (&'static str, bool, fn(&mut Settings)),
+        right: (&'static str, bool, fn(&mut Settings)),
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let segment = |side: &str, option: (&'static str, bool, fn(&mut Settings))| {
+            let (label, selected, set) = option;
+            Self::control_segment(
+                format!("{id}-{side}"),
+                label,
+                selected,
+                px(72.),
+                div().child(label).into_any_element(),
+                move |this, _, cx| this.change(set, cx),
+                cx,
+            )
+        };
+        Self::control_box(
+            vec![
+                segment("left", left),
+                Self::control_divider(cx),
+                segment("right", right),
+            ],
+            cx,
+        )
+    }
+
+    /// The rows of the open page, under its title. Everything is in one
+    /// column: the window is tall enough for the longest page, so nothing here
+    /// scrolls.
+    fn render_page(&self, settings: &Settings, cx: &Context<Self>) -> AnyElement {
+        let page = self.page;
+        div()
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .px_6()
+                    .py_4()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(div().text_size(ui(15.)).child(page.title()))
+                    .child(
+                        div()
+                            .text_size(ui(11.))
+                            .text_color(cx.theme().muted_foreground)
+                            .child(page.subtitle()),
+                    ),
+            )
+            .child(div().h(px(1.)).flex_shrink_0().bg(cx.theme().border))
+            .children(match page {
+                Page::Interface => vec![
+                    Self::row(
+                        "Font",
+                        "Used for menus, the sidebar and the settings window.",
+                        self.field(&self.font_query),
+                        cx,
+                    ),
+                    Self::row(
+                        "Size",
+                        "Scales every label in the app.",
+                        self.stepper(
+                            "interface-size",
+                            format!("{:.0}", settings.font_size),
+                            |settings, step| settings.font_size += step,
+                            cx,
+                        ),
+                        cx,
+                    ),
+                ],
+                Page::Type => vec![
+                    Self::row(
+                        "Font",
+                        "Used in the editor. Glyphs it has no coverage for fall back to a CJK face.",
+                        self.field(&self.code_font_query),
+                        cx,
+                    ),
+                    Self::row(
+                        "Size",
+                        "How large code is drawn.",
+                        self.stepper(
+                            "code-size",
+                            format!("{:.0}", settings.code_font_size),
+                            |settings, step| settings.code_font_size += step,
+                            cx,
+                        ),
+                        cx,
+                    ),
+                ],
+                Page::Indentation => vec![
+                    Self::row(
+                        "Tab size",
+                        "Applies to files opened from now on.",
+                        self.stepper(
+                            "tab-size",
+                            settings.tab_size.to_string(),
+                            |settings, step| {
+                                settings.tab_size =
+                                    (settings.tab_size as f32 + step).clamp(1., 8.) as usize
+                            },
+                            cx,
+                        ),
+                        cx,
+                    ),
+                    Self::row(
+                        "Indent with",
+                        "Spaces or tab characters.",
+                        self.choice(
+                            "indent",
+                            ("Spaces", !settings.hard_tabs, |settings| {
+                                settings.hard_tabs = false
+                            }),
+                            ("Tabs", settings.hard_tabs, |settings| settings.hard_tabs = true),
+                            cx,
+                        ),
+                        cx,
+                    ),
+                ],
+                Page::Sidebar => vec![Self::row(
+                    "Show the sidebar",
+                    "Whether the project tree is shown when Folio opens.",
+                    self.choice(
+                        "sidebar",
+                        ("Shown", settings.sidebar, |settings| settings.sidebar = true),
+                        ("Hidden", !settings.sidebar, |settings| settings.sidebar = false),
+                        cx,
+                    ),
+                    cx,
+                )],
+                Page::Ignored => vec![Self::row(
+                    "Folders",
+                    "Comma-separated folder names, hidden from the tree and skipped by search.",
+                    self.field(&self.ignore_query),
+                    cx,
+                )],
+            })
+            .into_any_element()
+    }
+}
+
+impl Render for SettingsView {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let settings = self.settings.clone();
+        div()
+            .id("settings")
+            .key_context("FolioSettings")
+            .size_full()
+            .flex()
+            .flex_col()
+            .bg(cx.theme().background)
+            .text_color(cx.theme().foreground)
+            .text_size(ui(13.))
+            .on_action(cx.listener(|_, _: &CloseSettings, window, _| window.remove_window()))
+            .on_action(cx.listener(|this, _: &Quit, window, cx| {
+                if let Some(folio) = this.folio.upgrade() {
+                    folio.update(cx, |folio, cx| folio.request(Next::Quit, window, cx));
+                }
+            }))
+            // Drawn by the app rather than AppKit, so it carries the theme's
+            // own background in both appearances. The traffic lights are still
+            // the real ones, sitting over the transparent title bar area.
+            .child(
+                TitleBar::new()
+                    .bg(cx.theme().background)
+                    .border_color(cx.theme().border)
+                    .child(
+                        div()
+                            .h_full()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .items_center()
+                            .pr_3()
+                            .text_size(ui(11.))
+                            .text_color(cx.theme().muted_foreground)
+                            .child("Settings"),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .child(self.render_sidebar(cx))
+                    .child(self.render_page(&settings, cx)),
+            )
+    }
+}
+
 impl Render for Folio {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .id("folio")
             .key_context("Folio")
+            // GPUI's own fallback stack names no CJK family, so without this a
+            // Chinese glyph is drawn in whatever the platform picks — usually a
+            // proportional face, which breaks the character grid.
+            .font(Font {
+                family: cx.theme().font_family.clone(),
+                fallbacks: Some(FontFallbacks::from_fonts(
+                    CJK_FALLBACKS.iter().map(|name| name.to_string()).collect(),
+                )),
+                ..Default::default()
+            })
             .when(self.project.workspace.is_none(), |el| {
                 el.track_focus(&self.tree_focus)
             })
@@ -3598,7 +4565,7 @@ impl Render for Folio {
             .relative()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
-            .text_size(px(13.))
+            .text_size(ui(13.))
             .on_action(cx.listener(|this, _: &OpenProject, window, cx| {
                 this.request(Next::Picker, window, cx)
             }))
@@ -3626,9 +4593,10 @@ impl Render for Folio {
                 }),
             )
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| {
-                this.sidebar = !this.sidebar;
-                cx.notify();
+                this.settings.sidebar = !this.sidebar;
+                this.apply_settings(cx);
             }))
+            .on_action(cx.listener(|this, _: &OpenSettings, _, cx| this.show_settings(cx)))
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
                 this.resizing &= event.dragging();
                 if this.resizing {
@@ -3707,17 +4675,18 @@ impl Render for Folio {
                     "escape" => this.close_panel(window, cx),
                     "down" | "up" => {
                         let down = event.keystroke.key == "down";
-                        if panel == Panel::Search {
-                            this.move_search_selection(down);
-                        } else {
-                            let last = this.matches.len().saturating_sub(1);
-                            this.match_selected = if down {
-                                (this.match_selected + 1).min(last)
-                            } else {
-                                this.match_selected.saturating_sub(1)
-                            };
-                            this.quick_scroll
-                                .scroll_to_item(this.match_selected, ScrollStrategy::Nearest);
+                        match panel {
+                            Panel::Search => this.move_search_selection(down),
+                            Panel::Files => {
+                                let last = this.matches.len().saturating_sub(1);
+                                this.match_selected = if down {
+                                    (this.match_selected + 1).min(last)
+                                } else {
+                                    this.match_selected.saturating_sub(1)
+                                };
+                                this.quick_scroll
+                                    .scroll_to_item(this.match_selected, ScrollStrategy::Nearest);
+                            }
                         }
                     }
                     _ => return,
@@ -3762,7 +4731,7 @@ impl Render for Folio {
                         .flex()
                         .items_center()
                         .gap_3()
-                        .child(div().flex_1().text_size(px(12.)).child(message))
+                        .child(div().flex_1().text_size(ui(12.)).child(message))
                         .child(Self::icon_button(
                             "dismiss-message",
                             IconName::Close,
@@ -3777,6 +4746,75 @@ impl Render for Folio {
             })
     }
 }
+
+/// The geometry of every window that remembers one, as x, y, width, height.
+#[derive(Default, Serialize, Deserialize)]
+pub struct WindowState {
+    #[serde(default)]
+    pub main: Option<[f32; 4]>,
+    #[serde(default)]
+    pub settings: Option<[f32; 4]>,
+}
+
+impl WindowState {
+    /// Read what was saved. The bare array that older versions wrote for the
+    /// main window alone still loads, so an upgrade keeps its window.
+    pub fn load(file: &Path) -> Self {
+        let Ok(raw) = std::fs::read(file) else {
+            return Self::default();
+        };
+        if let Ok(state) = serde_json::from_slice::<Self>(&raw) {
+            return state;
+        }
+        serde_json::from_slice::<[f32; 4]>(&raw)
+            .map(|main| Self {
+                main: Some(main),
+                settings: None,
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn save(&self, file: &Path) {
+        let Ok(raw) = serde_json::to_vec_pretty(self) else {
+            return;
+        };
+        let parent = file.parent().unwrap_or(Path::new("."));
+        let written = std::fs::create_dir_all(parent).and_then(|()| std::fs::write(file, raw));
+        if let Err(error) = written {
+            eprintln!("Could not save the window geometry: {error}");
+        }
+    }
+}
+
+fn bounds_values(bounds: Bounds<Pixels>) -> [f32; 4] {
+    [
+        f32::from(bounds.origin.x),
+        f32::from(bounds.origin.y),
+        f32::from(bounds.size.width),
+        f32::from(bounds.size.height),
+    ]
+}
+
+/// A saved rectangle, if it is big enough to be worth restoring. Anything not
+/// finite, or smaller than the window's own minimum, counts as nothing saved.
+pub fn restore_bounds(values: [f32; 4], minimum: Size<Pixels>) -> Option<WindowBounds> {
+    if !values.iter().all(|value| value.is_finite())
+        || values[2] < f32::from(minimum.width)
+        || values[3] < f32::from(minimum.height)
+    {
+        return None;
+    }
+    Some(WindowBounds::Windowed(Bounds::new(
+        point(px(values[0]), px(values[1])),
+        size(px(values[2]), px(values[3])),
+    )))
+}
+
+/// The smallest window the main view can be, and the size it starts at.
+pub const MAIN_WINDOW_MIN: Size<Pixels> = size(px(640.), px(480.));
+/// The same for the settings window.
+const SETTINGS_WINDOW_MIN: Size<Pixels> = size(px(460.), px(360.));
+const SETTINGS_WINDOW_DEFAULT: Size<Pixels> = size(px(918.), px(683.));
 
 pub fn config_dir() -> PathBuf {
     let home = std::env::var_os("HOME")
@@ -3844,6 +4882,11 @@ mod tests {
                 let mut app = Folio::new(window, cx);
                 app.recent_task = None;
                 app.recent_file = root.join("recent.json");
+                // Never read or write the real settings file from a test.
+                app.settings_file = root.join("settings.json");
+                app.window_file = root.join("window.json");
+                app.settings = Settings::default();
+                app.applied_ignored = app.settings.ignored.clone();
                 app
             })
         });
@@ -3942,6 +4985,10 @@ mod tests {
         let window = cx.add_window(|window, cx| {
             let mut app = Folio::new(window, cx);
             app.recent_task = None;
+            app.settings_file = std::env::temp_dir().join("folio-test-settings.json");
+            app.window_file = std::env::temp_dir().join("folio-test-window.json");
+            app.settings = Settings::default();
+            app.applied_ignored = app.settings.ignored.clone();
             app
         });
         for appearance in [
@@ -3950,8 +4997,8 @@ mod tests {
             WindowAppearance::Dark,
         ] {
             window
-                .update(cx, |_, window, cx| {
-                    sync_appearance(appearance, window, cx);
+                .update(cx, |app, window, cx| {
+                    sync_appearance(appearance, &app.settings, Some(window), cx);
                     let theme = cx.theme();
                     assert_eq!(theme.is_dark(), appearance == WindowAppearance::Dark);
                     assert_eq!(theme.title_bar, theme.background);
@@ -3992,14 +5039,19 @@ mod tests {
                 // Cancel startup loading before the test executor runs; use isolated settings.
                 app.recent_task = None;
                 app.recent_file = config.clone();
+                app.settings_file = root.join("settings.json");
+                app.window_file = root.join("window.json");
+                app.settings = Settings::default();
+                app.applied_ignored = app.settings.ignored.clone();
                 app
             })
         });
         view.update_in(cx, |app, _, cx| {
             app.project.workspace = Some(Workspace::open(&root).unwrap());
+            let ignored = app.settings.ignored.clone();
             app.project
                 .directories
-                .insert(root.clone(), tree::children(&root).unwrap());
+                .insert(root.clone(), tree::children(&root, &ignored).unwrap());
             app.toggle_directory(dir.clone(), cx);
             app.toggle_directory(dir.clone(), cx);
             app.refresh_recent(RecentAction::Open(root.clone()), cx);
@@ -4162,6 +5214,11 @@ mod tests {
                 let mut app = Folio::new(window, cx);
                 app.recent_task = None;
                 app.recent_file = root.join("recent.json");
+                // Never read or write the real settings file from a test.
+                app.settings_file = root.join("settings.json");
+                app.window_file = root.join("window.json");
+                app.settings = Settings::default();
+                app.applied_ignored = app.settings.ignored.clone();
                 app
             })
         });
@@ -4304,6 +5361,219 @@ mod tests {
     /// writes, and the clipboard it moves entries with. Reveal / Open in
     /// Default App / Open in Terminal are left alone — they hand the path to
     /// the OS, which during a test run would open Finder and a terminal.
+    /// The saved geometry: what round-trips, what an older file still loads as,
+    /// and what is too far out of range to restore.
+    #[gpui::test]
+    fn window_geometry_round_trips(_cx: &mut TestAppContext) {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("config/window.json");
+
+        // Nothing saved yet is not an error.
+        assert!(WindowState::load(&file).main.is_none());
+
+        WindowState {
+            main: Some([10., 20., 1200., 800.]),
+            settings: Some([30., 40., 900., 660.]),
+        }
+        .save(&file);
+        let loaded = WindowState::load(&file);
+        assert_eq!(loaded.main, Some([10., 20., 1200., 800.]));
+        assert_eq!(loaded.settings, Some([30., 40., 900., 660.]));
+
+        // The bare array older versions wrote still loads, as the main window.
+        std::fs::write(&file, "[1.0, 2.0, 1000.0, 700.0]").unwrap();
+        let legacy = WindowState::load(&file);
+        assert_eq!(legacy.main, Some([1., 2., 1000., 700.]));
+        assert!(legacy.settings.is_none());
+
+        // A rectangle too small for the window, or not finite, is not restored.
+        let minimum = size(px(640.), px(480.));
+        assert!(restore_bounds([0., 0., 320., 200.], minimum).is_none());
+        assert!(restore_bounds([0., 0., f32::NAN, 800.], minimum).is_none());
+        assert!(restore_bounds([0., 0., 1200., 800.], minimum).is_some());
+
+        // A file that is not JSON at all counts as nothing saved.
+        std::fs::write(&file, "not json").unwrap();
+        assert!(WindowState::load(&file).main.is_none());
+    }
+
+    /// Both windows are recorded when the app writes its geometry, and it goes
+    /// to the file the app was pointed at rather than the real one.
+    #[gpui::test]
+    fn both_windows_geometry_is_recorded(cx: &mut TestAppContext) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let file = root.join("window.json");
+        cx.update(gpui_component::init);
+        let cx = cx.add_empty_window();
+        let view = cx.update(|window, cx| {
+            cx.new(|cx| {
+                let mut app = Folio::new(window, cx);
+                app.recent_task = None;
+                app.recent_file = root.join("recent.json");
+                app.settings_file = root.join("settings.json");
+                app.window_file = file.clone();
+                app.settings = Settings::default();
+                app.applied_ignored = app.settings.ignored.clone();
+                app
+            })
+        });
+        view.update_in(cx, |app, _, _| {
+            app.main_bounds = Bounds::new(point(px(10.), px(20.)), size(px(1000.), px(700.)));
+            app.remember_settings_bounds(Bounds::new(
+                point(px(30.), px(40.)),
+                size(px(900.), px(660.)),
+            ));
+        });
+        let state = WindowState::load(&file);
+        assert_eq!(state.main, Some([10., 20., 1000., 700.]));
+        assert_eq!(state.settings, Some([30., 40., 900., 660.]));
+    }
+
+    /// The settings window is created and drawn from inside `Folio`'s own
+    /// update — that is where the app menu dispatches `OpenSettings`, and
+    /// where `open_window` builds the root. Rendering the form must not read
+    /// the app view while that is in flight.
+    #[gpui::test]
+    fn the_settings_form_renders_from_inside_the_app_view_update(cx: &mut TestAppContext) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        cx.update(gpui_component::init);
+        let cx = cx.add_empty_window();
+        let view = cx.update(|window, cx| {
+            cx.new(|cx| {
+                let mut app = Folio::new(window, cx);
+                app.recent_task = None;
+                app.recent_file = root.join("recent.json");
+                app.settings_file = root.join("settings.json");
+                app.window_file = root.join("window.json");
+                app.settings = Settings::default();
+                app.applied_ignored = app.settings.ignored.clone();
+                app
+            })
+        });
+        view.update_in(cx, |app, window, cx| {
+            let folio = cx.entity().downgrade();
+            let settings = cx.new(|cx| SettingsView::new(folio, app.settings.clone(), window, cx));
+            settings.update(cx, |form, cx| {
+                let _ = form.render(window, cx);
+            });
+        });
+        // The form took the settings it was handed, without asking for them.
+        view.update_in(cx, |app, _, _| {
+            assert_eq!(app.settings, Settings::default())
+        });
+    }
+
+    /// The settings form end to end: what a change writes to disk and how it
+    /// reaches the tree. `show_settings` itself is not covered — opening a
+    /// window needs a real platform window, which the test harness does not
+    /// have.
+    #[gpui::test]
+    fn settings_view_persists_and_drives_the_tree(cx: &mut TestAppContext) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let src = root.join("src");
+        for name in ["src", "notes"] {
+            std::fs::create_dir(root.join(name)).unwrap();
+        }
+        std::fs::write(src.join("main.rs"), "// hi\n").unwrap();
+        cx.update(gpui_component::init);
+        let cx = cx.add_empty_window();
+        let view = cx.update(|window, cx| {
+            cx.new(|cx| {
+                let mut app = Folio::new(window, cx);
+                app.recent_task = None;
+                app.recent_file = root.join("recent.json");
+                app.settings_file = root.join("settings.json");
+                app.window_file = root.join("window.json");
+                app.settings = Settings::default();
+                app.applied_ignored = app.settings.ignored.clone();
+                app
+            })
+        });
+        view.update_in(cx, |app, window, cx| {
+            app.request(Next::Open(root.clone()), window, cx)
+        });
+        cx.run_until_parked();
+
+        // The settings form, wired to the app view the way the window wires it.
+        let settings = view.update_in(cx, |app, window, cx| {
+            let folio = cx.entity().downgrade();
+            let settings = cx.new(|cx| SettingsView::new(folio, app.settings.clone(), window, cx));
+            app.settings_view = Some(settings.clone());
+            settings
+        });
+
+        // Every page builds, not just the one it opens on, with headings both
+        // open and closed; the harness never draws on its own.
+        settings.update_in(cx, |view, window, cx| {
+            assert_eq!(view.page, Page::Interface);
+            assert!(view.expanded.iter().all(|open| *open));
+            for collapsed in [false, true] {
+                view.expanded = [collapsed; GROUPS.len()];
+                for group in GROUPS {
+                    for page in group.pages {
+                        view.page = *page;
+                        let _ = view.render(window, cx);
+                    }
+                }
+            }
+            view.expanded = [true; GROUPS.len()];
+            view.page = Page::Interface;
+        });
+
+        // Stepping a value applies it and writes the file.
+        settings.update_in(cx, |view, _, cx| {
+            view.change(
+                |settings| {
+                    settings.tab_size = 2;
+                    settings.hard_tabs = true;
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        let stored = settings::load(&root.join("settings.json")).unwrap();
+        assert_eq!((stored.tab_size, stored.hard_tabs), (2, true));
+
+        // A value outside the range is pulled back rather than written.
+        settings.update_in(cx, |view, _, cx| {
+            view.change(|settings| settings.font_size = 99., cx);
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |app, _, _| {
+            assert_eq!(app.settings.font_size, settings::FONT_SIZE.1);
+        });
+
+        // The text fields settle together, so a value typed in one is not lost
+        // by settling another.
+        settings.update_in(cx, |view, window, cx| {
+            let code_font = view.code_font_query.clone();
+            let ignore = view.ignore_query.clone();
+            code_font.update(cx, |input, cx| input.set_value("Geist Mono", window, cx));
+            ignore.update(cx, |input, cx| input.set_value("src, notes", window, cx));
+            view.commit_text(window, cx);
+        });
+        cx.run_until_parked();
+        let stored = settings::load(&root.join("settings.json")).unwrap();
+        assert_eq!(stored.code_font_family.as_deref(), Some("Geist Mono"));
+        assert_eq!(stored.ignored, vec!["src".to_string(), "notes".to_string()]);
+
+        // Both folders are ignored now, so the tree and the index agree that
+        // neither is there — the new rules reached the cached listings.
+        view.update_in(cx, |app, _, _| {
+            assert!(
+                app.project
+                    .rows
+                    .iter()
+                    .all(|row| row.entry.name != "src" && row.entry.name != "notes"),
+                "the new rules reached the cached listings"
+            );
+            assert!(app.project.files.iter().all(|path| !path.starts_with(&src)));
+        });
+    }
+
     #[gpui::test]
     fn tree_context_menu_creates_moves_and_duplicates_entries(cx: &mut TestAppContext) {
         let temp = tempfile::tempdir().unwrap();
@@ -4318,6 +5588,11 @@ mod tests {
                 let mut app = Folio::new(window, cx);
                 app.recent_task = None;
                 app.recent_file = root.join("recent.json");
+                // Never read or write the real settings file from a test.
+                app.settings_file = root.join("settings.json");
+                app.window_file = root.join("window.json");
+                app.settings = Settings::default();
+                app.applied_ignored = app.settings.ignored.clone();
                 app
             })
         });

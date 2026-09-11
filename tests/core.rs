@@ -1,5 +1,10 @@
-use folio::{buffer, fs_op, recent, search, tree, workspace::Workspace};
+use folio::{buffer, fs_op, recent, search, settings::Settings, tree, workspace::Workspace};
 use std::fs;
+
+/// The ignore list the app starts from, which most tests do not care about.
+fn ignored() -> Vec<String> {
+    Settings::default().ignored
+}
 
 #[test]
 fn project_read_edit_save_and_recent_round_trip() {
@@ -10,8 +15,8 @@ fn project_read_edit_save_and_recent_round_trip() {
     let file = root.join("src/main.rs");
     fs::write(&file, "// 你好\r\nfn main() {}\r\n").unwrap();
     let ws = Workspace::open(&root).unwrap();
-    assert_eq!(tree::children(&root).unwrap().len(), 1);
-    assert_eq!(tree::index(&root).unwrap(), vec![file.clone()]);
+    assert_eq!(tree::children(&root, &ignored()).unwrap().len(), 1);
+    assert_eq!(tree::index(&root, &ignored()).unwrap(), vec![file.clone()]);
     assert!(ws.resolve(temp.path()).is_err());
     let original = buffer::read(&file).unwrap();
     let edited = original.replace("你好", "Folio");
@@ -321,4 +326,89 @@ fn rename_refuses_to_clobber_and_delete_removes_whole_trees() {
         let upper = fs_op::rename(&root.join("case.rs"), "Case.rs").unwrap();
         assert_eq!(upper.file_name().unwrap().to_string_lossy(), "Case.rs");
     }
+}
+
+#[test]
+fn settings_round_trip_defaults_and_clamping() {
+    let temp = tempfile::tempdir().unwrap();
+    let file = temp.path().join("config/settings.json");
+
+    // A fresh install has no file, and that is not an error.
+    let defaults = folio::settings::load(&file).unwrap();
+    assert_eq!(defaults, Settings::default());
+    assert_eq!(defaults.tab_size, 4);
+    assert!(!defaults.hard_tabs);
+    assert!(defaults.sidebar);
+    assert!(defaults.ignored.contains(&"node_modules".to_string()));
+
+    let mut edited = defaults.clone();
+    edited.font_family = Some("Inter".into());
+    edited.code_font_family = Some("Geist Mono".into());
+    edited.font_size = 15.;
+    edited.tab_size = 2;
+    edited.hard_tabs = true;
+    edited.sidebar = false;
+    edited.ignored = vec!["dist".into(), "vendor".into()];
+    folio::settings::save(&file, &edited).unwrap();
+    assert_eq!(folio::settings::load(&file).unwrap(), edited);
+
+    // A hand-edited file that asks for something unusable is pulled back into
+    // range rather than rejected.
+    fs::write(
+        &file,
+        r#"{"font_size": 400.0, "code_font_size": 1.0, "tab_size": 0,
+            "font_family": "   ", "ignored": ["  dist  ", "", "  "]}"#,
+    )
+    .unwrap();
+    let clamped = folio::settings::load(&file).unwrap();
+    assert_eq!(clamped.font_size, folio::settings::FONT_SIZE.1);
+    assert_eq!(clamped.code_font_size, folio::settings::CODE_FONT_SIZE.0);
+    assert_eq!(clamped.tab_size, folio::settings::TAB_SIZE.0);
+    assert_eq!(clamped.font_family, None);
+    assert_eq!(clamped.ignored, vec!["dist".to_string()]);
+    // Keys the file does not mention keep their defaults, so a file written by
+    // an older version still loads.
+    assert!(clamped.sidebar);
+
+    // A corrupt file is reported and left alone rather than silently replaced.
+    fs::write(&file, "not json at all").unwrap();
+    assert!(folio::settings::load(&file).is_err());
+    assert_eq!(fs::read_to_string(&file).unwrap(), "not json at all");
+}
+
+#[test]
+fn the_tree_honours_a_custom_ignore_list() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    for name in ["src", "node_modules", "dist", "notes"] {
+        fs::create_dir(root.join(name)).unwrap();
+    }
+    fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
+    fs::write(root.join("dist/bundle.js"), "// built\n").unwrap();
+    fs::write(root.join("notes/todo.md"), "todo\n").unwrap();
+
+    let names = |entries: Vec<tree::Entry>| {
+        entries
+            .into_iter()
+            .map(|entry| entry.name)
+            .collect::<Vec<_>>()
+    };
+
+    // The default list hides node_modules and dist, but not notes.
+    assert_eq!(
+        names(tree::children(root, &ignored()).unwrap()),
+        vec!["notes", "src"]
+    );
+
+    // Narrowing it to one name brings the others back.
+    assert_eq!(
+        names(tree::children(root, &["notes".to_string()]).unwrap()),
+        vec!["dist", "node_modules", "src"]
+    );
+
+    // The index follows the same list.
+    assert_eq!(
+        tree::index(root, &["notes".to_string()]).unwrap(),
+        vec![root.join("dist/bundle.js"), root.join("src/main.rs")]
+    );
 }

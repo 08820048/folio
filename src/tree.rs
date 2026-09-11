@@ -3,7 +3,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const IGNORED: &[&str] = &[
+/// Folder names a walk skips unless the user says otherwise. `settings` seeds
+/// its own copy from this, so the default and the settings file cannot drift.
+pub const DEFAULT_IGNORED: &[&str] = &[
     ".git",
     "node_modules",
     "target",
@@ -26,12 +28,14 @@ pub struct Entry {
     pub kind: EntryKind,
 }
 
-pub fn children(dir: &Path) -> io::Result<Vec<Entry>> {
+/// The entries directly inside `dir`, sorted folders-first then by name, with
+/// everything named in `ignored` left out.
+pub fn children(dir: &Path, ignored: &[String]) -> io::Result<Vec<Entry>> {
     let mut entries = Vec::new();
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().into_owned();
-        if IGNORED.contains(&name.as_str()) {
+        if ignored.contains(&name) {
             continue;
         }
         let kind = entry.file_type()?;
@@ -53,11 +57,11 @@ pub fn children(dir: &Path) -> io::Result<Vec<Entry>> {
     Ok(entries)
 }
 
-pub fn index(root: &Path) -> io::Result<Vec<PathBuf>> {
+pub fn index(root: &Path, ignored: &[String]) -> io::Result<Vec<PathBuf>> {
     let mut stack = vec![root.to_path_buf()];
     let mut files = Vec::new();
     while let Some(dir) = stack.pop() {
-        for entry in children(&dir)? {
+        for entry in children(&dir, ignored)? {
             match entry.kind {
                 EntryKind::Directory => stack.push(entry.path),
                 EntryKind::File => files.push(entry.path),
