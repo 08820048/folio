@@ -465,6 +465,35 @@ struct ContextMenu {
     selected: usize,
 }
 
+/// What a tab drag carries. GPUI drags a value plus a view to draw under the
+/// pointer, so this is both.
+#[derive(Clone)]
+struct TabDrag {
+    path: PathBuf,
+    label: SharedString,
+}
+
+/// The little tab that follows the pointer while one is being dragged.
+struct TabDragPreview {
+    label: SharedString,
+}
+
+impl Render for TabDragPreview {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px_2()
+            .py_1()
+            .rounded_sm()
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().background)
+            .shadow_md()
+            .text_size(ui(11.))
+            .text_color(cx.theme().foreground)
+            .child(self.label.clone())
+    }
+}
+
 /// The in-app file clipboard behind Cut / Copy / Paste.
 #[derive(Clone)]
 struct FileClipboard {
@@ -592,6 +621,9 @@ pub struct Folio {
     match_selected: usize,
     /// The open right-click menu, if any.
     menu: Option<ContextMenu>,
+    /// Where a dragged tab would land, while one is in flight. Drawn as a
+    /// caret between the tabs.
+    tab_drop: Option<usize>,
     /// Where Cut / Copy put the entry, and whether it was a cut.
     clipboard: Option<FileClipboard>,
     /// The tree row being named, if any.
@@ -723,6 +755,7 @@ impl Folio {
             matches: vec![],
             match_selected: 0,
             menu: None,
+            tab_drop: None,
             clipboard: None,
             editing: None,
             search_query,
@@ -1773,6 +1806,41 @@ impl Folio {
         }
     }
 
+    /// Move a dragged tab into another tab's place: it lands at that tab's
+    /// index and everything between shifts one step back towards where it came
+    /// from. Every position is reachable this way, including the last, and a
+    /// one-slot drag moves in either direction.
+    ///
+    /// Nothing here reads the pointer. The tab the drop landed on is the one
+    /// thing a drop reliably reports, and a rule built on anything finer — which
+    /// half of a tab the pointer is over — depends on move events arriving for
+    /// every tab on the way, which is exactly what could not be relied on.
+    ///
+    /// Pinned tabs stay at the front, so a drop can neither strand one among
+    /// the unpinned ones nor put an unpinned one ahead of them.
+    fn move_tab(&mut self, dragged: &Path, to: usize, cx: &mut Context<Self>) {
+        self.tab_drop = None;
+        let mut tabs = std::mem::take(&mut self.project.tabs);
+        let Some(from) = tabs.iter().position(|tab| tab == dragged) else {
+            self.project.tabs = tabs;
+            return;
+        };
+        let tab = tabs.remove(from);
+        let to = to.min(tabs.len());
+        let pinned = tabs
+            .iter()
+            .filter(|tab| self.project.pinned.contains(*tab))
+            .count();
+        let to = if self.project.pinned.contains(&tab) {
+            to.min(pinned)
+        } else {
+            to.max(pinned)
+        };
+        tabs.insert(to, tab);
+        self.project.tabs = tabs;
+        cx.notify();
+    }
+
     /// Pinned tabs sit at the front. `sort_by_key` is stable, so each group
     /// keeps the order it already had.
     fn reorder_tabs(&mut self) {
@@ -2299,6 +2367,7 @@ impl Folio {
     /// file is open, which is the single-file mode the requirements ask to
     /// keep: one file looks exactly as it did before tabs existed.
     fn render_tabs(&self, cx: &Context<Self>) -> AnyElement {
+        let end = self.project.tabs.len();
         div()
             .id("tabs")
             .flex_shrink_0()
@@ -2308,92 +2377,145 @@ impl Folio {
             .items_center()
             .border_b_1()
             .border_color(cx.theme().border)
-            .children(self.project.tabs.iter().enumerate().map(|(index, path)| {
-                let selected = self.project.active.as_ref() == Some(path);
-                let dirty = self
-                    .project
-                    .documents
-                    .get(path)
-                    .is_some_and(|doc| doc.dirty);
-                let open = path.clone();
-                let close = path.clone();
-                let menu_path = path.clone();
+            .children(
+                self.project
+                    .tabs
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(index, path)| {
+                        // A caret sits where the dragged tab would land, so the
+                        // drop is not a guess.
+                        let caret = (self.tab_drop == Some(index)).then(|| Self::tab_caret(cx));
+                        caret
+                            .into_iter()
+                            .chain(std::iter::once(self.render_tab(index, path, cx)))
+                    })
+                    .chain((self.tab_drop == Some(end)).then(|| Self::tab_caret(cx))),
+            )
+            .into_any_element()
+    }
+
+    /// The insertion caret drawn between tabs while one is being dragged.
+    fn tab_caret(cx: &Context<Self>) -> AnyElement {
+        div()
+            .w(px(2.))
+            .h_full()
+            .flex_shrink_0()
+            .bg(cx.theme().accent_foreground)
+            .into_any_element()
+    }
+
+    /// One tab: the file's name, a mark when it has edits on disk to match,
+    /// and the way to close it.
+    fn render_tab(&self, index: usize, path: &PathBuf, cx: &Context<Self>) -> AnyElement {
+        let selected = self.project.active.as_ref() == Some(path);
+        let dirty = self
+            .project
+            .documents
+            .get(path)
+            .is_some_and(|doc| doc.dirty);
+        let open = path.clone();
+        let close = path.clone();
+        let menu_path = path.clone();
+        div()
+            .id(("tab", index))
+            .role(Role::Button)
+            .aria_label(name(path))
+            .aria_selected(selected)
+            .h_full()
+            .min_w_0()
+            .max_w(px(200.))
+            .px_2()
+            .flex()
+            .items_center()
+            .gap_2()
+            .flex_shrink_0()
+            .border_r_1()
+            .border_color(cx.theme().border)
+            .cursor_pointer()
+            .text_size(ui(11.))
+            .text_color(if selected {
+                cx.theme().foreground
+            } else {
+                cx.theme().muted_foreground
+            })
+            .when(selected, |el| el.bg(cx.theme().list_active))
+            .hover(|el| el.bg(cx.theme().list_hover))
+            .on_click(
+                cx.listener(move |this, _, window, cx| this.open_file(open.clone(), window, cx)),
+            )
+            // Dragging a tab decides where it lands from which half of this
+            // one the pointer is on, the way an insertion caret reads.
+            // This only drives the caret. Where the tab actually lands comes
+            // from the drop itself, so a move event that never arrives costs a
+            // caret and nothing else.
+            .on_drag_move(cx.listener(move |this, _: &DragMoveEvent<TabDrag>, _, cx| {
+                if this.tab_drop != Some(index) {
+                    this.tab_drop = Some(index);
+                    cx.notify();
+                }
+            }))
+            .on_drag(
+                TabDrag {
+                    path: path.clone(),
+                    label: name(path).into(),
+                },
+                |drag, _, _, cx| {
+                    cx.new(|_| TabDragPreview {
+                        label: drag.label.clone(),
+                    })
+                },
+            )
+            .on_drop(cx.listener(move |this, drag: &TabDrag, _, cx| {
+                this.move_tab(&drag.path, index, cx);
+            }))
+            // The menu acts on the tab that was clicked, which is not
+            // necessarily the one showing.
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    this.open_menu(
+                        MenuTarget::Tab {
+                            path: menu_path.clone(),
+                            index,
+                        },
+                        event.position,
+                        window,
+                        cx,
+                    );
+                    cx.stop_propagation();
+                }),
+            )
+            .child(div().flex_1().min_w_0().truncate().child(name(path)))
+            .when(dirty, |el| {
+                el.child(
+                    Icon::new(IconName::Asterisk)
+                        .xsmall()
+                        .text_color(cx.theme().warning),
+                )
+            })
+            .child(
                 div()
-                    .id(("tab", index))
+                    .id(("tab-close", index))
                     .role(Role::Button)
-                    .aria_label(name(path))
-                    .aria_selected(selected)
-                    .h_full()
-                    .min_w_0()
-                    .max_w(px(200.))
-                    .px_2()
+                    .aria_label("Close")
+                    .size(px(14.))
+                    .flex_shrink_0()
                     .flex()
                     .items_center()
-                    .gap_2()
-                    .flex_shrink_0()
-                    .border_r_1()
-                    .border_color(cx.theme().border)
+                    .justify_center()
+                    .rounded_sm()
                     .cursor_pointer()
-                    .text_size(ui(11.))
-                    .text_color(if selected {
-                        cx.theme().foreground
-                    } else {
-                        cx.theme().muted_foreground
-                    })
-                    .when(selected, |el| el.bg(cx.theme().list_active))
-                    .hover(|el| el.bg(cx.theme().list_hover))
+                    .text_color(cx.theme().muted_foreground)
+                    .hover(|el| el.text_color(cx.theme().foreground))
+                    // Without this the tab underneath would take the same
+                    // click and reopen the file being closed.
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        this.open_file(open.clone(), window, cx)
+                        this.request(Next::CloseTabs(vec![close.clone()]), window, cx)
                     }))
-                    // The menu acts on the tab that was clicked, which is not
-                    // necessarily the one showing.
-                    .on_mouse_down(
-                        MouseButton::Right,
-                        cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                            this.open_menu(
-                                MenuTarget::Tab {
-                                    path: menu_path.clone(),
-                                    index,
-                                },
-                                event.position,
-                                window,
-                                cx,
-                            );
-                            cx.stop_propagation();
-                        }),
-                    )
-                    .child(div().flex_1().min_w_0().truncate().child(name(path)))
-                    .when(dirty, |el| {
-                        el.child(
-                            Icon::new(IconName::Asterisk)
-                                .xsmall()
-                                .text_color(cx.theme().warning),
-                        )
-                    })
-                    .child(
-                        div()
-                            .id(("tab-close", index))
-                            .role(Role::Button)
-                            .aria_label("Close")
-                            .size(px(14.))
-                            .flex_shrink_0()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded_sm()
-                            .cursor_pointer()
-                            .text_color(cx.theme().muted_foreground)
-                            .hover(|el| el.text_color(cx.theme().foreground))
-                            // Without this the tab underneath would take the
-                            // same click and reopen the file being closed.
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.request(Next::CloseTabs(vec![close.clone()]), window, cx)
-                            }))
-                            .child(Icon::new(IconName::Close).xsmall()),
-                    )
-                    .into_any_element()
-            }))
+                    .child(Icon::new(IconName::Close).xsmall()),
+            )
             .into_any_element()
     }
 
@@ -5603,7 +5725,14 @@ impl Render for Folio {
             }))
             .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(|this, _, _, _| this.resizing = false),
+                cx.listener(|this, _, _, cx| {
+                    this.resizing = false;
+                    // A drag that ended anywhere, dropped or not, takes its
+                    // caret with it.
+                    if this.tab_drop.take().is_some() {
+                        cx.notify();
+                    }
+                }),
             )
             .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
                 if let Some(path) = paths.0.first() {
@@ -6429,6 +6558,134 @@ mod tests {
         let state = WindowState::load(&file);
         assert_eq!(state.main, Some([10., 20., 1000., 700.]));
         assert_eq!(state.settings, Some([30., 40., 900., 660.]));
+    }
+
+    /// A dragged tab lands where the tab it was dropped on sits, and that
+    /// works the same in either direction — the leftward one-slot drag is the
+    /// case a pointer-following rule could not be relied on for.
+    #[gpui::test]
+    fn dragging_a_tab_reorders_the_strip(cx: &mut TestAppContext) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let first = root.join("first.rs");
+        let second = root.join("second.rs");
+        let third = root.join("third.rs");
+        for file in [&first, &second, &third] {
+            std::fs::write(file, "// code\n").unwrap();
+        }
+        cx.update(gpui_component::init);
+        let cx = cx.add_empty_window();
+        let view = cx.update(|window, cx| {
+            cx.new(|cx| {
+                let mut app = Folio::new(window, cx);
+                app.recent_task = None;
+                app.recent_file = root.join("recent.json");
+                app.settings_file = root.join("settings.json");
+                app.window_file = root.join("window.json");
+                app.settings = Settings::default();
+                app.applied_ignored = app.settings.ignored.clone();
+                app
+            })
+        });
+        view.update_in(cx, |app, window, cx| {
+            app.request(Next::Open(root.clone()), window, cx)
+        });
+        cx.run_until_parked();
+        for file in [&first, &second, &third] {
+            view.update_in(cx, |app, window, cx| {
+                app.open_file(file.clone(), window, cx)
+            });
+            cx.run_until_parked();
+        }
+
+        // One slot to the right, onto the tab it should trade with.
+        view.update_in(cx, |app, _, cx| app.move_tab(&first, 1, cx));
+        view.update_in(cx, |app, _, _| {
+            assert_eq!(
+                app.project.tabs,
+                vec![second.clone(), first.clone(), third.clone()]
+            )
+        });
+
+        // And one slot back to the left, which is the drag that used to do
+        // nothing.
+        view.update_in(cx, |app, _, cx| app.move_tab(&first, 0, cx));
+        view.update_in(cx, |app, _, _| {
+            assert_eq!(
+                app.project.tabs,
+                vec![first.clone(), second.clone(), third.clone()]
+            )
+        });
+
+        // Right across the strip, and back to the front.
+        view.update_in(cx, |app, _, cx| app.move_tab(&first, 2, cx));
+        view.update_in(cx, |app, _, _| {
+            assert_eq!(
+                app.project.tabs,
+                vec![second.clone(), third.clone(), first.clone()]
+            )
+        });
+        view.update_in(cx, |app, _, cx| app.move_tab(&first, 0, cx));
+        view.update_in(cx, |app, _, _| {
+            assert_eq!(
+                app.project.tabs,
+                vec![first.clone(), second.clone(), third.clone()]
+            )
+        });
+
+        // Past the end lands at the end; dropping on itself changes nothing.
+        view.update_in(cx, |app, _, cx| app.move_tab(&first, 99, cx));
+        view.update_in(cx, |app, _, _| {
+            assert_eq!(
+                app.project.tabs,
+                vec![second.clone(), third.clone(), first.clone()]
+            )
+        });
+        view.update_in(cx, |app, _, cx| app.move_tab(&first, 2, cx));
+        view.update_in(cx, |app, _, _| {
+            assert_eq!(
+                app.project.tabs,
+                vec![second.clone(), third.clone(), first.clone()]
+            )
+        });
+
+        // A pinned tab stays in front whatever the drop says, and an unpinned
+        // one cannot be dropped ahead of it.
+        view.update_in(cx, |app, _, cx| {
+            app.project.pinned.insert(second.clone());
+            app.reorder_tabs();
+            app.move_tab(&second, 2, cx);
+        });
+        view.update_in(cx, |app, _, _| {
+            assert_eq!(
+                app.project.tabs.first(),
+                Some(&second),
+                "a pinned tab cannot be dragged out of the front"
+            );
+        });
+        view.update_in(cx, |app, _, cx| app.move_tab(&first, 0, cx));
+        view.update_in(cx, |app, _, _| {
+            assert_eq!(
+                app.project.tabs,
+                vec![second.clone(), first.clone(), third.clone()],
+                "an unpinned tab cannot be dropped in front of a pinned one"
+            );
+        });
+
+        // The caret draws between tabs while a drag is in flight.
+        view.update_in(cx, |app, window, cx| {
+            app.tab_drop = Some(1);
+            let _ = app.render(window, cx);
+        });
+
+        // A path that is not in the strip changes nothing.
+        view.update_in(cx, |app, _, cx| app.move_tab(&root.join("ghost.rs"), 0, cx));
+        view.update_in(cx, |app, _, _| {
+            assert_eq!(
+                app.project.tabs,
+                vec![second.clone(), first.clone(), third.clone()]
+            )
+        });
     }
 
     /// The tab strip's menu: the closes act on the tab that was clicked, and
