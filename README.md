@@ -306,6 +306,16 @@ gpui-component has no way to change it on an editor that already exists. The
 ignore list is the one that does real work: the tree re-reads the folders it is
 holding and the quick-open index is rebuilt.
 
+A project's own `.editorconfig` has the last word on the files it covers.
+`indent_style`, `indent_size` and `tab_width` are read from the nearest such
+file above the file being opened, up to one that says `root = true`, with the
+settings standing in for whatever it does not mention — so a repository that
+asks for two spaces gets two spaces, and everything else keeps what the window
+says. The other properties the format defines — `end_of_line`,
+`trim_trailing_whitespace`, `insert_final_newline` — describe edits to make when
+saving. This editor does not make them, and says so rather than making some of
+them.
+
 Settings are local JSON beside the recent list, written atomically. A
 hand-edited file is pulled back into range rather than rejected — sizes are
 clamped, and names are trimmed — a corrupt one is reported rather than
@@ -421,7 +431,9 @@ case-only rename, deleting a tree), the settings file against real bytes
 (defaults, round trip, clamping, unknown keys, a corrupt file left alone), the
 ignore list reaching both the tree and the index, the diff parser on
 hand-written hunks and against a real repository, the line-comment markers and
-the two rules that decide where a bracket may pair, and project search (case,
+the two rules that decide where a bracket may pair, the `.editorconfig` reader
+— its globs, its sections applied in order, `unset` removing a property, `root`
+ending the search and the nearest file winning — and project search (case,
 whole word, regex, long-line windowing, CRLF, multi-byte columns, capture-group
 replacement, skipping binary and oversized files). `desktop-tests` uses the
 GPUI test executor for the rest: repeated expand and collapse, recents written
@@ -438,6 +450,7 @@ changes, the tab menu's bulk closes and what pinning keeps out of them, drag
 reordering in both directions, brackets pairing and stepping over, Enter
 laying out a pair of brackets over three lines, folding the innermost block at
 the caret and where the caret goes when the line under it stops being drawn,
+a project's `.editorconfig` deciding what indentation an opened file gets,
 comment toggling, the
 multi-cursor commands with the edit that lands at every selection they make,
 and the changes view following the active file. What no test covers is the
@@ -512,13 +525,14 @@ the set is one step on the undo stack and comes back in one, though the cursors
 it covered are not restored. Enter indents to the line it breaks, but not when
 the line merely ends with an opener: a `{` whose pair is not there — deleted,
 or never inserted because the character in front of it was a word — gets the
-break and no extra level. There is no fold-all and no unfold-all, and a fold is
-not remembered across a restart: it belongs to the open buffer. The changes view
-is a unified diff — there is no
-side-by-side — and its counts count rows, so a changed line reads as one gone
-and one arrived. Window geometry is written when a window closes and again on
-quit, so a force-killed process loses wherever the windows were — the same is
-true of the settings window. The settings sidebar has no search box, and its
+break and no extra level. Folding is not remembered across a restart, and there
+is no fold-all: the two keys fold and unfold one block. A brace group in an
+`.editorconfig` pattern holding a range rather than a list, `{1..3}`, is the
+one part of that format not read. The changes view is a unified diff — there is
+no side-by-side — and its counts count rows, so a changed line reads as one
+gone and one arrived. Window geometry is written when a window closes and again
+on quit, so a force-killed process loses wherever the windows were — the same
+is true of the settings window. The settings sidebar has no search box, and its
 pages do not scroll, which is fine at five pages and would need fixing before
 there were many more.
 

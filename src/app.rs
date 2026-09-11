@@ -1,7 +1,7 @@
 use crate::assets::FolioIcon;
 use crate::preview::{self, Content};
 use folio::{
-    buffer, diff, fs_op, git,
+    buffer, diff, editorconfig, fs_op, git,
     recent::{self, RecentProject},
     search,
     settings::{self, Settings},
@@ -3170,10 +3170,21 @@ impl Folio {
         let request = self.open_request;
         self.loading = true;
         cx.notify();
+        let configured = editorconfig::Indent {
+            columns: self.settings.tab_size,
+            hard_tabs: self.settings.hard_tabs,
+        };
         let task = cx.background_executor().spawn(async move {
             let path = workspace.resolve(&path)?;
             let content = preview::read(&path)?;
-            Ok::<_, std::io::Error>((path, content))
+            // A file's own `.editorconfig` has the last word on its
+            // indentation, and reading one is a handful of small files up the
+            // directory tree — which is work for this side of the executor.
+            let indent = match &content {
+                Content::Text(_) => editorconfig::Rules::for_path(&path).indent(configured),
+                Content::Image(_) => configured,
+            };
+            Ok::<_, std::io::Error>((path, content, indent))
         });
         cx.spawn_in(window, async move |this, cx| {
             let result = task.await;
@@ -3183,7 +3194,7 @@ impl Folio {
                 }
                 this.loading = false;
                 match result {
-                    Ok((path, Content::Image(image))) => {
+                    Ok((path, Content::Image(image), _)) => {
                         this.project.image = Some((path.clone(), image));
                         this.project.active = Some(path);
                         this.message = None;
@@ -3191,7 +3202,7 @@ impl Folio {
                         this.update_title(window);
                         this.follow_diff(window, cx);
                     }
-                    Ok((path, Content::Text(text))) => {
+                    Ok((path, Content::Text(text), indent)) => {
                         let large = text.len() > buffer::HIGHLIGHT_LIMIT;
                         let language = if large {
                             // "text" is gpui-component's grammardless language.
@@ -3201,8 +3212,8 @@ impl Folio {
                         };
                         let saved: SharedString = text.into();
                         let tabs = TabSize {
-                            tab_size: this.settings.tab_size,
-                            hard_tabs: this.settings.hard_tabs,
+                            tab_size: indent.columns,
+                            hard_tabs: indent.hard_tabs,
                         };
                         let editor = cx.new(|cx| {
                             EditorState::new(language, window, cx)
@@ -7966,6 +7977,61 @@ mod tests {
             });
             assert_eq!(folded(cx), vec![0]);
             assert_eq!(caret(cx), 50..50);
+        });
+    }
+
+    /// A file is opened with the indentation its project asks for, ahead of
+    /// what the settings say.
+    ///
+    /// Read through Enter between a pair of brackets, since the indentation is
+    /// what that writes and the editor does not expose its tab size otherwise.
+    #[gpui::test]
+    fn an_editorconfig_decides_a_files_indentation(cx: &mut TestAppContext) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        std::fs::write(
+            root.join(".editorconfig"),
+            "root = true\n\n[*.rs]\nindent_style = space\nindent_size = 2\n",
+        )
+        .unwrap();
+        let file = root.join("main.rs");
+        std::fs::write(&file, "if x {}\n").unwrap();
+        cx.update(gpui_component::init);
+        let cx = cx.add_empty_window();
+        let view = cx.update(|window, cx| {
+            cx.new(|cx| {
+                let mut app = Folio::new(window, cx);
+                app.recent_task = None;
+                app.recent_file = root.join("recent.json");
+                app.settings_file = root.join("settings.json");
+                app.window_file = root.join("window.json");
+                // The settings ask for four spaces; the file asks for two.
+                app.settings = Settings::default();
+                app.applied_ignored = app.settings.ignored.clone();
+                app
+            })
+        });
+        view.update_in(cx, |app, window, cx| {
+            app.request(Next::Open(root.clone()), window, cx)
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |app, window, cx| {
+            app.open_file(file.clone(), window, cx)
+        });
+        cx.run_until_parked();
+
+        view.update_in(cx, |app, window, cx| {
+            assert_eq!(app.settings.tab_size, 4);
+            let base = app.project.documents[&file]
+                .editor
+                .read(cx)
+                .base_state()
+                .clone();
+            base.update(cx, |base, cx| {
+                base.set_selected_range(6..6, cx);
+                base.insert_line_break(window, cx);
+            });
+            assert_eq!(base.read(cx).value(), "if x {\n  \n}\n");
         });
     }
 
