@@ -50,6 +50,10 @@ does not survive a restart.
 | Go to line | ⌘G | Ctrl+G |
 | Toggle sidebar | ⌘B | Ctrl+B |
 | Toggle comment | ⌘/ | Ctrl+/ |
+| Select next occurrence | ⌘D | Ctrl+D |
+| Select all occurrences | ⇧⌘L | Ctrl+Shift+L |
+| Add cursor above | ⌥⌘↑ | Ctrl+Alt+Up |
+| Add cursor below | ⌥⌘↓ | Ctrl+Alt+Down |
 | Show file changes | ⇧⌘D | Ctrl+Shift+D |
 | Settings | ⌘, | Ctrl+, |
 | Close project | ⌘W | Ctrl+W |
@@ -204,6 +208,41 @@ toggle, and a selection that is only partly commented gets commented rather
 than uncommented. The block is left selected, so the same shortcut undoes it.
 Languages whose comments are only a block form — HTML, XML, CSS, Markdown,
 JSON — say so instead of inserting a marker the file cannot use.
+
+## Multi-cursor
+
+Four keys make more than one cursor and one takes it back down, all of them
+bound to the code editor's own key context.
+
+**`⌘D` takes the word, then the next place it appears.** With the caret inside
+a word the first press selects that word; each press after it adds the next
+occurrence of it, and a press with nothing left to add does nothing. `⇧⌘L`
+takes every occurrence at once, and the selection the caret was already in
+stays the one the caret is in, so the view does not jump to the last match in
+the file.
+
+**`⌥⌘↑` and `⌥⌘↓` add a caret on the line above or below**, in the column the
+outermost caret was in, so holding either key grows a block of cursors a line
+at a time. **Escape** goes back to one cursor — the one the caret was in — and
+with one cursor it does whatever it did before.
+
+Everything the editor does to one selection, it then does to all of them:
+typing, pasting, `⌫` and `⌦`, and Enter, which breaks the line at every caret
+with the indentation of the line it breaks. Copying joins the selections with
+newlines, so pasting them somewhere else gives back one line each. However many
+selections the edit covered, it is one edit: one step on the undo stack, and
+one change to the file.
+
+Three things do not multiply, and each says so rather than half-working. A
+bracket is typed at every cursor instead of pairing around a selection, because
+with several there is no single selection to wrap. `⌘/` comments the block from
+the first cursor to the last as one edit, and leaves it selected the way it
+does for one cursor. And a click, an arrow key or any other movement collapses
+the set to one cursor — deliberately, because it means there is never a caret
+somewhere the cursor commands do not know about.
+
+`⇧⌘L` and `⌘D` stop at 1,000 selections: on a common word in a large file they
+take the first thousand and go no further.
 
 ## File changes
 
@@ -372,7 +411,8 @@ recorded where the app was told to write it, the settings form's every page
 with its headings open and shut, tabs opening, closing and guarding unsaved
 changes, the tab menu's bulk closes and what pinning keeps out of them, drag
 reordering in both directions, brackets pairing and stepping over, comment
-toggling, and the changes view following the active file. What no test covers is the Trash call itself:
+toggling, the multi-cursor commands with the edit that lands at every selection
+they make, and the changes view following the active file. What no test covers is the Trash call itself:
 it would move real files and raise an automation prompt. The guard that stops
 to confirm when unsaved edits are under the entry, and that cancelling leaves
 the entry alone, is covered. Nor is `⌘,` opening the settings window: a test
@@ -434,12 +474,16 @@ size-limited by GPUI. Git status refreshes when a project is opened or switched
 and after a save. Move to Trash goes through Finder, so macOS raises an
 automation permission prompt the first time and a refusal surfaces as an error;
 the Recycle Bin and `gio trash` paths behind the other platforms are written
-but untested on real hardware. There is no multi-cursor: the pinned editor
-holds a single selection and has no model for more, so it needs the component
-library forked before it can exist. A bracket pair does not indent when Enter
-is pressed between the two. The changes view is a unified diff — there is no
-side-by-side — and its counts count rows, so a changed line reads as one gone
-and one arrived. Window geometry is written when a window closes
+but untested on real hardware. Multi-cursor covers typing, pasting, deleting,
+Enter and the four cursor commands, and stops there: there is no `⌥`-click to
+add a cursor, an arrow key collapses the set rather than moving it, and the
+word- and line-delete commands (`⌥⌫`, `⌥⌦`, `⌘⌫`, `⌘⌦`) were left as they
+were, so they can act on one cursor rather than all of them. An edit through
+the set is one step on the undo stack and comes back in one, though the cursors
+it covered are not restored. A bracket pair does not indent when Enter is
+pressed between the two. The changes view is a unified diff — there is no side-by-side — and its counts
+count rows, so a changed line reads as one gone and one arrived. Window
+geometry is written when a window closes
 and again on quit, so a force-killed process loses wherever the windows were —
 the same is true of the settings window. The settings sidebar has no search
 box, and its pages do not scroll, which is fine at five pages and would need
