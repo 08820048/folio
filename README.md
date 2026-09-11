@@ -622,7 +622,10 @@ else, only for the six languages it looks for a server for, and it answers about
 the file on screen rather than saving it first. The changes view is a unified
 diff — there is
 no side-by-side — and its counts count rows, so a changed line reads as one
-gone and one arrived. Window geometry is written when a window closes and again
+gone and one arrived. There is no updater: the packaging this project has signs
+ad-hoc for one machine, and there is no feed to check — so Check for Updates in
+the app menu opens the page that lists the versions, which is the honest half of
+it. Window geometry is written when a window closes and again
 on quit, so a force-killed process loses wherever the windows were — the same
 is true of the settings window. The settings sidebar has no search box, and its
 pages do not scroll, which is fine at five pages and would need fixing before

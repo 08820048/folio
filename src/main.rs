@@ -112,6 +112,8 @@ fn main() {
                 Menu::new("Folio").items([
                     MenuItem::action("About Folio", OpenAbout),
                     MenuItem::separator(),
+                    MenuItem::action("Check for Updates…", CheckForUpdates),
+                    MenuItem::separator(),
                     MenuItem::action("Settings…", OpenSettings),
                     MenuItem::separator(),
                     MenuItem::action("Quit Folio", Quit),

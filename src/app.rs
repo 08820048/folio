@@ -33,6 +33,9 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+/// Where the versions of this application are listed.
+const RELEASES: &str = "https://github.com/08820048/folio/releases";
+
 /// Fonts tried for the glyphs the code font has no coverage for. GPUI's own
 /// fallback stack names no CJK family at all, so without this a Chinese
 /// character in a file is drawn in whatever the platform happens to pick —
@@ -207,6 +210,7 @@ actions!(
         ToggleDiff,
         ToggleBlame,
         GoToDefinition,
+        CheckForUpdates,
         ToggleComment,
         Fold,
         Unfold,
@@ -3342,6 +3346,14 @@ impl Folio {
 
     /// The About window. It holds the name and the version and nothing that
     /// needs updating: automatic updates are not part of this application.
+    /// Where a new version would be announced. There is no feed behind this and
+    /// no update to install from it: the packaging this project has signs
+    /// ad-hoc for one machine, so what a version check can honestly do today is
+    /// open the page that lists the versions.
+    fn check_for_updates(&mut self, cx: &mut Context<Self>) {
+        cx.open_url(RELEASES);
+    }
+
     fn show_about(&mut self, cx: &mut Context<Self>) {
         if let Some(window) = self.about_window
             && window
@@ -6859,6 +6871,7 @@ impl Render for Folio {
                 }),
             )
             .on_action(cx.listener(|this, _: &OpenAbout, _, cx| this.show_about(cx)))
+            .on_action(cx.listener(|this, _: &CheckForUpdates, _, cx| this.check_for_updates(cx)))
             .on_action(
                 cx.listener(|this, _: &ToggleComment, window, cx| this.toggle_comment(window, cx)),
             )
