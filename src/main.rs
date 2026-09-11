@@ -37,6 +37,10 @@ fn main() {
                 KeyBinding::new(&format!("{modifier}-g"), GoToLine, Some("Folio")),
                 KeyBinding::new(&format!("{modifier}-b"), ToggleSidebar, Some("Folio")),
                 KeyBinding::new(&format!("{modifier}-shift-d"), ToggleDiff, Some("Folio")),
+                // The editor's own ⌘⇧F, moved off it so `⇧⌘F` can be the
+                // project search everywhere. The action is the component's;
+                // only the key it answers to changes.
+                KeyBinding::new(&format!("{modifier}-alt-f"), input::Replace, Some("Folio")),
                 KeyBinding::new(&format!("{modifier}-/"), ToggleComment, Some("Folio")),
                 // Bound to the code editor's key context rather than the app's,
                 // so brackets still type normally in the search box and the
@@ -89,6 +93,7 @@ fn main() {
                     MenuItem::action("Toggle Comment", ToggleComment),
                     MenuItem::separator(),
                     MenuItem::action("Find", input::Search),
+                    MenuItem::action("Replace in File", input::Replace),
                 ]),
                 Menu::new("View").items([
                     MenuItem::action("Toggle Sidebar", ToggleSidebar),

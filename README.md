@@ -46,6 +46,7 @@ does not survive a restart.
 | Replace in project | ⇧⌘H | Ctrl+Shift+H |
 | Save current file | ⌘S | Ctrl+S |
 | Find in file | ⌘F | Ctrl+F |
+| Replace in file | ⌥⌘F | Ctrl+Alt+F |
 | Go to line | ⌘G | Ctrl+G |
 | Toggle sidebar | ⌘B | Ctrl+B |
 | Toggle comment | ⌘/ | Ctrl+/ |
@@ -188,6 +189,12 @@ of whitespace or another closer — anywhere else it would swallow the word that
 is already there, turning `foo` into `()foo` where `(foo` was meant. And a
 quote after a word is not opening a quote: it is an apostrophe or a lifetime,
 so it is typed as itself and `don't` stays `don't`.
+
+The editor's own in-file replace answers to `⌥⌘F` rather than the `⇧⌘F` its
+component binds it to. `⇧⌘F` is the project search, and a binding on the
+focused element beats one further out — the editor sits inside the app — so
+the search claims the key in the capture phase, which runs before bindings are
+resolved at all.
 
 **`⌘/` comments lines.** It works on every line the selection touches, so a
 caret comments one line and a selection comments the lines it covers. The

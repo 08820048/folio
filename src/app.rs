@@ -6100,6 +6100,17 @@ impl Render for Folio {
                     cx.notify();
                     return;
                 }
+                // The editor binds ⌘⇧F to its own in-file replace, and a
+                // binding on the focused element beats one further out — so
+                // while the code has focus, which is most of the time, the
+                // project search never saw it. The capture phase runs before
+                // bindings are resolved at all, so it is claimed here.
+                if matches_shortcut(&event.keystroke, "\u{2318}\u{21e7}F") {
+                    this.show_search(false, window, cx);
+                    cx.stop_propagation();
+                    cx.notify();
+                    return;
+                }
                 // Escape has to be caught here: the input owns the key context
                 // while a row is being named.
                 if this.editing.is_some() {
@@ -7607,6 +7618,40 @@ mod tests {
             app.pair_quote("'", window, cx);
             assert_eq!(value(cx), "don'\n");
         });
+    }
+
+    /// The shortcut strings the menus print are matched against real
+    /// keystrokes, and the capture-phase claim for the project search rests on
+    /// this one matching. The key dispatch itself cannot be exercised here —
+    /// keystrokes never reach the view in this harness, which was checked by
+    /// simulating one the app definitely binds and watching nothing happen —
+    /// so what is pinned is the predicate rather than the dispatch.
+    #[test]
+    fn a_keystroke_matches_the_shortcut_it_prints() {
+        let keystroke = |source: &str| Keystroke::parse(source).unwrap();
+        assert!(matches_shortcut(
+            &keystroke("cmd-shift-f"),
+            "\u{2318}\u{21e7}F"
+        ));
+        // A different key, a missing modifier, an extra one.
+        assert!(!matches_shortcut(
+            &keystroke("cmd-shift-f"),
+            "\u{2318}\u{21e7}H"
+        ));
+        assert!(!matches_shortcut(
+            &keystroke("shift-f"),
+            "\u{2318}\u{21e7}F"
+        ));
+        assert!(!matches_shortcut(&keystroke("cmd-f"), "\u{2318}\u{21e7}F"));
+        assert!(matches_shortcut(
+            &keystroke("cmd-shift-z"),
+            "\u{2318}\u{21e7}Z"
+        ));
+        // The menu's own shortcuts are matched the same way.
+        assert!(matches_shortcut(
+            &keystroke("alt-cmd-t"),
+            "\u{2325}\u{2318}T"
+        ));
     }
 
     /// The About window builds. Its version comes from the manifest, so there
