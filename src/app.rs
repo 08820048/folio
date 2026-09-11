@@ -44,6 +44,10 @@ const CJK_FALLBACKS: &[&str] = &[
     "Noto Sans CJK SC",
 ];
 
+/// How tall the tab strip is. Thin on purpose: it takes its row from the code
+/// area, so every pixel it keeps is a pixel the code does not get.
+const TAB_HEIGHT: f32 = 26.;
+
 /// How wide a text field in the settings is. Wide enough for a font name or a
 /// short list of ignored folders, and the same everywhere so the fields line
 /// up down the right-hand side.
@@ -203,6 +207,9 @@ enum Next {
     Picker,
     Open(PathBuf),
     Close,
+    /// Close these open files. One for a single tab; several for Close
+    /// Others and its neighbours.
+    CloseTabs(Vec<PathBuf>),
     Quit,
 }
 enum RecentAction {
@@ -233,9 +240,10 @@ enum Panel {
     Search,
 }
 
-/// Every entry a right-click menu can offer, in menu order.
+/// Every entry a right-click menu can offer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MenuItem {
+    // The project tree.
     NewFile,
     NewFolder,
     Reveal,
@@ -249,9 +257,20 @@ enum MenuItem {
     Rename,
     Trash,
     Delete,
-    /// Named for what it does where it appears: the tree and the editor never
-    /// show it, so this is always the way out of the changes view.
+    // The changes view.
     HideChanges,
+    // The tab strip.
+    CloseTab,
+    CloseOthers,
+    CloseLeft,
+    CloseRight,
+    CloseClean,
+    CloseAll,
+    ToggleReadOnly,
+    CopyPath,
+    CopyRelativePath,
+    PinTab,
+    RevealInTree,
 }
 
 /// What a right-click opened over. Which surface it is decides which entries
@@ -262,34 +281,35 @@ enum MenuTarget {
     Tree { path: PathBuf, root: bool },
     /// A file shown as its changes against HEAD.
     Changes { path: PathBuf },
+    /// A tab in the strip, which is not necessarily the active one.
+    Tab { path: PathBuf, index: usize },
 }
 
-/// Which surface an entry belongs to.
+impl MenuTarget {
+    /// The file the menu acts on.
+    fn path(&self) -> &Path {
+        match self {
+            MenuTarget::Tree { path, .. }
+            | MenuTarget::Changes { path }
+            | MenuTarget::Tab { path, .. } => path,
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Surface {
     Tree,
     Changes,
+    Tab,
 }
 
-impl MenuItem {
-    fn surface(self) -> Surface {
-        match self {
-            MenuItem::HideChanges => Surface::Changes,
-            _ => Surface::Tree,
-        }
-    }
-
-    /// The project root is the workspace's identity: `project_order`, the
-    /// recent list and every cached path key off it, so the tree offers no way
-    /// to rename or remove it.
-    fn applies_to_root(self) -> bool {
-        !matches!(self, MenuItem::Rename | MenuItem::Trash | MenuItem::Delete)
-    }
-}
-
-/// `(item, label, shortcut)`. The shortcut is spelled the way macOS writes it
-/// and rewritten for other platforms by [`shortcut_label`].
-const MENU_ITEMS: &[(MenuItem, &str, &str)] = &[
+/// `(item, label, shortcut)`. One table per surface, so each one's separators
+/// are its own and an entry can be named for what it does where it appears.
+/// The shortcut is spelled the way macOS writes it and rewritten for other
+/// platforms by [`shortcut_label`]; it is empty where the action has no
+/// single-key form, which is most of the tab strip — Zed reaches several of
+/// those through a `⌘K` prefix this menu cannot express.
+const TREE_MENU: &[(MenuItem, &str, &str)] = &[
     (MenuItem::NewFile, "New File", "⌘N"),
     (MenuItem::NewFolder, "New Folder", "⌘⇧N"),
     (MenuItem::Reveal, "Reveal in Finder", "⌘⇧R"),
@@ -304,29 +324,77 @@ const MENU_ITEMS: &[(MenuItem, &str, &str)] = &[
     // The two Finder bindings, so the destructive one carries the extra key.
     (MenuItem::Trash, "Move to Trash", "⌘⌫"),
     (MenuItem::Delete, "Delete Immediately", "⌥⌘⌫"),
-    (MenuItem::HideChanges, "Hide File Changes", "⌘⇧D"),
 ];
+const TREE_SEPARATORS: &[usize] = &[2, 5, 6, 10, 11];
 
-/// Items that get a separator line above them, splitting the menu into groups.
-/// A separator is only ever drawn between two visible entries, so the shared
-/// indices are harmless on a surface that shows a subset.
-const MENU_SEPARATORS: &[usize] = &[2, 5, 6, 10, 11, 13];
+const CHANGES_MENU: &[(MenuItem, &str, &str)] =
+    &[(MenuItem::HideChanges, "Hide File Changes", "⌘⇧D")];
+const CHANGES_SEPARATORS: &[usize] = &[];
+
+const TAB_MENU: &[(MenuItem, &str, &str)] = &[
+    (MenuItem::CloseTab, "Close", ""),
+    (MenuItem::CloseOthers, "Close Others", "⌥⌘T"),
+    (MenuItem::CloseLeft, "Close Left", ""),
+    (MenuItem::CloseRight, "Close Right", ""),
+    (MenuItem::CloseClean, "Close Clean", ""),
+    (MenuItem::CloseAll, "Close All", ""),
+    (MenuItem::ToggleReadOnly, "Make Tab Read-Only", ""),
+    (MenuItem::CopyPath, "Copy Path", "⌥⌘C"),
+    (MenuItem::CopyRelativePath, "Copy Relative Path", "⌥⌘⇧C"),
+    (MenuItem::Reveal, "Reveal in Finder", "⌘⇧R"),
+    (MenuItem::PinTab, "Pin Tab", ""),
+    (MenuItem::RevealInTree, "Reveal In Project Panel", ""),
+    (MenuItem::OpenTerminal, "Open in Terminal", ""),
+];
+const TAB_SEPARATORS: &[usize] = &[2, 4, 6, 7, 9, 10];
+
+impl Surface {
+    /// This surface's entries, and where the rules between them go.
+    fn menu(
+        self,
+    ) -> (
+        &'static [(MenuItem, &'static str, &'static str)],
+        &'static [usize],
+    ) {
+        match self {
+            Surface::Tree => (TREE_MENU, TREE_SEPARATORS),
+            Surface::Changes => (CHANGES_MENU, CHANGES_SEPARATORS),
+            Surface::Tab => (TAB_MENU, TAB_SEPARATORS),
+        }
+    }
+}
+
+fn surface_of(target: &MenuTarget) -> Surface {
+    match target {
+        MenuTarget::Tree { .. } => Surface::Tree,
+        MenuTarget::Changes { .. } => Surface::Changes,
+        MenuTarget::Tab { .. } => Surface::Tab,
+    }
+}
+
+impl MenuItem {
+    /// The project root is the workspace's identity: `project_order`, the
+    /// recent list and every cached path key off it, so the tree offers no way
+    /// to rename or remove it.
+    fn applies_to_root(self) -> bool {
+        !matches!(self, MenuItem::Rename | MenuItem::Trash | MenuItem::Delete)
+    }
+}
 
 /// The menu is a fixed grid so its height can be measured before it is built.
 const MENU_WIDTH: f32 = 228.;
 const MENU_ROW: f32 = 26.;
 
-/// The indices of `MENU_ITEMS` a menu shows for this target.
+/// The indices into the target's own menu that it shows. The project root
+/// drops the entries that would rename or remove it.
 fn visible_menu_items(target: &MenuTarget) -> Vec<usize> {
-    let surface = match target {
-        MenuTarget::Tree { .. } => Surface::Tree,
-        MenuTarget::Changes { .. } => Surface::Changes,
-    };
     let root = matches!(target, MenuTarget::Tree { root: true, .. });
-    MENU_ITEMS
+    surface_of(target)
+        .menu()
+        .0
         .iter()
         .enumerate()
-        .filter(|(_, (item, _, _))| item.surface() == surface && (!root || item.applies_to_root()))
+        .filter(|(_, (item, _, _))| !root || item.applies_to_root())
         .map(|(index, _)| index)
         .collect()
 }
@@ -379,10 +447,11 @@ fn matches_shortcut(keystroke: &Keystroke, shortcut: &str) -> bool {
 /// Total menu height including separators and the 4px inner padding.
 fn menu_height(target: &MenuTarget) -> f32 {
     let visible = visible_menu_items(target);
+    let rules = surface_of(target).menu().1;
     let separators = visible
         .iter()
         .enumerate()
-        .filter(|(position, index)| *position > 0 && MENU_SEPARATORS.contains(index))
+        .filter(|(position, index)| *position > 0 && rules.contains(index))
         .count();
     visible.len() as f32 * MENU_ROW + separators as f32 * 9. + 8.
 }
@@ -391,7 +460,8 @@ fn menu_height(target: &MenuTarget) -> f32 {
 struct ContextMenu {
     target: MenuTarget,
     position: Point<Pixels>,
-    /// Index into `MENU_ITEMS`, for the keyboard and the highlight.
+    /// Index into the target surface's menu, for the keyboard and the
+    /// highlight.
     selected: usize,
 }
 
@@ -486,6 +556,14 @@ struct Project {
     selected_row: usize,
     tree_scroll: UniformListScrollHandle,
     documents: HashMap<PathBuf, Document>,
+    /// The open files, in strip order. `documents` holds the buffers; this
+    /// holds which of them are showing and in what order.
+    tabs: Vec<PathBuf>,
+    /// Tabs the user has pinned, and buffers they have locked. Both are view
+    /// state — neither reaches the disk — and both are per project, so
+    /// switching projects keeps them.
+    pinned: HashSet<PathBuf>,
+    read_only: HashSet<PathBuf>,
     active: Option<PathBuf>,
     git_status: HashMap<String, char>,
     files: Vec<PathBuf>,
@@ -686,8 +764,13 @@ impl Folio {
         // Invalidate a pending file read before changing project or opening a modal.
         self.open_request += 1;
         self.loading = false;
-        let dirty = match next {
+        // By reference: one arm needs the path, and `next` is still wanted
+        // for the prompt and the follow-up.
+        let dirty = match &next {
             Next::Picker | Next::Open(_) => 0,
+            // Only the files being closed are at stake, so only their own
+            // edits are counted.
+            Next::CloseTabs(paths) => paths.iter().filter(|path| self.is_dirty(path)).count(),
             Next::Close => self.project.documents.values().filter(|d| d.dirty).count(),
             Next::Quit => std::iter::once(&self.project)
                 .chain(self.parked.iter())
@@ -697,6 +780,12 @@ impl Folio {
         };
         if dirty == 0 {
             self.perform(next, window, cx);
+            return;
+        }
+        // Closing one tab asks about that file alone; closing a project or
+        // quitting asks about everything it would take with it.
+        if let Next::CloseTabs(paths) = &next {
+            self.prompt_close_tabs(paths.clone(), window, cx);
             return;
         }
         self.prompting = true;
@@ -727,8 +816,105 @@ impl Folio {
         .detach();
     }
 
+    /// Ask about unsaved changes before these tabs go away. One file is named;
+    /// several are counted, because the answer is the same either way.
+    fn prompt_close_tabs(
+        &mut self,
+        paths: Vec<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.prompting = true;
+        cx.notify();
+        let (title, body) = match paths.as_slice() {
+            [only] => (name(only), "This file has unsaved changes.".to_string()),
+            many => (
+                format!("{} files", many.len()),
+                "These files have unsaved changes.".to_string(),
+            ),
+        };
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &title,
+            Some(&body),
+            &["Save", "Don't Save", "Cancel"],
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            let answer = answer.await.unwrap_or(2);
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.prompting = false;
+                match answer {
+                    0 => this.save_documents(Some(Next::CloseTabs(paths)), window, cx),
+                    1 => this.close_tabs(paths, window, cx),
+                    _ => {}
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Take these files out of the strip and release their buffers. Only ever
+    /// called once their unsaved changes have been settled.
+    fn close_tabs(&mut self, closing: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+        let active_survives = self
+            .project
+            .active
+            .as_ref()
+            .is_some_and(|active| !closing.contains(active));
+        // Where the view lands if the active tab is one of them: the first tab
+        // after the set that survives, else the last one before it.
+        let replacement = self.project.active.as_ref().and_then(|active| {
+            let index = self.project.tabs.iter().position(|tab| tab == active)?;
+            self.project.tabs[index..]
+                .iter()
+                .find(|tab| !closing.contains(tab))
+                .or_else(|| {
+                    self.project.tabs[..index]
+                        .iter()
+                        .rev()
+                        .find(|tab| !closing.contains(tab))
+                })
+                .cloned()
+        });
+        for path in &closing {
+            self.project.tabs.retain(|tab| tab != path);
+            self.project.documents.remove(path);
+            self.project.pinned.remove(path);
+            self.project.read_only.remove(path);
+            if self
+                .project
+                .image
+                .as_ref()
+                .is_some_and(|(image, _)| image == path)
+            {
+                self.project.image = None;
+            }
+            if self.goto.as_ref().is_some_and(|(target, _)| target == path) {
+                self.goto = None;
+            }
+        }
+        if active_survives {
+            cx.notify();
+            return;
+        }
+        match replacement {
+            Some(next) => self.open_file(next, window, cx),
+            None => {
+                self.project.active = None;
+                self.open_request += 1;
+                self.loading = false;
+                self.focus_editor(window, cx);
+                self.update_title(window);
+                cx.notify();
+            }
+        }
+    }
+
     fn perform(&mut self, next: Next, window: &mut Window, cx: &mut Context<Self>) {
         match next {
+            Next::CloseTabs(paths) => self.close_tabs(paths, window, cx),
             Next::Quit => {
                 // A settings window still open is the authority on its own
                 // geometry; otherwise whatever it last reported stands.
@@ -1394,6 +1580,7 @@ impl Folio {
         self.project
             .documents
             .retain(|key, _| !key.starts_with(path));
+        self.project.tabs.retain(|tab| !tab.starts_with(path));
         if self
             .project
             .active
@@ -1456,6 +1643,12 @@ impl Folio {
         if let Some((image, render)) = self.project.image.take() {
             self.project.image = Some((moved(&image, from, to).unwrap_or(image), render));
         }
+        // A renamed file keeps its tab, under its new path, in its old place.
+        for tab in &mut self.project.tabs {
+            if let Some(renamed) = moved(tab, from, to) {
+                *tab = renamed;
+            }
+        }
         let expanded = std::mem::take(&mut self.project.expanded);
         self.project.expanded = expanded
             .into_iter()
@@ -1504,11 +1697,94 @@ impl Folio {
         }
     }
 
-    fn menu_item_enabled(&self, item: MenuItem) -> bool {
+    /// Whether a tab's buffer has edits that are not on disk.
+    fn is_dirty(&self, path: &Path) -> bool {
+        self.project
+            .documents
+            .get(path)
+            .is_some_and(|doc| doc.dirty)
+    }
+
+    fn is_pinned(&self, path: &Path) -> bool {
+        self.project.pinned.contains(path)
+    }
+
+    fn is_read_only(&self, path: &Path) -> bool {
+        self.project.read_only.contains(path)
+    }
+
+    /// The tabs an entry would close, which is nothing for anything else. The
+    /// bulk entries leave pinned tabs alone — that is what pinning is for.
+    fn tabs_to_close(&self, item: MenuItem, path: &Path) -> Vec<PathBuf> {
+        let tabs = &self.project.tabs;
+        let Some(index) = tabs.iter().position(|tab| tab == path) else {
+            return Vec::new();
+        };
+        let free = |tab: &PathBuf| !self.is_pinned(tab);
+        match item {
+            MenuItem::CloseTab => vec![path.to_path_buf()],
+            MenuItem::CloseOthers => tabs
+                .iter()
+                .filter(|tab| tab.as_path() != path && free(tab))
+                .cloned()
+                .collect(),
+            MenuItem::CloseLeft => tabs[..index]
+                .iter()
+                .filter(|tab| free(tab))
+                .cloned()
+                .collect(),
+            MenuItem::CloseRight => tabs[index + 1..]
+                .iter()
+                .filter(|tab| free(tab))
+                .cloned()
+                .collect(),
+            MenuItem::CloseClean => tabs
+                .iter()
+                .filter(|tab| !self.is_dirty(tab) && free(tab))
+                .cloned()
+                .collect(),
+            MenuItem::CloseAll => tabs.iter().filter(|tab| free(tab)).cloned().collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Whether an entry can be taken here. Everything is available unless it
+    /// would do nothing at all.
+    fn menu_item_enabled(&self, item: MenuItem, path: &Path) -> bool {
         match item {
             MenuItem::Paste => self.clipboard.is_some(),
+            MenuItem::CloseOthers
+            | MenuItem::CloseLeft
+            | MenuItem::CloseRight
+            | MenuItem::CloseAll
+            | MenuItem::CloseClean => !self.tabs_to_close(item, path).is_empty(),
+            MenuItem::CopyRelativePath | MenuItem::RevealInTree => self.project.workspace.is_some(),
             _ => true,
         }
+    }
+
+    /// The label an entry shows here. Most are what the table says; the two
+    /// that flip are the reason this is a call and not a lookup.
+    fn menu_label(&self, item: MenuItem, path: &Path, label: &'static str) -> SharedString {
+        match item {
+            MenuItem::ToggleReadOnly if self.is_read_only(path) => "Make Tab Writable".into(),
+            MenuItem::PinTab if self.is_pinned(path) => "Unpin Tab".into(),
+            _ => label.into(),
+        }
+    }
+
+    /// Pinned tabs sit at the front. `sort_by_key` is stable, so each group
+    /// keeps the order it already had.
+    fn reorder_tabs(&mut self) {
+        let pinned = self.project.pinned.clone();
+        self.project.tabs.sort_by_key(|tab| !pinned.contains(tab));
+    }
+
+    /// Put a string on the system clipboard and say so, because the clipboard
+    /// gives no sign of its own.
+    fn copy_to_clipboard(&mut self, text: String, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        self.toast("Copied", cx);
     }
 
     /// Move the keyboard highlight to the next or previous visible entry.
@@ -1536,13 +1812,71 @@ impl Folio {
         let Some(menu) = self.menu.take() else {
             return;
         };
-        if !self.menu_item_enabled(item) {
+        if !self.menu_item_enabled(item, menu.target.path()) {
             cx.notify();
             return;
         }
         match menu.target {
             MenuTarget::Tree { path, .. } => self.run_tree_item(item, path, window, cx),
             MenuTarget::Changes { .. } => self.run_changes_item(item, window, cx),
+            MenuTarget::Tab { path, .. } => self.run_tab_item(item, path, window, cx),
+        }
+    }
+
+    /// The entries a tab offers.
+    fn run_tab_item(
+        &mut self,
+        item: MenuItem,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match item {
+            MenuItem::CloseTab
+            | MenuItem::CloseOthers
+            | MenuItem::CloseLeft
+            | MenuItem::CloseRight
+            | MenuItem::CloseClean
+            | MenuItem::CloseAll => {
+                let closing = self.tabs_to_close(item, &path);
+                if !closing.is_empty() {
+                    self.request(Next::CloseTabs(closing), window, cx);
+                }
+            }
+            MenuItem::ToggleReadOnly => {
+                if !self.project.read_only.remove(&path) {
+                    self.project.read_only.insert(path);
+                }
+                cx.notify();
+            }
+            MenuItem::PinTab => {
+                if !self.project.pinned.remove(&path) {
+                    self.project.pinned.insert(path);
+                }
+                self.reorder_tabs();
+                cx.notify();
+            }
+            MenuItem::CopyPath => {
+                let text = path.to_string_lossy().into_owned();
+                self.copy_to_clipboard(text, cx);
+            }
+            MenuItem::CopyRelativePath => {
+                let text = self.relative_path(&path);
+                self.copy_to_clipboard(text, cx);
+            }
+            MenuItem::RevealInTree => self.reveal_in_tree(path, window, cx),
+            MenuItem::Reveal => {
+                let target = path.clone();
+                self.spawn_launch(move || fs_op::reveal(&target), cx);
+            }
+            MenuItem::OpenTerminal => {
+                // A tab is a file; a terminal is useful at the folder holding
+                // it rather than at the file.
+                let dir = path.parent().map(Path::to_path_buf).unwrap_or(path);
+                self.spawn_launch(move || fs_op::open_terminal(&dir), cx);
+            }
+            // Nothing else is offered on that surface.
+            _ => cx.notify(),
         }
     }
 
@@ -1608,9 +1942,8 @@ impl Folio {
                 let target = path.clone();
                 self.spawn_launch(move || fs_op::open_terminal(&target), cx);
             }
-            // Only the changes view offers this, and it is not reachable from
-            // here.
-            MenuItem::HideChanges => cx.notify(),
+            // The remaining entries belong to other surfaces.
+            _ => cx.notify(),
         }
     }
 
@@ -1810,6 +2143,78 @@ impl Folio {
         }
     }
 
+    /// Open the folders above a file in the tree and put the cursor on it, so
+    /// the panel shows where the file lives.
+    fn reveal_in_tree(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(root) = self.project.workspace.as_ref().map(|w| w.root.clone()) else {
+            return;
+        };
+        if !path.starts_with(&root) {
+            return;
+        }
+        // Every folder between the root and the file has to be open for its
+        // row to exist at all.
+        let mut folders: Vec<PathBuf> = path
+            .parent()
+            .into_iter()
+            .flat_map(|parent| parent.ancestors())
+            .take_while(|dir| dir.starts_with(&root))
+            .map(Path::to_path_buf)
+            .collect();
+        folders.reverse();
+        for folder in &folders {
+            self.project.expanded.insert(folder.clone());
+        }
+        let project_id = self.project.id;
+        let ignored = self.settings.ignored.clone();
+        // Every folder on the way down is re-read rather than only the ones
+        // the tree has never opened: a folder added since its parent was last
+        // read is not in that parent's listing, so the row would not exist even
+        // though the folder itself would read fine.
+        let task = cx.background_executor().spawn(async move {
+            let mut read = Vec::new();
+            for folder in folders {
+                if let Ok(children) = tree::children(&folder, &ignored) {
+                    read.push((folder, children));
+                }
+            }
+            read
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let read = task.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                if let Some(project) = this.project_mut(project_id) {
+                    for (folder, children) in read {
+                        project.directories.insert(folder, children);
+                    }
+                }
+                if this.project.id == project_id {
+                    this.select_row_for(&path, window, cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Put the tree's cursor on a row and bring it into view.
+    fn select_row_for(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) {
+        self.rebuild_rows();
+        if let Some(index) = self
+            .project
+            .rows
+            .iter()
+            .position(|row| row.entry.path == path)
+        {
+            self.project.selected_row = index;
+            self.project
+                .tree_scroll
+                .scroll_to_item(index, ScrollStrategy::Center);
+        }
+        self.tree_focus.focus(window, cx);
+        cx.notify();
+    }
+
     /// Put the caret back on the code, or on the tree when nothing is open.
     fn focus_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(doc) = self
@@ -1888,6 +2293,108 @@ impl Folio {
             });
         })
         .detach();
+    }
+
+    /// The open files, as a strip above the editor. Hidden while only one
+    /// file is open, which is the single-file mode the requirements ask to
+    /// keep: one file looks exactly as it did before tabs existed.
+    fn render_tabs(&self, cx: &Context<Self>) -> AnyElement {
+        div()
+            .id("tabs")
+            .flex_shrink_0()
+            .w_full()
+            .h(px(TAB_HEIGHT))
+            .flex()
+            .items_center()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .children(self.project.tabs.iter().enumerate().map(|(index, path)| {
+                let selected = self.project.active.as_ref() == Some(path);
+                let dirty = self
+                    .project
+                    .documents
+                    .get(path)
+                    .is_some_and(|doc| doc.dirty);
+                let open = path.clone();
+                let close = path.clone();
+                let menu_path = path.clone();
+                div()
+                    .id(("tab", index))
+                    .role(Role::Button)
+                    .aria_label(name(path))
+                    .aria_selected(selected)
+                    .h_full()
+                    .min_w_0()
+                    .max_w(px(200.))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .flex_shrink_0()
+                    .border_r_1()
+                    .border_color(cx.theme().border)
+                    .cursor_pointer()
+                    .text_size(ui(11.))
+                    .text_color(if selected {
+                        cx.theme().foreground
+                    } else {
+                        cx.theme().muted_foreground
+                    })
+                    .when(selected, |el| el.bg(cx.theme().list_active))
+                    .hover(|el| el.bg(cx.theme().list_hover))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_file(open.clone(), window, cx)
+                    }))
+                    // The menu acts on the tab that was clicked, which is not
+                    // necessarily the one showing.
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                            this.open_menu(
+                                MenuTarget::Tab {
+                                    path: menu_path.clone(),
+                                    index,
+                                },
+                                event.position,
+                                window,
+                                cx,
+                            );
+                            cx.stop_propagation();
+                        }),
+                    )
+                    .child(div().flex_1().min_w_0().truncate().child(name(path)))
+                    .when(dirty, |el| {
+                        el.child(
+                            Icon::new(IconName::Asterisk)
+                                .xsmall()
+                                .text_color(cx.theme().warning),
+                        )
+                    })
+                    .child(
+                        div()
+                            .id(("tab-close", index))
+                            .role(Role::Button)
+                            .aria_label("Close")
+                            .size(px(14.))
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_sm()
+                            .cursor_pointer()
+                            .text_color(cx.theme().muted_foreground)
+                            .hover(|el| el.text_color(cx.theme().foreground))
+                            // Without this the tab underneath would take the
+                            // same click and reopen the file being closed.
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.request(Next::CloseTabs(vec![close.clone()]), window, cx)
+                            }))
+                            .child(Icon::new(IconName::Close).xsmall()),
+                    )
+                    .into_any_element()
+            }))
+            .into_any_element()
     }
 
     /// The active file's changes, in place of the editor.
@@ -2215,6 +2722,11 @@ impl Folio {
             self.goto = None;
         }
         self.open_request += 1;
+        // Opening is also what gives a file its tab, so a path reached from
+        // the tree, quick open or a search hit all land in the same place.
+        if !self.project.tabs.contains(&path) {
+            self.project.tabs.push(path.clone());
+        }
         if self
             .project
             .image
@@ -2353,6 +2865,12 @@ impl Folio {
             return;
         }
         let all_projects = matches!(next, Some(Next::Quit));
+        // Closing a tab saves only that file, not every buffer that happens to
+        // be dirty alongside it.
+        let only = match &next {
+            Some(Next::CloseTabs(paths)) => Some(paths.clone()),
+            _ => None,
+        };
         let saves = std::iter::once(&self.project)
             .chain(self.parked.iter().filter(|_| all_projects))
             .flat_map(|project| {
@@ -2360,7 +2878,11 @@ impl Folio {
                     .documents
                     .iter()
                     .filter(|(path, doc)| {
-                        doc.dirty && (next.is_some() || project.active.as_ref() == Some(path))
+                        doc.dirty
+                            && only
+                                .as_ref()
+                                .is_none_or(|only| only.iter().any(|kept| kept == *path))
+                            && (next.is_some() || project.active.as_ref() == Some(path))
                     })
                     .map(|(path, doc)| {
                         (
@@ -3477,7 +3999,8 @@ impl Folio {
     /// and the lookup panel, and darker than the sidebar it opens over so the
     /// edge is visible without relying on the shadow alone.
     fn render_menu(&self, menu: &ContextMenu, cx: &Context<Self>) -> AnyElement {
-        let clipboard = self.clipboard.is_some();
+        let (entries, rules) = surface_of(&menu.target).menu();
+        let path = menu.target.path();
         div()
             .id("tree-menu")
             .absolute()
@@ -3501,24 +4024,21 @@ impl Folio {
                     .into_iter()
                     .enumerate()
                     .flat_map(|(position, index)| {
-                        let (item, label, shortcut) = MENU_ITEMS[index];
-                        let enabled = match item {
-                            MenuItem::Paste => clipboard,
-                            _ => true,
-                        };
-                        // A separator only ever sits between two entries.
-                        let separator =
-                            (position > 0 && MENU_SEPARATORS.contains(&index)).then(|| {
-                                div()
-                                    .h(px(1.))
-                                    .my(px(4.))
-                                    .bg(cx.theme().border)
-                                    .into_any_element()
-                            });
+                        let (item, label, shortcut) = entries[index];
+                        let label = self.menu_label(item, path, label);
+                        let enabled = self.menu_item_enabled(item, path);
+                        // A rule only ever sits between two entries.
+                        let separator = (position > 0 && rules.contains(&index)).then(|| {
+                            div()
+                                .h(px(1.))
+                                .my(px(4.))
+                                .bg(cx.theme().border)
+                                .into_any_element()
+                        });
                         let row = div()
                             .id(("menu-item", index))
                             .role(Role::Button)
-                            .aria_label(label)
+                            .aria_label(label.clone())
                             .h(px(MENU_ROW))
                             .px_2()
                             .flex()
@@ -4154,6 +4674,13 @@ impl Folio {
         // The changes view takes the whole area, so whatever the editor would
         // have shown steps out of the way rather than being covered up.
         let showing_diff = self.project.diff.is_some();
+        // A tab can be locked from its own menu. The buffer stays open and
+        // readable; only the edits are refused.
+        let locked = self
+            .project
+            .active
+            .as_ref()
+            .is_some_and(|path| self.project.read_only.contains(path));
         let doc = (!showing_diff).then(|| {
             self.project
                 .active
@@ -4199,80 +4726,102 @@ impl Folio {
                             .h_full()
                             .flex()
                             .flex_col()
-                            .when(!self.sidebar && !showing_diff, |el| el.px_6())
-                            .when(showing_diff, |el| el.child(self.render_diff(cx)))
-                            .when_some(doc, |el, doc| {
-                                el.when(doc.large, |el| {
-                                    el.child(
-                                        div()
-                                            .px_4()
-                                            .py_1()
-                                            .text_size(ui(11.))
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child("Large file · syntax highlighting off"),
-                                    )
-                                })
-                                .child({
-                                    // Rendered through `Input` rather than the
-                                    // `Editor` wrapper: the wrapper hides the
-                                    // context-menu hook, and the wrapper is
-                                    // otherwise doing exactly this.
-                                    let base = doc.editor.read(cx).base_state().clone();
-                                    let editor = {
-                                        let capabilities =
-                                            base.read(cx).context_menu_capabilities();
-                                        let enabled = !capabilities.is_disabled();
-                                        EditorMenuState {
-                                            enabled,
-                                            editable: enabled && !capabilities.is_readonly(),
-                                            code_editor: capabilities.is_code_editor(),
-                                            has_selection: capabilities.has_selection(),
-                                            can_go_to_definition: capabilities
-                                                .can_go_to_definition(),
-                                            has_code_actions: capabilities.has_code_actions(),
-                                        }
-                                    };
-                                    Input::from_base(&base)
-                                        .bordered(false)
-                                        .focus_bordered(false)
-                                        .readonly(self.saving || self.loading || self.prompting)
-                                        .context_menu(move |menu, window, cx| {
-                                            editor_context_menu(editor, menu, window, cx)
+                            .when(self.project.tabs.len() > 1, |el| {
+                                el.child(self.render_tabs(cx))
+                            })
+                            // Everything under the strip keeps the padding
+                            // full-screen mode gives it; the strip itself runs
+                            // the full width.
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_h_0()
+                                    .w_full()
+                                    .flex()
+                                    .flex_col()
+                                    .when(!self.sidebar && !showing_diff, |el| el.px_6())
+                                    .when(showing_diff, |el| el.child(self.render_diff(cx)))
+                                    .when_some(doc, |el, doc| {
+                                        el.when(doc.large, |el| {
+                                            el.child(
+                                                div()
+                                                    .px_4()
+                                                    .py_1()
+                                                    .text_size(ui(11.))
+                                                    .text_color(cx.theme().muted_foreground)
+                                                    .child("Large file · syntax highlighting off"),
+                                            )
                                         })
-                                        // The code size is its own setting, so it
-                                        // is absolute rather than in the
-                                        // interface's scale.
-                                        .text_size(px(self.settings.code_font_size))
-                                        .font_family(self.code_font())
-                                        .line_height(gpui::relative(1.6))
-                                        .rounded_none()
-                                        .h_full()
-                                })
-                            })
-                            .when_some(image, |el, (path, image)| {
-                                el.child(
-                                    div().flex_1().min_h_0().w_full().p_6().child(
-                                        img(image.clone())
-                                            .size_full()
-                                            .object_fit(ObjectFit::Contain),
-                                    ),
-                                )
-                                .child(
-                                    div()
-                                        .px_4()
-                                        .py_2()
-                                        .text_size(ui(11.))
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(format!(
-                                            "{} · {} × {} · static preview",
-                                            name(path),
-                                            u32::from(image.size(0).width),
-                                            u32::from(image.size(0).height)
-                                        )),
-                                )
-                            })
-                            .when(!showing_diff && doc.is_none() && image.is_none(), |el| {
-                                el.child(
+                                        .child({
+                                            // Rendered through `Input` rather than the
+                                            // `Editor` wrapper: the wrapper hides the
+                                            // context-menu hook, and the wrapper is
+                                            // otherwise doing exactly this.
+                                            let base = doc.editor.read(cx).base_state().clone();
+                                            let editor = {
+                                                let capabilities =
+                                                    base.read(cx).context_menu_capabilities();
+                                                let enabled = !capabilities.is_disabled();
+                                                EditorMenuState {
+                                                    enabled,
+                                                    editable: enabled
+                                                        && !capabilities.is_readonly(),
+                                                    code_editor: capabilities.is_code_editor(),
+                                                    has_selection: capabilities.has_selection(),
+                                                    can_go_to_definition: capabilities
+                                                        .can_go_to_definition(),
+                                                    has_code_actions: capabilities
+                                                        .has_code_actions(),
+                                                }
+                                            };
+                                            Input::from_base(&base)
+                                                .bordered(false)
+                                                .focus_bordered(false)
+                                                .readonly(
+                                                    self.saving
+                                                        || self.loading
+                                                        || self.prompting
+                                                        || locked,
+                                                )
+                                                .context_menu(move |menu, window, cx| {
+                                                    editor_context_menu(editor, menu, window, cx)
+                                                })
+                                                // The code size is its own setting, so it
+                                                // is absolute rather than in the
+                                                // interface's scale.
+                                                .text_size(px(self.settings.code_font_size))
+                                                .font_family(self.code_font())
+                                                .line_height(gpui::relative(1.6))
+                                                .rounded_none()
+                                                .h_full()
+                                        })
+                                    })
+                                    .when_some(image, |el, (path, image)| {
+                                        el.child(
+                                            div().flex_1().min_h_0().w_full().p_6().child(
+                                                img(image.clone())
+                                                    .size_full()
+                                                    .object_fit(ObjectFit::Contain),
+                                            ),
+                                        )
+                                        .child(
+                                            div()
+                                                .px_4()
+                                                .py_2()
+                                                .text_size(ui(11.))
+                                                .text_color(cx.theme().muted_foreground)
+                                                .child(format!(
+                                                    "{} · {} × {} · static preview",
+                                                    name(path),
+                                                    u32::from(image.size(0).width),
+                                                    u32::from(image.size(0).height)
+                                                )),
+                                        )
+                                    })
+                                    .when(
+                                        !showing_diff && doc.is_none() && image.is_none(),
+                                        |el| {
+                                            el.child(
                                     div()
                                         .size_full()
                                         .flex()
@@ -4293,7 +4842,9 @@ impl Folio {
                                                 .child("Pick a file on the left, or press ⌘ P"),
                                         ),
                                 )
-                            }),
+                                        },
+                                    ),
+                            ),
                     ),
             )
             .into_any_element()
@@ -5068,26 +5619,25 @@ impl Render for Folio {
                         "up" => this.move_menu_selection(false),
                         "down" => this.move_menu_selection(true),
                         "enter" => {
-                            if let Some(item) = this
-                                .menu
-                                .as_ref()
-                                .and_then(|menu| MENU_ITEMS.get(menu.selected))
-                                .map(|(item, _, _)| *item)
-                            {
+                            let chosen = this.menu.as_ref().and_then(|menu| {
+                                surface_of(&menu.target)
+                                    .menu()
+                                    .0
+                                    .get(menu.selected)
+                                    .map(|(item, _, _)| *item)
+                            });
+                            if let Some(item) = chosen {
                                 this.run_menu_item(item, window, cx);
                             }
                         }
                         _ => {
-                            let Some(visible) = this
-                                .menu
-                                .as_ref()
-                                .map(|menu| visible_menu_items(&menu.target))
-                            else {
+                            let Some(menu) = this.menu.as_ref() else {
                                 return;
                             };
-                            let Some(item) = visible
-                                .iter()
-                                .filter_map(|index| MENU_ITEMS.get(*index))
+                            let (entries, _) = surface_of(&menu.target).menu();
+                            let Some(item) = visible_menu_items(&menu.target)
+                                .into_iter()
+                                .filter_map(|index| entries.get(index))
                                 .find(|(_, _, shortcut)| {
                                     matches_shortcut(&event.keystroke, shortcut)
                                 })
@@ -5881,6 +6431,322 @@ mod tests {
         assert_eq!(state.settings, Some([30., 40., 900., 660.]));
     }
 
+    /// The tab strip's menu: the closes act on the tab that was clicked, and
+    /// the bulk ones leave pinned tabs alone.
+    #[gpui::test]
+    fn the_tab_menu_closes_pins_and_locks(cx: &mut TestAppContext) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let first = root.join("first.rs");
+        let second = root.join("second.rs");
+        let third = root.join("third.rs");
+        for file in [&first, &second, &third] {
+            std::fs::write(file, "// code\n").unwrap();
+        }
+        cx.update(gpui_component::init);
+        let cx = cx.add_empty_window();
+        let view = cx.update(|window, cx| {
+            cx.new(|cx| {
+                let mut app = Folio::new(window, cx);
+                app.recent_task = None;
+                app.recent_file = root.join("recent.json");
+                app.settings_file = root.join("settings.json");
+                app.window_file = root.join("window.json");
+                app.settings = Settings::default();
+                app.applied_ignored = app.settings.ignored.clone();
+                app
+            })
+        });
+        view.update_in(cx, |app, window, cx| {
+            app.request(Next::Open(root.clone()), window, cx)
+        });
+        cx.run_until_parked();
+        for file in [&first, &second, &third] {
+            view.update_in(cx, |app, window, cx| {
+                app.open_file(file.clone(), window, cx)
+            });
+            cx.run_until_parked();
+        }
+
+        // The strip offers its own table, and closing leftwards off the first
+        // tab is one of the things that has nothing to do.
+        view.update_in(cx, |app, window, cx| {
+            app.open_menu(
+                MenuTarget::Tab {
+                    path: first.clone(),
+                    index: 0,
+                },
+                point(px(60.), px(40.)),
+                window,
+                cx,
+            );
+            let target = app.menu.as_ref().unwrap().target.clone();
+            assert_eq!(visible_menu_items(&target).len(), TAB_MENU.len());
+            assert!(!app.menu_item_enabled(MenuItem::CloseLeft, &first));
+            assert!(app.menu_item_enabled(MenuItem::CloseRight, &first));
+            // The strip draws under it.
+            let _ = app.render(window, cx);
+            app.run_menu_item(MenuItem::CloseRight, window, cx);
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |app, _, _| {
+            assert_eq!(app.project.tabs, vec![first.clone()]);
+        });
+
+        // Close Others keeps the tab the menu was opened on, and takes the
+        // rest — including the one that was showing.
+        view.update_in(cx, |app, window, cx| {
+            app.open_file(second.clone(), window, cx)
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |app, window, cx| {
+            app.open_menu(
+                MenuTarget::Tab {
+                    path: first.clone(),
+                    index: 0,
+                },
+                point(px(60.), px(40.)),
+                window,
+                cx,
+            );
+            app.run_menu_item(MenuItem::CloseOthers, window, cx);
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |app, _, _| {
+            assert_eq!(app.project.tabs, vec![first.clone()]);
+            assert_eq!(app.project.active.as_ref(), Some(&first));
+        });
+
+        // Pinning moves the tab to the front and takes it out of the bulk
+        // closes' reach.
+        view.update_in(cx, |app, window, cx| {
+            app.open_file(third.clone(), window, cx)
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |app, window, cx| {
+            app.open_menu(
+                MenuTarget::Tab {
+                    path: third.clone(),
+                    index: 1,
+                },
+                point(px(60.), px(40.)),
+                window,
+                cx,
+            );
+            app.run_menu_item(MenuItem::PinTab, window, cx);
+            assert!(app.is_pinned(&third));
+            assert_eq!(app.project.tabs.first(), Some(&third));
+            // And the entry says what it will do next time.
+            assert_eq!(
+                app.menu_label(MenuItem::PinTab, &third, "Pin Tab").as_ref(),
+                "Unpin Tab"
+            );
+        });
+        view.update_in(cx, |app, window, cx| {
+            app.open_menu(
+                MenuTarget::Tab {
+                    path: first.clone(),
+                    index: 1,
+                },
+                point(px(60.), px(40.)),
+                window,
+                cx,
+            );
+            assert!(!app.menu_item_enabled(MenuItem::CloseOthers, &first));
+            app.run_menu_item(MenuItem::CloseOthers, window, cx);
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |app, _, _| {
+            assert_eq!(app.project.tabs, vec![third.clone(), first.clone()]);
+        });
+
+        // Locking a tab is view state: it flips the label and refuses edits,
+        // and nothing about it reaches the file.
+        view.update_in(cx, |app, window, cx| {
+            app.open_menu(
+                MenuTarget::Tab {
+                    path: first.clone(),
+                    index: 1,
+                },
+                point(px(60.), px(40.)),
+                window,
+                cx,
+            );
+            app.run_menu_item(MenuItem::ToggleReadOnly, window, cx);
+            assert!(app.is_read_only(&first));
+            assert_eq!(
+                app.menu_label(MenuItem::ToggleReadOnly, &first, "Make Tab Read-Only")
+                    .as_ref(),
+                "Make Tab Writable"
+            );
+            let _ = app.render(window, cx);
+        });
+
+        // Copying a relative path puts it on the clipboard, without the root.
+        view.update_in(cx, |app, window, cx| {
+            app.open_menu(
+                MenuTarget::Tab {
+                    path: first.clone(),
+                    index: 1,
+                },
+                point(px(60.), px(40.)),
+                window,
+                cx,
+            );
+            app.run_menu_item(MenuItem::CopyRelativePath, window, cx);
+        });
+        assert_eq!(
+            cx.read_from_clipboard()
+                .and_then(|item| item.text())
+                .as_deref(),
+            Some("first.rs")
+        );
+
+        // Revealing opens the folders above the file — its row does not exist
+        // until they are — and puts the tree's cursor on it.
+        let nested = root.join("nested");
+        let deep = nested.join("deep.rs");
+        std::fs::create_dir(&nested).unwrap();
+        std::fs::write(&deep, "// deep\n").unwrap();
+        view.update_in(cx, |app, window, cx| {
+            app.open_file(deep.clone(), window, cx)
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |app, window, cx| {
+            assert!(!app.project.expanded.contains(&nested));
+            app.open_menu(
+                MenuTarget::Tab {
+                    path: deep.clone(),
+                    index: 2,
+                },
+                point(px(60.), px(40.)),
+                window,
+                cx,
+            );
+            app.run_menu_item(MenuItem::RevealInTree, window, cx);
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |app, _, _| {
+            assert!(app.project.expanded.contains(&nested));
+            let row = &app.project.rows[app.project.selected_row];
+            assert_eq!(row.entry.path, deep, "the cursor is on the revealed file");
+        });
+    }
+
+    /// Tabs: opening adds them, closing one releases its buffer and leaves a
+    /// neighbour showing, and a dirty one is asked about first.
+    #[gpui::test]
+    fn tabs_open_close_and_guard_unsaved_changes(cx: &mut TestAppContext) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let first = root.join("first.rs");
+        let second = root.join("second.rs");
+        std::fs::write(&first, "// one\n").unwrap();
+        std::fs::write(&second, "// two\n").unwrap();
+        cx.update(gpui_component::init);
+        let cx = cx.add_empty_window();
+        let view = cx.update(|window, cx| {
+            cx.new(|cx| {
+                let mut app = Folio::new(window, cx);
+                app.recent_task = None;
+                app.recent_file = root.join("recent.json");
+                app.settings_file = root.join("settings.json");
+                app.window_file = root.join("window.json");
+                app.settings = Settings::default();
+                app.applied_ignored = app.settings.ignored.clone();
+                app
+            })
+        });
+        view.update_in(cx, |app, window, cx| {
+            app.request(Next::Open(root.clone()), window, cx)
+        });
+        cx.run_until_parked();
+
+        view.update_in(cx, |app, window, cx| {
+            app.open_file(first.clone(), window, cx)
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |app, _, _| {
+            assert_eq!(app.project.tabs, vec![first.clone()]);
+            assert_eq!(app.project.active.as_ref(), Some(&first));
+        });
+
+        view.update_in(cx, |app, window, cx| {
+            app.open_file(second.clone(), window, cx)
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |app, window, cx| {
+            assert_eq!(app.project.tabs, vec![first.clone(), second.clone()]);
+            assert_eq!(app.project.active.as_ref(), Some(&second));
+            // The strip draws; the harness never draws on its own.
+            let _ = app.render(window, cx);
+        });
+
+        // Opening a file that already has a tab focuses it rather than adding
+        // a second one.
+        view.update_in(cx, |app, window, cx| {
+            app.open_file(first.clone(), window, cx)
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |app, _, _| {
+            assert_eq!(app.project.tabs.len(), 2);
+            assert_eq!(app.project.active.as_ref(), Some(&first));
+        });
+
+        // Closing the active tab releases its buffer and shows the neighbour.
+        view.update_in(cx, |app, window, cx| {
+            app.close_tabs(vec![first.clone()], window, cx)
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |app, _, _| {
+            assert_eq!(app.project.tabs, vec![second.clone()]);
+            assert!(!app.project.documents.contains_key(&first));
+            assert_eq!(app.project.active.as_ref(), Some(&second));
+        });
+
+        // An untouched tab closes without a word.
+        view.update_in(cx, |app, window, cx| {
+            app.request(Next::CloseTabs(vec![second.clone()]), window, cx)
+        });
+        cx.run_until_parked();
+        assert!(!cx.has_pending_prompt());
+        view.update_in(cx, |app, _, _| {
+            assert!(app.project.tabs.is_empty());
+            assert!(app.project.active.is_none());
+            assert!(app.project.documents.is_empty());
+        });
+
+        // A dirty tab is asked about, and cancelling leaves it alone.
+        view.update_in(cx, |app, window, cx| {
+            app.open_file(second.clone(), window, cx)
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |app, window, cx| {
+            app.project.documents.get_mut(&second).unwrap().dirty = true;
+            app.request(Next::CloseTabs(vec![second.clone()]), window, cx);
+            assert!(app.prompting);
+        });
+        assert!(cx.has_pending_prompt());
+        cx.simulate_prompt_answer("Cancel");
+        cx.run_until_parked();
+        view.update_in(cx, |app, _, _| {
+            assert_eq!(app.project.tabs, vec![second.clone()]);
+            assert!(app.project.documents.contains_key(&second));
+        });
+
+        // Discarding closes it, and putting the tab back works the same way.
+        view.update_in(cx, |app, window, cx| {
+            app.request(Next::CloseTabs(vec![second.clone()]), window, cx)
+        });
+        assert!(cx.has_pending_prompt());
+        cx.simulate_prompt_answer("Don't Save");
+        cx.run_until_parked();
+        view.update_in(cx, |app, _, _| {
+            assert!(app.project.tabs.is_empty());
+            assert!(app.project.documents.is_empty());
+        });
+    }
+
     /// The changes view: `⇧⌘D` shows the active file's diff against HEAD,
     /// follows the file it is pointed at, and goes away again.
     #[gpui::test]
@@ -5990,7 +6856,7 @@ mod tests {
                     path: other.clone()
                 }
             );
-            assert_eq!(MENU_ITEMS[menu.selected].0, MenuItem::HideChanges);
+            assert_eq!(CHANGES_MENU[menu.selected].0, MenuItem::HideChanges);
             // The menu draws over the view.
             let _ = app.render(window, cx);
             app.run_menu_item(MenuItem::HideChanges, window, cx);
@@ -6195,7 +7061,7 @@ mod tests {
 
         view.update_in(cx, |app, window, cx| {
             assert!(
-                !app.menu_item_enabled(MenuItem::Paste),
+                !app.menu_item_enabled(MenuItem::Paste, &root),
                 "paste stays disabled until something is on the clipboard"
             );
             open_tree_menu(app, &src, false, window, cx);
@@ -6205,7 +7071,7 @@ mod tests {
             let _ = app.render(window, cx);
             app.move_menu_selection(true);
             assert_eq!(app.menu.as_ref().unwrap().selected, 1);
-            assert!(app.menu_item_enabled(MENU_ITEMS[1].0));
+            assert!(app.menu_item_enabled(TREE_MENU[1].0, &src));
 
             app.run_menu_item(MenuItem::NewFile, window, cx);
             assert!(app.menu.is_none(), "choosing an item closes the menu");
@@ -6313,7 +7179,7 @@ mod tests {
         let labels = |target: &MenuTarget| {
             visible_menu_items(target)
                 .into_iter()
-                .map(|index| MENU_ITEMS[index].1)
+                .map(|index| surface_of(target).menu().0[index].1)
                 .collect::<Vec<_>>()
         };
         let tree_labels = |root: bool| {
