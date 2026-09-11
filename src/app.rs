@@ -1,7 +1,7 @@
 use crate::assets::FolioIcon;
 use crate::preview::{self, Content};
 use folio::{
-    buffer, fs_op, git,
+    buffer, diff, fs_op, git,
     recent::{self, RecentProject},
     search,
     settings::{self, Settings},
@@ -12,7 +12,8 @@ use gpui::{prelude::*, *};
 use gpui_component::{
     ActiveTheme, Disableable, Icon, IconName, Root, Sizable, Theme, TitleBar,
     button::{Button, ButtonVariants},
-    input::{Editor, EditorState, Input, InputEvent, InputState, Position, TabSize},
+    input::{self, EditorState, Input, InputEvent, InputState, Position, TabSize},
+    native_menu::NativeMenu,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -47,6 +48,74 @@ const CJK_FALLBACKS: &[&str] = &[
 /// short list of ignored folders, and the same everywhere so the fields line
 /// up down the right-hand side.
 const FIELD_WIDTH: f32 = 240.;
+
+/// What the editor's right-click menu needs to know about the editor, copied
+/// out of the component's capabilities one frame before the menu is asked for.
+/// The component's own type is not nameable from here, and this is the whole
+/// of what the menu reads from it.
+#[derive(Clone, Copy)]
+struct EditorMenuState {
+    enabled: bool,
+    /// Enabled and not read-only: a read-only editor can still be navigated
+    /// and copied out of, it only rejects what would change the text.
+    editable: bool,
+    code_editor: bool,
+    has_selection: bool,
+    can_go_to_definition: bool,
+    has_code_actions: bool,
+}
+
+/// The editor's right-click menu: the standard text actions, then the way into
+/// the changes view.
+///
+/// This replaces the component's own menu rather than adding to it. The
+/// component sets its handler on every render and offers no way to extend it,
+/// so the standard entries are rebuilt here, disabled under the same
+/// conditions. Dropping them would cost Cut, Copy and Paste on right-click,
+/// which is a poor trade for one added row.
+///
+/// That state arrives as an argument rather than being read here, because this
+/// runs inside the editor's own update — that is how the component schedules
+/// it — and reading the entity from there is a re-entrant borrow. It is read
+/// one frame earlier instead, and anything that moves it repaints.
+fn editor_context_menu(
+    editor: EditorMenuState,
+    mut menu: NativeMenu,
+    _: &mut Window,
+    cx: &mut App,
+) -> NativeMenu {
+    if editor.code_editor {
+        menu = menu
+            .menu_with_disabled(
+                "Go to Definition",
+                !(editor.enabled && editor.can_go_to_definition),
+                Box::new(input::GoToDefinition),
+            )
+            .menu_with_disabled(
+                "Show Code Actions",
+                !(editor.editable && editor.has_code_actions),
+                Box::new(input::ToggleCodeActions),
+            )
+            .separator();
+    }
+    menu.menu_with_disabled(
+        "Cut",
+        !(editor.editable && editor.has_selection),
+        Box::new(input::Cut),
+    )
+    .menu_with_disabled("Copy", !editor.has_selection, Box::new(input::Copy))
+    .menu_with_disabled(
+        "Paste",
+        !(editor.editable && cx.read_from_clipboard().is_some()),
+        Box::new(input::Paste),
+    )
+    .separator()
+    .menu("Select All", Box::new(input::SelectAll))
+    .separator()
+    // The editor is only on screen while the changes view is off, so this
+    // only ever shows one way.
+    .menu("Show File Changes", Box::new(ToggleDiff))
+}
 
 /// A type size in the interface scale. The design is drawn at 13px, so
 /// `ui(11.)` is the 11px label from the spec, and it grows with the interface
@@ -124,6 +193,7 @@ actions!(
         ToggleSidebar,
         OpenSettings,
         CloseSettings,
+        ToggleDiff,
         Quit
     ]
 );
@@ -163,8 +233,8 @@ enum Panel {
     Search,
 }
 
-/// Every entry the project-tree context menu offers, in menu order.
-#[derive(Clone, Copy, PartialEq, Eq)]
+/// Every entry a right-click menu can offer, in menu order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MenuItem {
     NewFile,
     NewFolder,
@@ -179,9 +249,36 @@ enum MenuItem {
     Rename,
     Trash,
     Delete,
+    /// Named for what it does where it appears: the tree and the editor never
+    /// show it, so this is always the way out of the changes view.
+    HideChanges,
+}
+
+/// What a right-click opened over. Which surface it is decides which entries
+/// the menu offers, and what each entry acts on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum MenuTarget {
+    /// A folder in the project tree.
+    Tree { path: PathBuf, root: bool },
+    /// A file shown as its changes against HEAD.
+    Changes { path: PathBuf },
+}
+
+/// Which surface an entry belongs to.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Surface {
+    Tree,
+    Changes,
 }
 
 impl MenuItem {
+    fn surface(self) -> Surface {
+        match self {
+            MenuItem::HideChanges => Surface::Changes,
+            _ => Surface::Tree,
+        }
+    }
+
     /// The project root is the workspace's identity: `project_order`, the
     /// recent list and every cached path key off it, so the tree offers no way
     /// to rename or remove it.
@@ -207,21 +304,29 @@ const MENU_ITEMS: &[(MenuItem, &str, &str)] = &[
     // The two Finder bindings, so the destructive one carries the extra key.
     (MenuItem::Trash, "Move to Trash", "⌘⌫"),
     (MenuItem::Delete, "Delete Immediately", "⌥⌘⌫"),
+    (MenuItem::HideChanges, "Hide File Changes", "⌘⇧D"),
 ];
 
 /// Items that get a separator line above them, splitting the menu into groups.
-const MENU_SEPARATORS: &[usize] = &[2, 5, 6, 10, 11];
+/// A separator is only ever drawn between two visible entries, so the shared
+/// indices are harmless on a surface that shows a subset.
+const MENU_SEPARATORS: &[usize] = &[2, 5, 6, 10, 11, 13];
 
 /// The menu is a fixed grid so its height can be measured before it is built.
 const MENU_WIDTH: f32 = 228.;
 const MENU_ROW: f32 = 26.;
 
 /// The indices of `MENU_ITEMS` a menu shows for this target.
-fn visible_menu_items(root: bool) -> Vec<usize> {
+fn visible_menu_items(target: &MenuTarget) -> Vec<usize> {
+    let surface = match target {
+        MenuTarget::Tree { .. } => Surface::Tree,
+        MenuTarget::Changes { .. } => Surface::Changes,
+    };
+    let root = matches!(target, MenuTarget::Tree { root: true, .. });
     MENU_ITEMS
         .iter()
         .enumerate()
-        .filter(|(_, (item, _, _))| !root || item.applies_to_root())
+        .filter(|(_, (item, _, _))| item.surface() == surface && (!root || item.applies_to_root()))
         .map(|(index, _)| index)
         .collect()
 }
@@ -272,8 +377,8 @@ fn matches_shortcut(keystroke: &Keystroke, shortcut: &str) -> bool {
 }
 
 /// Total menu height including separators and the 4px inner padding.
-fn menu_height(root: bool) -> f32 {
-    let visible = visible_menu_items(root);
+fn menu_height(target: &MenuTarget) -> f32 {
+    let visible = visible_menu_items(target);
     let separators = visible
         .iter()
         .enumerate()
@@ -283,12 +388,8 @@ fn menu_height(root: bool) -> f32 {
 }
 
 /// An open right-click menu, anchored where the pointer was.
-struct TreeMenu {
-    /// The folder the menu acts on.
-    path: PathBuf,
-    /// Whether the target is the project root, which drops the entries that
-    /// only make sense for an entry inside the project.
-    root: bool,
+struct ContextMenu {
+    target: MenuTarget,
     position: Point<Pixels>,
     /// Index into `MENU_ITEMS`, for the keyboard and the highlight.
     selected: usize,
@@ -358,6 +459,22 @@ fn search_rows(results: &[search::FileHits]) -> Vec<SearchRow> {
     rows
 }
 
+/// The active file shown as a diff against HEAD, in place of the editor.
+#[derive(Default)]
+struct DiffView {
+    path: PathBuf,
+    lines: Vec<diff::Line>,
+    untracked: bool,
+    /// `None` once git has answered. Loading and failed are different from
+    /// "no changes" and have to say so rather than showing an empty list.
+    error: Option<String>,
+    loading: bool,
+    scroll: UniformListScrollHandle,
+    /// Bumped per request, so a slow `git` for a file the user has moved on
+    /// from does not land on top of the newer one.
+    request: u64,
+}
+
 #[derive(Default)]
 struct Project {
     id: u64,
@@ -373,6 +490,8 @@ struct Project {
     git_status: HashMap<String, char>,
     files: Vec<PathBuf>,
     indexing: bool,
+    /// Set while the active file is being shown as changes rather than code.
+    diff: Option<DiffView>,
 }
 
 pub struct Folio {
@@ -394,7 +513,7 @@ pub struct Folio {
     matches: Vec<PathBuf>,
     match_selected: usize,
     /// The open right-click menu, if any.
-    menu: Option<TreeMenu>,
+    menu: Option<ContextMenu>,
     /// Where Cut / Copy put the entry, and whether it was a cut.
     clipboard: Option<FileClipboard>,
     /// The tree row being named, if any.
@@ -1349,25 +1468,18 @@ impl Folio {
             .collect();
     }
 
-    /// Open the context menu over `path`, flipped when it would overhang the
+    /// Open the context menu over `target`, flipped when it would overhang the
     /// window's bottom or right edge.
     fn open_menu(
         &mut self,
-        path: PathBuf,
+        target: MenuTarget,
         position: Point<Pixels>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // The project root has no row of its own, so only its header can name
-        // it, and a menu opened there drops the entry-level actions.
-        let root = self
-            .project
-            .workspace
-            .as_ref()
-            .is_some_and(|w| w.root == path);
         let size = window.viewport_size();
         let (x, y) = (f32::from(position.x), f32::from(position.y));
-        let height = menu_height(root);
+        let height = menu_height(&target);
         let x = if x + MENU_WIDTH + 8. > f32::from(size.width) {
             (x - MENU_WIDTH).max(8.)
         } else {
@@ -1378,11 +1490,10 @@ impl Folio {
         } else {
             y
         };
-        self.menu = Some(TreeMenu {
-            path,
-            root,
+        self.menu = Some(ContextMenu {
+            selected: visible_menu_items(&target).first().copied().unwrap_or(0),
+            target,
             position: point(px(x), px(y)),
-            selected: visible_menu_items(root).first().copied().unwrap_or(0),
         });
         cx.notify();
     }
@@ -1405,7 +1516,7 @@ impl Folio {
         let Some(menu) = self.menu.as_ref() else {
             return;
         };
-        let visible = visible_menu_items(menu.root);
+        let visible = visible_menu_items(&menu.target);
         let current = visible.iter().position(|&index| index == menu.selected);
         let next = match (current, down) {
             (Some(current), true) => (current + 1).min(visible.len().saturating_sub(1)),
@@ -1429,7 +1540,20 @@ impl Folio {
             cx.notify();
             return;
         }
-        let path = menu.path;
+        match menu.target {
+            MenuTarget::Tree { path, .. } => self.run_tree_item(item, path, window, cx),
+            MenuTarget::Changes { .. } => self.run_changes_item(item, window, cx),
+        }
+    }
+
+    /// The entries a folder in the tree offers.
+    fn run_tree_item(
+        &mut self,
+        item: MenuItem,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         match item {
             MenuItem::NewFile => self.begin_create(path, EntryKind::File, window, cx),
             MenuItem::NewFolder => self.begin_create(path, EntryKind::Directory, window, cx),
@@ -1484,6 +1608,18 @@ impl Folio {
                 let target = path.clone();
                 self.spawn_launch(move || fs_op::open_terminal(&target), cx);
             }
+            // Only the changes view offers this, and it is not reachable from
+            // here.
+            MenuItem::HideChanges => cx.notify(),
+        }
+    }
+
+    /// The entries a file's changes offer. Leaving is the only one so far.
+    fn run_changes_item(&mut self, item: MenuItem, window: &mut Window, cx: &mut Context<Self>) {
+        match item {
+            MenuItem::HideChanges => self.toggle_diff(window, cx),
+            // Nothing else is offered on that surface.
+            _ => cx.notify(),
         }
     }
 
@@ -1655,6 +1791,258 @@ impl Folio {
                 self.spawn_change(parent, kind == EntryKind::File, create, window, cx);
             }
         }
+    }
+
+    /// The font code is drawn in, falling back to the one in the binary.
+    fn code_font(&self) -> SharedString {
+        self.settings
+            .code_font_family
+            .clone()
+            .unwrap_or_else(|| "JetBrains Mono".to_string())
+            .into()
+    }
+
+    /// Keep an open changes view pointed at whatever file is active now, so a
+    /// review can walk the tree instead of reopening the view per file.
+    fn follow_diff(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.project.diff.is_some() {
+            self.load_diff(window, cx);
+        }
+    }
+
+    /// Put the caret back on the code, or on the tree when nothing is open.
+    fn focus_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(doc) = self
+            .project
+            .active
+            .as_ref()
+            .and_then(|path| self.project.documents.get(path))
+        {
+            doc.editor.focus_handle(cx).focus(window, cx);
+        } else {
+            self.tree_focus.focus(window, cx);
+        }
+    }
+
+    /// `⇧⌘D`: show the active file as its changes against HEAD, or go back to
+    /// reading it.
+    fn toggle_diff(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.project.diff.take().is_some() {
+            self.focus_editor(window, cx);
+            cx.notify();
+            return;
+        }
+        // The tree keeps the keyboard: the diff is read-only, and picking the
+        // next file moves the view on to its changes.
+        self.tree_focus.focus(window, cx);
+        self.load_diff(window, cx);
+    }
+
+    /// Read the active file's changes. Called when the view is turned on and
+    /// again whenever the file it is showing changes, so it follows a review
+    /// rather than having to be reopened per file.
+    fn load_diff(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(path), Some(workspace)) =
+            (self.project.active.clone(), self.project.workspace.clone())
+        else {
+            self.project.diff = None;
+            cx.notify();
+            return;
+        };
+        let project_id = self.project.id;
+        let request = self.project.diff.as_ref().map_or(0, |view| view.request) + 1;
+        self.project.diff = Some(DiffView {
+            path: path.clone(),
+            loading: true,
+            request,
+            ..DiffView::default()
+        });
+        cx.notify();
+        let task = cx
+            .background_executor()
+            .spawn(async move { diff::for_file(&workspace.root, &path) });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            let _ = this.update_in(cx, |this, _, cx| {
+                let Some(project) = this.project_mut(project_id) else {
+                    return;
+                };
+                let Some(view) = project.diff.as_mut() else {
+                    return;
+                };
+                // A slower answer for a file the user has already left is not
+                // the answer to show.
+                if view.request != request {
+                    return;
+                }
+                view.loading = false;
+                match result {
+                    Ok(diff) => {
+                        view.lines = diff.lines;
+                        view.untracked = diff.untracked;
+                        view.error = None;
+                    }
+                    Err(error) => view.error = Some(error.to_string()),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// The active file's changes, in place of the editor.
+    fn render_diff(&self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(view) = self.project.diff.as_ref() else {
+            return div().into_any_element();
+        };
+        let added = view
+            .lines
+            .iter()
+            .filter(|line| line.change == diff::Change::Added)
+            .count();
+        let removed = view
+            .lines
+            .iter()
+            .filter(|line| line.change == diff::Change::Removed)
+            .count();
+        let summary = if view.loading {
+            "Reading…".to_string()
+        } else if let Some(error) = &view.error {
+            error.clone()
+        } else if view.lines.is_empty() {
+            "No changes against HEAD".to_string()
+        } else if view.untracked {
+            format!("Not tracked by git yet · {added} added")
+        } else {
+            format!("+{added} −{removed}")
+        };
+        div()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .flex()
+            .flex_col()
+            // This surface is the app's own, so it gets the app's menu rather
+            // than the native one the editor brings with it.
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    let Some(path) = this.project.active.clone() else {
+                        return;
+                    };
+                    this.open_menu(MenuTarget::Changes { path }, event.position, window, cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .px_4()
+                    .py_2()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .border_b_1()
+                    .border_color(cx.theme().border)
+                    .text_size(ui(11.))
+                    .text_color(cx.theme().muted_foreground)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .child(self.relative_path(&view.path)),
+                    )
+                    .child(summary)
+                    // The way out, in the open. Escape and the shortcut do
+                    // the same thing, but nothing on screen said so.
+                    .child(Self::icon_button(
+                        "diff-close",
+                        IconName::Close,
+                        "Hide file changes",
+                        |this, window, cx| this.toggle_diff(window, cx),
+                        cx,
+                    )),
+            )
+            .when(!view.lines.is_empty(), |el| {
+                el.child(
+                    uniform_list(
+                        "diff",
+                        view.lines.len(),
+                        cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
+                            range.map(|index| this.render_diff_row(index, cx)).collect()
+                        }),
+                    )
+                    .track_scroll(&view.scroll)
+                    .flex_1(),
+                )
+            })
+            .into_any_element()
+    }
+
+    /// One row of the diff: both line numbers, then the line itself.
+    fn render_diff_row(&self, index: usize, cx: &Context<Self>) -> AnyElement {
+        let Some(line) = self
+            .project
+            .diff
+            .as_ref()
+            .and_then(|view| view.lines.get(index))
+        else {
+            return div().into_any_element();
+        };
+        if line.change == diff::Change::Hunk {
+            return div()
+                .w_full()
+                .h(px(24.))
+                .px_4()
+                .flex()
+                .items_center()
+                .bg(cx.theme().list_hover)
+                .text_size(ui(11.))
+                .text_color(cx.theme().muted_foreground)
+                .child(div().min_w_0().truncate().child(line.text.clone()))
+                .into_any_element();
+        }
+        let (background, marker) = match line.change {
+            diff::Change::Added => (Some(cx.theme().success.opacity(0.16)), "+"),
+            diff::Change::Removed => (Some(cx.theme().danger.opacity(0.16)), "−"),
+            _ => (None, " "),
+        };
+        div()
+            .w_full()
+            .h(px(22.))
+            .flex()
+            .items_center()
+            .font_family(self.code_font())
+            .text_size(px(self.settings.code_font_size))
+            .when_some(background, |el, background| el.bg(background))
+            .child(Self::diff_number(line.old, cx))
+            .child(Self::diff_number(line.new, cx))
+            .child(
+                div()
+                    .w(px(18.))
+                    .flex_shrink_0()
+                    .flex()
+                    .justify_center()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(marker),
+            )
+            .child(div().flex_1().min_w_0().truncate().child(line.text.clone()))
+            .into_any_element()
+    }
+
+    /// A gutter cell. Empty on the side a line does not exist on, which is what
+    /// keeps the two columns readable.
+    fn diff_number(number: Option<u32>, cx: &Context<Self>) -> AnyElement {
+        div()
+            .w(px(46.))
+            .flex_shrink_0()
+            .pr_2()
+            .flex()
+            .justify_end()
+            .text_color(cx.theme().muted_foreground)
+            .child(number.map(|number| number.to_string()).unwrap_or_default())
+            .into_any_element()
     }
 
     /// `Find in Folder`: the project search narrowed to one subtree.
@@ -1837,6 +2225,7 @@ impl Folio {
             self.loading = false;
             self.tree_focus.focus(window, cx);
             self.update_title(window);
+            self.follow_diff(window, cx);
             cx.notify();
             return;
         }
@@ -1847,6 +2236,7 @@ impl Folio {
             editor.focus_handle(cx).focus(window, cx);
             self.apply_goto(&path, window, cx);
             self.update_title(window);
+            self.follow_diff(window, cx);
             cx.notify();
             return;
         }
@@ -1876,6 +2266,7 @@ impl Folio {
                         this.message = None;
                         this.tree_focus.focus(window, cx);
                         this.update_title(window);
+                        this.follow_diff(window, cx);
                     }
                     Ok((path, Content::Text(text))) => {
                         let large = text.len() > buffer::HIGHLIGHT_LIMIT;
@@ -1924,6 +2315,7 @@ impl Folio {
                         this.project.active = Some(path);
                         this.message = None;
                         this.update_title(window);
+                        this.follow_diff(window, cx);
                     }
                     Err(e) => this.error(e.to_string(), cx),
                 }
@@ -2818,7 +3210,15 @@ impl Folio {
                     if !this.project.expanded.contains(&menu_root) {
                         this.toggle_directory(menu_root.clone(), cx);
                     }
-                    this.open_menu(menu_root.clone(), event.position, window, cx);
+                    this.open_menu(
+                        MenuTarget::Tree {
+                            path: menu_root.clone(),
+                            root: true,
+                        },
+                        event.position,
+                        window,
+                        cx,
+                    );
                     cx.stop_propagation();
                 }),
             )
@@ -2979,7 +3379,15 @@ impl Folio {
                                     this.project.selected_row =
                                         index.min(this.project.rows.len().saturating_sub(1));
                                     this.tree_focus.focus(window, cx);
-                                    this.open_menu(menu_path.clone(), event.position, window, cx);
+                                    this.open_menu(
+                                        MenuTarget::Tree {
+                                            path: menu_path.clone(),
+                                            root: false,
+                                        },
+                                        event.position,
+                                        window,
+                                        cx,
+                                    );
                                     cx.stop_propagation();
                                 }),
                             )
@@ -3068,7 +3476,7 @@ impl Folio {
     /// The right-click menu. Drawn last in the root stack so it covers the tree
     /// and the lookup panel, and darker than the sidebar it opens over so the
     /// edge is visible without relying on the shadow alone.
-    fn render_menu(&self, menu: &TreeMenu, cx: &Context<Self>) -> AnyElement {
+    fn render_menu(&self, menu: &ContextMenu, cx: &Context<Self>) -> AnyElement {
         let clipboard = self.clipboard.is_some();
         div()
             .id("tree-menu")
@@ -3089,7 +3497,7 @@ impl Folio {
             .text_color(cx.theme().foreground)
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .children(
-                visible_menu_items(menu.root)
+                visible_menu_items(&menu.target)
                     .into_iter()
                     .enumerate()
                     .flat_map(|(position, index)| {
@@ -3743,16 +4151,23 @@ impl Folio {
     }
 
     fn render_workspace(&self, cx: &mut Context<Self>) -> AnyElement {
-        let doc = self
-            .project
-            .active
-            .as_ref()
-            .and_then(|p| self.project.documents.get(p));
-        let image = self
-            .project
-            .image
-            .as_ref()
-            .filter(|(path, _)| self.project.active.as_ref() == Some(path));
+        // The changes view takes the whole area, so whatever the editor would
+        // have shown steps out of the way rather than being covered up.
+        let showing_diff = self.project.diff.is_some();
+        let doc = (!showing_diff).then(|| {
+            self.project
+                .active
+                .as_ref()
+                .and_then(|p| self.project.documents.get(p))
+        });
+        let doc = doc.flatten();
+        let image = (!showing_diff).then(|| {
+            self.project
+                .image
+                .as_ref()
+                .filter(|(path, _)| self.project.active.as_ref() == Some(path))
+        });
+        let image = image.flatten();
         div()
             .size_full()
             .flex()
@@ -3784,7 +4199,8 @@ impl Folio {
                             .h_full()
                             .flex()
                             .flex_col()
-                            .when(!self.sidebar, |el| el.px_6())
+                            .when(!self.sidebar && !showing_diff, |el| el.px_6())
+                            .when(showing_diff, |el| el.child(self.render_diff(cx)))
                             .when_some(doc, |el, doc| {
                                 el.when(doc.large, |el| {
                                     el.child(
@@ -3796,16 +4212,42 @@ impl Folio {
                                             .child("Large file · syntax highlighting off"),
                                     )
                                 })
-                                .child(
-                                    Editor::new(&doc.editor)
-                                        .h_full()
+                                .child({
+                                    // Rendered through `Input` rather than the
+                                    // `Editor` wrapper: the wrapper hides the
+                                    // context-menu hook, and the wrapper is
+                                    // otherwise doing exactly this.
+                                    let base = doc.editor.read(cx).base_state().clone();
+                                    let editor = {
+                                        let capabilities =
+                                            base.read(cx).context_menu_capabilities();
+                                        let enabled = !capabilities.is_disabled();
+                                        EditorMenuState {
+                                            enabled,
+                                            editable: enabled && !capabilities.is_readonly(),
+                                            code_editor: capabilities.is_code_editor(),
+                                            has_selection: capabilities.has_selection(),
+                                            can_go_to_definition: capabilities
+                                                .can_go_to_definition(),
+                                            has_code_actions: capabilities.has_code_actions(),
+                                        }
+                                    };
+                                    Input::from_base(&base)
                                         .bordered(false)
+                                        .focus_bordered(false)
                                         .readonly(self.saving || self.loading || self.prompting)
-                                        .text_size(ui(14.))
-                                        .font_family("JetBrains Mono")
+                                        .context_menu(move |menu, window, cx| {
+                                            editor_context_menu(editor, menu, window, cx)
+                                        })
+                                        // The code size is its own setting, so it
+                                        // is absolute rather than in the
+                                        // interface's scale.
+                                        .text_size(px(self.settings.code_font_size))
+                                        .font_family(self.code_font())
                                         .line_height(gpui::relative(1.6))
-                                        .rounded_none(),
-                                )
+                                        .rounded_none()
+                                        .h_full()
+                                })
                             })
                             .when_some(image, |el, (path, image)| {
                                 el.child(
@@ -3829,7 +4271,7 @@ impl Folio {
                                         )),
                                 )
                             })
-                            .when(doc.is_none() && image.is_none(), |el| {
+                            .when(!showing_diff && doc.is_none() && image.is_none(), |el| {
                                 el.child(
                                     div()
                                         .size_full()
@@ -4597,6 +5039,7 @@ impl Render for Folio {
                 this.apply_settings(cx);
             }))
             .on_action(cx.listener(|this, _: &OpenSettings, _, cx| this.show_settings(cx)))
+            .on_action(cx.listener(|this, _: &ToggleDiff, window, cx| this.toggle_diff(window, cx)))
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
                 this.resizing &= event.dragging();
                 if this.resizing {
@@ -4635,8 +5078,10 @@ impl Render for Folio {
                             }
                         }
                         _ => {
-                            let Some(visible) =
-                                this.menu.as_ref().map(|menu| visible_menu_items(menu.root))
+                            let Some(visible) = this
+                                .menu
+                                .as_ref()
+                                .map(|menu| visible_menu_items(&menu.target))
                             else {
                                 return;
                             };
@@ -4669,6 +5114,12 @@ impl Render for Folio {
                     return;
                 }
                 let Some(panel) = this.panel else {
+                    // Nothing else wants it: Escape leaves the changes view,
+                    // which is otherwise only reachable by its shortcut.
+                    if this.project.diff.is_some() && event.keystroke.key == "escape" {
+                        this.toggle_diff(window, cx);
+                        cx.stop_propagation();
+                    }
                     return;
                 };
                 match event.keystroke.key.as_str() {
@@ -5430,6 +5881,128 @@ mod tests {
         assert_eq!(state.settings, Some([30., 40., 900., 660.]));
     }
 
+    /// The changes view: `⇧⌘D` shows the active file's diff against HEAD,
+    /// follows the file it is pointed at, and goes away again.
+    #[gpui::test]
+    fn the_changes_view_shows_the_active_files_diff(cx: &mut TestAppContext) {
+        use std::process::Command;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let git = |args: &[&str]| {
+            Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        assert!(git(&["init", "-q"]).status.success());
+        let file = root.join("main.rs");
+        let other = root.join("other.rs");
+        std::fs::write(&file, "let one = 1;\nlet two = 2;\n").unwrap();
+        std::fs::write(&other, "// untouched\n").unwrap();
+        assert!(git(&["add", "."]).status.success());
+        assert!(
+            git(&[
+                "-c",
+                "user.name=Folio Test",
+                "-c",
+                "user.email=test@localhost",
+                "commit",
+                "-qm",
+                "fixture"
+            ])
+            .status
+            .success()
+        );
+        // One line changed after the commit, which is what the view shows.
+        std::fs::write(&file, "let one = 1;\nlet two = 22;\n").unwrap();
+
+        cx.update(gpui_component::init);
+        let cx = cx.add_empty_window();
+        let view = cx.update(|window, cx| {
+            cx.new(|cx| {
+                let mut app = Folio::new(window, cx);
+                app.recent_task = None;
+                app.recent_file = root.join("recent.json");
+                app.settings_file = root.join("settings.json");
+                app.window_file = root.join("window.json");
+                app.settings = Settings::default();
+                app.applied_ignored = app.settings.ignored.clone();
+                app
+            })
+        });
+        view.update_in(cx, |app, window, cx| {
+            app.request(Next::Open(root.clone()), window, cx)
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |app, window, cx| {
+            app.open_file(file.clone(), window, cx)
+        });
+        cx.run_until_parked();
+
+        view.update_in(cx, |app, window, cx| app.toggle_diff(window, cx));
+        cx.run_until_parked();
+        view.update_in(cx, |app, window, cx| {
+            let shown = app.project.diff.as_ref().expect("the changes view is on");
+            assert_eq!(shown.path, file);
+            assert!(!shown.loading);
+            assert!(shown.error.is_none());
+            assert!(shown.lines.iter().any(|line| {
+                line.change == diff::Change::Added && line.text == "let two = 22;"
+            }));
+            assert!(shown.lines.iter().any(|line| {
+                line.change == diff::Change::Removed && line.text == "let two = 2;"
+            }));
+            // The editor area draws the list instead of the editor.
+            let _ = app.render(window, cx);
+        });
+
+        // Opening another file moves the view onto that file's changes.
+        view.update_in(cx, |app, window, cx| {
+            app.open_file(other.clone(), window, cx)
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |app, _, _| {
+            let shown = app.project.diff.as_ref().expect("still on");
+            assert_eq!(shown.path, other);
+            assert!(!shown.loading);
+            assert!(shown.lines.is_empty(), "the second file has no changes");
+        });
+
+        // Right-clicking the changes view offers the way back. It has to: the
+        // editor's own menu cannot open while the editor is off screen, and
+        // nothing else on this surface says how to leave.
+        view.update_in(cx, |app, window, cx| {
+            app.open_menu(
+                MenuTarget::Changes {
+                    path: other.clone(),
+                },
+                point(px(200.), px(200.)),
+                window,
+                cx,
+            );
+            let menu = app.menu.as_ref().expect("the menu is open");
+            assert_eq!(
+                menu.target,
+                MenuTarget::Changes {
+                    path: other.clone()
+                }
+            );
+            assert_eq!(MENU_ITEMS[menu.selected].0, MenuItem::HideChanges);
+            // The menu draws over the view.
+            let _ = app.render(window, cx);
+            app.run_menu_item(MenuItem::HideChanges, window, cx);
+        });
+        view.update_in(cx, |app, window, cx| {
+            assert!(app.project.diff.is_none(), "the way back works");
+            assert!(app.menu.is_none());
+            // And the editor is what the area shows again.
+            let _ = app.render(window, cx);
+        });
+    }
+
     /// The settings window is created and drawn from inside `Folio`'s own
     /// update — that is where the app menu dispatches `OpenSettings`, and
     /// where `open_window` builds the root. Rendering the form must not read
@@ -5574,6 +6147,25 @@ mod tests {
         });
     }
 
+    /// Open the tree's context menu over a folder, the way a right-click does.
+    fn open_tree_menu(
+        app: &mut Folio,
+        folder: &Path,
+        root: bool,
+        window: &mut Window,
+        cx: &mut Context<Folio>,
+    ) {
+        app.open_menu(
+            MenuTarget::Tree {
+                path: folder.to_path_buf(),
+                root,
+            },
+            point(px(120.), px(200.)),
+            window,
+            cx,
+        );
+    }
+
     #[gpui::test]
     fn tree_context_menu_creates_moves_and_duplicates_entries(cx: &mut TestAppContext) {
         let temp = tempfile::tempdir().unwrap();
@@ -5606,7 +6198,7 @@ mod tests {
                 !app.menu_item_enabled(MenuItem::Paste),
                 "paste stays disabled until something is on the clipboard"
             );
-            app.open_menu(src.clone(), point(px(120.), px(200.)), window, cx);
+            open_tree_menu(app, &src, false, window, cx);
             assert!(app.menu.is_some());
             // The harness never draws, so build the element tree by hand to
             // exercise the menu's rendering.
@@ -5673,10 +6265,10 @@ mod tests {
 
         // Cut then paste moves the entry and empties the clipboard.
         view.update_in(cx, |app, window, cx| {
-            app.open_menu(note.clone(), point(px(120.), px(200.)), window, cx);
+            open_tree_menu(app, &note, false, window, cx);
             app.run_menu_item(MenuItem::Cut, window, cx);
             assert_eq!(app.clipboard.as_ref().map(|entry| entry.cut), Some(true));
-            app.open_menu(root.clone(), point(px(40.), px(40.)), window, cx);
+            open_tree_menu(app, &root, false, window, cx);
             app.run_menu_item(MenuItem::Paste, window, cx);
             assert!(app.clipboard.is_none(), "a cut is spent once it lands");
         });
@@ -5686,9 +6278,9 @@ mod tests {
 
         // Copy leaves the source behind, so the name is taken in `src` again.
         view.update_in(cx, |app, window, cx| {
-            app.open_menu(moved.clone(), point(px(40.), px(40.)), window, cx);
+            open_tree_menu(app, &moved, false, window, cx);
             app.run_menu_item(MenuItem::Copy, window, cx);
-            app.open_menu(src.clone(), point(px(40.), px(40.)), window, cx);
+            open_tree_menu(app, &src, false, window, cx);
             app.run_menu_item(MenuItem::Paste, window, cx);
             assert_eq!(app.clipboard.as_ref().map(|entry| entry.cut), Some(false));
         });
@@ -5696,7 +6288,7 @@ mod tests {
         assert!(src.join("笔记.md").is_file() && moved.is_file());
 
         view.update_in(cx, |app, window, cx| {
-            app.open_menu(moved.clone(), point(px(40.), px(40.)), window, cx);
+            open_tree_menu(app, &moved, false, window, cx);
             app.run_menu_item(MenuItem::Duplicate, window, cx);
         });
         cx.run_until_parked();
@@ -5704,7 +6296,7 @@ mod tests {
 
         // Find in Folder narrows the project search to the folder it opened on.
         view.update_in(cx, |app, window, cx| {
-            app.open_menu(src.clone(), point(px(40.), px(40.)), window, cx);
+            open_tree_menu(app, &src, false, window, cx);
             app.run_menu_item(MenuItem::FindInFolder, window, cx);
             assert_eq!(app.panel, Some(Panel::Search));
             assert_eq!(app.search.scope.as_deref(), Some(src.as_path()));
@@ -5718,24 +6310,51 @@ mod tests {
 
         // The project root is the workspace's identity, so its menu drops the
         // entries that would rename or remove it.
-        let labels = |root: bool| {
-            visible_menu_items(root)
+        let labels = |target: &MenuTarget| {
+            visible_menu_items(target)
                 .into_iter()
                 .map(|index| MENU_ITEMS[index].1)
                 .collect::<Vec<_>>()
         };
+        let tree_labels = |root: bool| {
+            labels(&MenuTarget::Tree {
+                path: PathBuf::new(),
+                root,
+            })
+        };
         for dropped in ["Rename", "Move to Trash", "Delete Immediately"] {
-            assert!(!labels(true).contains(&dropped), "{dropped} on the root");
             assert!(
-                labels(false).contains(&dropped),
+                !tree_labels(true).contains(&dropped),
+                "{dropped} on the root"
+            );
+            assert!(
+                tree_labels(false).contains(&dropped),
                 "{dropped} inside a folder"
             );
         }
+        // The changes view offers the way out and nothing the tree has.
+        let changes = labels(&MenuTarget::Changes {
+            path: PathBuf::new(),
+        });
+        assert_eq!(changes, vec!["Hide File Changes"]);
+        assert!(!tree_labels(false).contains(&"Hide File Changes"));
         view.update_in(cx, |app, window, cx| {
-            app.open_menu(root.clone(), point(px(40.), px(40.)), window, cx);
-            assert!(app.menu.as_ref().unwrap().root);
-            app.open_menu(src.clone(), point(px(40.), px(40.)), window, cx);
-            assert!(!app.menu.as_ref().unwrap().root);
+            open_tree_menu(app, &root, true, window, cx);
+            assert_eq!(
+                app.menu.as_ref().unwrap().target,
+                MenuTarget::Tree {
+                    path: root.clone(),
+                    root: true
+                }
+            );
+            open_tree_menu(app, &src, false, window, cx);
+            assert_eq!(
+                app.menu.as_ref().unwrap().target,
+                MenuTarget::Tree {
+                    path: src.clone(),
+                    root: false
+                }
+            );
             app.close_menu(cx);
         });
 
@@ -5747,7 +6366,7 @@ mod tests {
         });
         cx.run_until_parked();
         view.update_in(cx, |app, window, cx| {
-            app.open_menu(library.clone(), point(px(120.), px(200.)), window, cx);
+            open_tree_menu(app, &library, false, window, cx);
             app.run_menu_item(MenuItem::Rename, window, cx);
             let edit = app.editing.as_ref().expect("the row is being renamed");
             assert_eq!(edit.renaming.as_deref(), Some(library.as_path()));
@@ -5775,7 +6394,7 @@ mod tests {
             // the open buffer into the state a real edit would leave it in.
             app.project.documents.get_mut(&core).unwrap().dirty = true;
             assert_eq!(app.unsaved_under(&src), 1);
-            app.open_menu(src.clone(), point(px(40.), px(40.)), window, cx);
+            open_tree_menu(app, &src, false, window, cx);
             app.run_menu_item(MenuItem::Trash, window, cx);
         });
         assert!(cx.has_pending_prompt());
@@ -5788,7 +6407,7 @@ mod tests {
         std::fs::create_dir(&doomed).unwrap();
         std::fs::write(doomed.join("inner.txt"), "x").unwrap();
         view.update_in(cx, |app, window, cx| {
-            app.open_menu(doomed.clone(), point(px(40.), px(40.)), window, cx);
+            open_tree_menu(app, &doomed, false, window, cx);
             app.run_menu_item(MenuItem::Delete, window, cx);
         });
         assert!(cx.has_pending_prompt());

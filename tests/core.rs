@@ -412,3 +412,74 @@ fn the_tree_honours_a_custom_ignore_list() {
         vec![root.join("dist/bundle.js"), root.join("src/main.rs")]
     );
 }
+
+#[test]
+fn a_file_diff_reports_edits_and_untracked_files() {
+    use folio::diff::{self, Change};
+    use std::process::Command;
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let git = |args: &[&str]| {
+        Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    assert!(git(&["init", "-q"]).status.success());
+    let file = root.join("main.rs");
+    fs::write(&file, "let one = 1;\nlet two = 2;\n").unwrap();
+    assert!(git(&["add", "."]).status.success());
+    assert!(
+        git(&[
+            "-c",
+            "user.name=Folio Test",
+            "-c",
+            "user.email=test@localhost",
+            "commit",
+            "-qm",
+            "fixture"
+        ])
+        .status
+        .success()
+    );
+
+    // A tracked file with no edits has nothing to show, and is not untracked.
+    let clean = diff::for_file(root, &file).unwrap();
+    assert!(clean.is_empty());
+    assert!(!clean.untracked);
+
+    // An edit shows as the line that went and the line that arrived.
+    fs::write(&file, "let one = 1;\nlet two = 22;\n").unwrap();
+    let changed = diff::for_file(root, &file).unwrap();
+    assert!(!changed.untracked);
+    assert!(
+        changed
+            .lines
+            .iter()
+            .any(|line| { line.change == Change::Removed && line.text == "let two = 2;" })
+    );
+    assert!(
+        changed
+            .lines
+            .iter()
+            .any(|line| { line.change == Change::Added && line.text == "let two = 22;" })
+    );
+
+    // A file git has never seen is shown as all new, which is the only case
+    // the diff reads the file itself.
+    let fresh = root.join("未跟踪.rs");
+    fs::write(&fresh, "// new\n").unwrap();
+    let untracked = diff::for_file(root, &fresh).unwrap();
+    assert!(untracked.untracked);
+    assert_eq!(untracked.lines.len(), 1);
+    assert_eq!(untracked.lines[0].change, Change::Added);
+    assert_eq!(untracked.lines[0].new, Some(1));
+
+    // A path outside the project has nothing to be compared against.
+    let outside = diff::for_file(root, std::path::Path::new("/etc/hosts")).unwrap();
+    assert!(outside.is_empty());
+    assert!(!outside.untracked);
+}

@@ -36,6 +36,7 @@ fn main() {
                 ),
                 KeyBinding::new(&format!("{modifier}-g"), GoToLine, Some("Folio")),
                 KeyBinding::new(&format!("{modifier}-b"), ToggleSidebar, Some("Folio")),
+                KeyBinding::new(&format!("{modifier}-shift-d"), ToggleDiff, Some("Folio")),
                 KeyBinding::new(&format!("{modifier}-,"), OpenSettings, Some("Folio")),
                 KeyBinding::new(&format!("{modifier}-q"), Quit, Some("Folio")),
                 // The settings window has its own context: `⌘W` closes that
