@@ -48,6 +48,7 @@ does not survive a restart.
 | Find in file | ⌘F | Ctrl+F |
 | Go to line | ⌘G | Ctrl+G |
 | Toggle sidebar | ⌘B | Ctrl+B |
+| Settings | ⌘, | Ctrl+, |
 | Close project | ⌘W | Ctrl+W |
 | Quit | ⌘Q | Ctrl+Q |
 
@@ -126,6 +127,46 @@ confirm when unsaved edits sit under the entry, which it would otherwise drop
 silently. Both release the buffers, previews and cached directories that
 pointed at the entry. Reveal, Open in Default App and Open in Terminal hand the
 path to the OS, so what they launch follows the platform.
+
+## Settings
+
+`⌘,`, or Settings… in the app menu, opens a window of its own rather than a
+panel over the editor, so it can be moved, resized and left open beside the
+code. Its title bar is drawn by the app, the same way the main window's is:
+handing it to AppKit means it is painted from a system material that samples
+whatever is behind the window, which lands nowhere near the theme in either
+appearance. The traffic lights are still the real ones.
+
+The sidebar is a tree. Four headings collapse, and the five pages under them
+are the screens: interface font and size, code font and size, tab size and
+indent character, whether the sidebar starts open, and the folder names the
+tree and search skip. A heading is not a page itself, so clicking one toggles
+it and clicking a page selects it. Each row is the setting's name and what it
+does stacked on the left and its control flush right, with a hairline
+underneath. Numbers step, two-way choices toggle, and both live in one bordered
+box with its actions split by dividers.
+
+Changes apply as you make them. Fonts and sizes take effect at once;
+tab size applies to files opened from then on, because the pinned
+gpui-component has no way to change it on an editor that already exists. The
+ignore list is the one that does real work: the tree re-reads the folders it is
+holding and the quick-open index is rebuilt.
+
+Settings are local JSON beside the recent list, written atomically. A
+hand-edited file is pulled back into range rather than rejected — sizes are
+clamped, and names are trimmed — a corrupt one is reported rather than
+replaced, and keys an older version did not write keep their defaults.
+
+The CJK fallback the type section calls for is set here rather than left to the
+platform. GPUI's own fallback stack names `.ZedMono`, `Helvetica`, `Segoe UI`
+and friends, and no CJK family at all, so before this a Chinese character in a
+file was drawn in whatever the platform picked — usually a proportional face,
+which breaks the character grid. The app now sets its own chain, the mono CJK
+families first.
+
+The window remembers where it was. That geometry lives in `window.json`
+alongside the main window's, one key each; a file written by an older version,
+holding a bare rectangle, still loads as the main window.
 
 ## Project-wide search and replace
 
@@ -223,21 +264,26 @@ paths escaping the project, UTF-8 and binary validation, atomic saves,
 external-change conflicts, permission preservation, Git untracked and renamed
 status, the extension-to-grammar map, the file operations behind the tree menu
 (create collisions, a recursive duplicate and rename, paste refusals, a
-case-only rename, deleting a tree), and project search (case, whole word,
-regex, long-line windowing, CRLF, multi-byte columns, capture-group
+case-only rename, deleting a tree), the settings file against real bytes
+(defaults, round trip, clamping, unknown keys, a corrupt file left alone), the
+ignore list reaching both the tree and the index, and project search (case,
+whole word, regex, long-line windowing, CRLF, multi-byte columns, capture-group
 replacement, skipping binary and oversized files). `desktop-tests` uses the
 GPUI test executor for the rest: repeated expand and collapse, recents written
 in order, stale callbacks across projects, picker exclusivity, dirty buffers
 kept across projects and the save conflict on quit, image decoding and
 switching between an image and a dirty text buffer, edits made during a save,
 project search reading unsaved content, landing the cursor on a hit, and the
-open-buffer-in-memory versus closed-file-on-disk split in replace, plus the
-tree menu driving create, rename, cut, paste, duplicate, delete and Find in
-Folder — including the entries the root menu omits. What no test covers is the
-Trash call itself: it would move real files and raise an automation prompt. The
-guard that stops to confirm when unsaved edits are under the entry, and that
-cancelling leaves the entry alone, is covered. None of this stands in for
-native IME or rendering acceptance.
+open-buffer-in-memory versus closed-file-on-disk split in replace, the tree
+menu driving create, rename, cut, paste, duplicate, delete and Find in Folder
+— including the entries the root menu omits, both windows' geometry being
+recorded where the app was told to write it, and the settings form's every page
+with its headings open and shut. What no test covers is the Trash call itself:
+it would move real files and raise an automation prompt. The guard that stops
+to confirm when unsaved edits are under the entry, and that cancelling leaves
+the entry alone, is covered. Nor is `⌘,` opening the settings window: a test
+window has no platform window behind it, so the form is driven directly
+instead. None of this stands in for native IME or rendering acceptance.
 
 Every registered grammar has its highlight query compiled and asserted not to
 fall back to plain text. `SyntaxHighlighter::new` degrades silently on a bad
@@ -251,8 +297,13 @@ query, so only an assertion catches a misconfigured grammar.
   `f3ba893bd6a996ab0699266ba774b5bbb7f0ca1c`, and its assets at the same commit.
 - The GPUI crates come from one Git source and are pinned together by
   `Cargo.lock`, so the component library and the app can never end up with two
-  incompatible GPUIs. Always build with `--locked`; never run `cargo update`
-  directly.
+  incompatible GPUIs. Always build with `--locked`. A blanket `cargo update`
+  would drift those Git sources; a targeted `cargo update -p <crate> --precise
+  <version>` is how one transitive dependency gets moved, and is what moved
+  `quinn-proto` past the advisory that Dependabot raised against it. That crate
+  is not compiled into Folio — it sits in the lockfile because `zed-reqwest`
+  can use it for HTTP/3 and `gpui-component-assets` depends on `zed-reqwest`
+  unconditionally — but a lockfile entry is what the alert reads.
 - The extra grammars in `src/syntax.rs` come from crates.io, are pinned in
   `Cargo.lock`, and are gated behind the `syntax` feature (which `desktop`
   enables). Only the binary uses them, so a library-only build such as
@@ -275,7 +326,11 @@ size-limited by GPUI. Git status refreshes when a project is opened or switched
 and after a save. Move to Trash goes through Finder, so macOS raises an
 automation permission prompt the first time and a refusal surfaces as an error;
 the Recycle Bin and `gio trash` paths behind the other platforms are written
-but untested on real hardware.
+but untested on real hardware. Window geometry is written when a window closes
+and again on quit, so a force-killed process loses wherever the windows were —
+the same is true of the settings window. The settings sidebar has no search
+box, and its pages do not scroll, which is fine at five pages and would need
+fixing before there were many more.
 
 Full progress and the outstanding acceptance items are in
 [docs/开发进度.md](docs/开发进度.md); the original requirements are in
