@@ -200,6 +200,10 @@ actions!(
         OpenAbout,
         ToggleDiff,
         ToggleComment,
+        SelectNextOccurrence,
+        SelectAllOccurrences,
+        AddCursorAbove,
+        AddCursorBelow,
         PairParen,
         PairBracket,
         PairBrace,
@@ -2336,6 +2340,24 @@ impl Folio {
             .map(|document| document.editor.clone())
     }
 
+    /// Run a command against the buffer being edited.
+    ///
+    /// The multi-cursor commands are the editor's own — it holds the
+    /// selections, and the edit they make has to go through the same path a
+    /// keystroke does — so this is only the reaching and the redrawing.
+    fn on_active_buffer(
+        &mut self,
+        cx: &mut Context<Self>,
+        command: impl FnOnce(&mut InputBaseState, &mut Context<InputBaseState>),
+    ) {
+        let Some(editor) = self.active_editor() else {
+            return;
+        };
+        let base = editor.read(cx).base_state().clone();
+        base.update(cx, |base, cx| command(base, cx));
+        cx.notify();
+    }
+
     /// What an opening bracket does: a pair around the selection, or an empty
     /// pair with the caret between the two.
     ///
@@ -2352,6 +2374,9 @@ impl Folio {
             return;
         };
         let base = editor.read(cx).base_state().clone();
+        if self.type_at_every_cursor(&base, open, window, cx) {
+            return;
+        }
         let value = base.read(cx).value().to_string();
         let selection = base.read(cx).selected_range();
         let Some(selected) = value.get(selection.clone()) else {
@@ -2386,6 +2411,9 @@ impl Folio {
             return;
         };
         let base = editor.read(cx).base_state().clone();
+        if self.type_at_every_cursor(&base, quote, window, cx) {
+            return;
+        }
         let value = base.read(cx).value().to_string();
         let selection = base.read(cx).selected_range();
         let follows = || {
@@ -2417,6 +2445,9 @@ impl Folio {
             return;
         };
         let base = editor.read(cx).base_state().clone();
+        if self.type_at_every_cursor(&base, close, window, cx) {
+            return;
+        }
         let value = base.read(cx).value().to_string();
         let selection = base.read(cx).selected_range();
         let follows = || {
@@ -2436,6 +2467,33 @@ impl Folio {
     fn step_over(&self, base: &Entity<InputBaseState>, caret: usize, cx: &mut Context<Self>) {
         base.update(cx, |base, cx| base.set_selected_range(caret..caret, cx));
         cx.notify();
+    }
+
+    /// Type one character at every cursor, when there is more than one.
+    ///
+    /// A pair is a decision about a single selection: with several there is
+    /// nothing to wrap and nothing to step over, so the character goes in at
+    /// each cursor like any other. Answering here rather than letting the
+    /// single-selection paths below run matters for a second reason — those go
+    /// through `replace`, which leaves one selection behind and would take the
+    /// other cursors with it.
+    ///
+    /// Answers whether it typed, so the caller can stop.
+    fn type_at_every_cursor(
+        &self,
+        base: &Entity<InputBaseState>,
+        text: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if base.read(cx).selected_ranges().len() <= 1 {
+            return false;
+        }
+        base.update(cx, |base, cx| {
+            base.replace_in_every_selection(text, window, cx)
+        });
+        cx.notify();
+        true
     }
 
     /// `⌘/`: comment out every line the selection touches, or bring them back.
@@ -2464,8 +2522,15 @@ impl Folio {
         };
         let base = editor.read(cx).base_state().clone();
         let text = base.read(cx).value().to_string();
-        let selection = base.read(cx).selected_range();
-        let lines = buffer::line_range(&text, selection);
+        // Every cursor's lines, from the first to the last: commenting is one
+        // edit over a block, not one per caret, so the block is what the span
+        // of the set covers. A single cursor gives the same range it always
+        // did.
+        let selections = base.read(cx).selected_ranges();
+        let (Some(first), Some(last)) = (selections.first(), selections.last()) else {
+            return;
+        };
+        let lines = buffer::line_range(&text, first.start..last.end);
         let Some(block) = text.get(lines.clone()) else {
             return;
         };
@@ -5995,6 +6060,20 @@ impl Render for Folio {
             .on_action(
                 cx.listener(|this, _: &ToggleComment, window, cx| this.toggle_comment(window, cx)),
             )
+            // The rest of the editor's multi-cursor commands, bound only where
+            // the code editor has the keyboard.
+            .on_action(cx.listener(|this, _: &SelectNextOccurrence, _, cx| {
+                this.on_active_buffer(cx, |base, cx| base.select_next_occurrence(cx))
+            }))
+            .on_action(cx.listener(|this, _: &SelectAllOccurrences, _, cx| {
+                this.on_active_buffer(cx, |base, cx| base.select_all_occurrences(cx))
+            }))
+            .on_action(cx.listener(|this, _: &AddCursorAbove, _, cx| {
+                this.on_active_buffer(cx, |base, cx| base.add_cursor_above(cx))
+            }))
+            .on_action(cx.listener(|this, _: &AddCursorBelow, _, cx| {
+                this.on_active_buffer(cx, |base, cx| base.add_cursor_below(cx))
+            }))
             // These are bound to the code editor's own key context, so the
             // search box and the settings fields keep typing brackets the
             // ordinary way.
@@ -7617,6 +7696,139 @@ mod tests {
             start("don\n", 3..3, window, cx);
             app.pair_quote("'", window, cx);
             assert_eq!(value(cx), "don'\n");
+        });
+    }
+
+    /// More than one cursor: the commands that make a set of selections, the
+    /// edit that lands at each of them, and the way back down to one.
+    ///
+    /// A keystroke never reaches the view in this harness, so what is driven
+    /// here is what the keybinding's handler calls — one call per press — plus
+    /// the editor's own entry points for typing, deleting and Enter, which are
+    /// what the platform's input path calls.
+    #[gpui::test]
+    fn multi_cursor_edits_every_selection(cx: &mut TestAppContext) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let file = root.join("main.rs");
+        std::fs::write(&file, "fn main() {}\n").unwrap();
+        cx.update(gpui_component::init);
+        let cx = cx.add_empty_window();
+        let view = cx.update(|window, cx| {
+            cx.new(|cx| {
+                let mut app = Folio::new(window, cx);
+                app.recent_task = None;
+                app.recent_file = root.join("recent.json");
+                app.settings_file = root.join("settings.json");
+                app.window_file = root.join("window.json");
+                app.settings = Settings::default();
+                app.applied_ignored = app.settings.ignored.clone();
+                app
+            })
+        });
+        view.update_in(cx, |app, window, cx| {
+            app.request(Next::Open(root.clone()), window, cx)
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |app, window, cx| {
+            app.open_file(file.clone(), window, cx)
+        });
+        cx.run_until_parked();
+
+        view.update_in(cx, |app, window, cx| {
+            let base = app.project.documents[&file]
+                .editor
+                .read(cx)
+                .base_state()
+                .clone();
+            let value = |cx: &App| base.read(cx).value().to_string();
+            let ranges = |cx: &App| base.read(cx).selected_ranges();
+            let start = |text: &str,
+                         selection: std::ops::Range<usize>,
+                         window: &mut Window,
+                         cx: &mut Context<Folio>| {
+                base.update(cx, |base, cx| {
+                    base.set_value(text, window, cx);
+                    base.set_selected_range(selection, cx);
+                });
+            };
+
+            // `⌘D` takes the word under the caret, then the next place it
+            // appears, and stops when there is nothing left to take.
+            let text = "let count = 1;\nlet other = count;\n";
+            start(text, 5..5, window, cx);
+            app.on_active_buffer(cx, |base, cx| base.select_next_occurrence(cx));
+            assert_eq!(ranges(cx), vec![4..9]);
+            app.on_active_buffer(cx, |base, cx| base.select_next_occurrence(cx));
+            assert_eq!(ranges(cx), vec![4..9, 27..32]);
+            app.on_active_buffer(cx, |base, cx| base.select_next_occurrence(cx));
+            assert_eq!(ranges(cx), vec![4..9, 27..32]);
+
+            // Typing lands at both, as one edit, and the carets end up after
+            // what was typed at each of them.
+            base.update(cx, |base, cx| {
+                base.replace_in_every_selection("total", window, cx)
+            });
+            assert_eq!(value(cx), "let total = 1;\nlet other = total;\n");
+            assert_eq!(ranges(cx), vec![9..9, 32..32]);
+
+            // `⌘⇧L` takes every occurrence at once, and the one the caret was
+            // in stays the one the caret is in.
+            start(text, 5..5, window, cx);
+            app.on_active_buffer(cx, |base, cx| base.select_all_occurrences(cx));
+            assert_eq!(ranges(cx), vec![4..9, 27..32]);
+            base.update(cx, |base, cx| assert!(base.collapse_selections(cx)));
+            assert_eq!(ranges(cx), vec![4..9]);
+            // An escape with one cursor is not the editor's to take.
+            base.update(cx, |base, cx| assert!(!base.collapse_selections(cx)));
+
+            // `⌥⌘↓` adds a caret on the line below, in the column the first one
+            // was in, and `⌥⌘↑` adds one above the topmost.
+            start("x = 1;\ny = 2;\n", 0..0, window, cx);
+            app.on_active_buffer(cx, |base, cx| base.add_cursor_below(cx));
+            assert_eq!(ranges(cx), vec![0..0, 7..7]);
+            base.update(cx, |base, cx| {
+                base.replace_in_every_selection("let ", window, cx)
+            });
+            assert_eq!(value(cx), "let x = 1;\nlet y = 2;\n");
+            assert_eq!(ranges(cx), vec![4..4, 15..15]);
+
+            start("x = 1;\ny = 2;\n", 7..7, window, cx);
+            app.on_active_buffer(cx, |base, cx| base.add_cursor_above(cx));
+            assert_eq!(ranges(cx), vec![0..0, 7..7]);
+
+            // Backspace at two carets takes the character before each of them.
+            start("let a = 1;\nlet b = 2;\n", 4..4, window, cx);
+            app.on_active_buffer(cx, |base, cx| base.add_cursor_below(cx));
+            assert_eq!(ranges(cx), vec![4..4, 15..15]);
+            base.update(cx, |base, cx| {
+                base.delete_at_every_selection(false, window, cx)
+            });
+            assert_eq!(value(cx), "leta = 1;\nletb = 2;\n");
+
+            // Enter breaks at each caret, indented to the line it breaks.
+            start("  one\n  two\n", 5..5, window, cx);
+            app.on_active_buffer(cx, |base, cx| base.add_cursor_below(cx));
+            assert_eq!(ranges(cx), vec![5..5, 11..11]);
+            base.update(cx, |base, cx| {
+                base.insert_line_break_at_every_selection(window, cx)
+            });
+            assert_eq!(value(cx), "  one\n  \n  two\n  \n");
+            assert_eq!(ranges(cx), vec![8..8, 17..17]);
+
+            // A bracket with more than one cursor is typed at each of them
+            // rather than paired around one selection.
+            start("x = 1;\ny = 2;\n", 0..0, window, cx);
+            app.on_active_buffer(cx, |base, cx| base.add_cursor_below(cx));
+            app.open_pair("(", ")", window, cx);
+            assert_eq!(value(cx), "(x = 1;\n(y = 2;\n");
+            assert_eq!(ranges(cx), vec![1..1, 9..9]);
+
+            // Commenting is one edit over the block the cursors span.
+            start("x = 1;\ny = 2;\n", 0..0, window, cx);
+            app.on_active_buffer(cx, |base, cx| base.add_cursor_below(cx));
+            app.toggle_comment(window, cx);
+            assert_eq!(value(cx), "// x = 1;\n// y = 2;\n");
         });
     }
 

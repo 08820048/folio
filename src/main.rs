@@ -42,6 +42,29 @@ fn main() {
                 // only the key it answers to changes.
                 KeyBinding::new(&format!("{modifier}-alt-f"), input::Replace, Some("Folio")),
                 KeyBinding::new(&format!("{modifier}-/"), ToggleComment, Some("Folio")),
+                // More than one cursor: also the code editor's alone. In the
+                // search box and the settings fields `⌘D` and `⌥⌘↑` mean
+                // whatever the platform means by them.
+                KeyBinding::new(
+                    &format!("{modifier}-d"),
+                    SelectNextOccurrence,
+                    Some("FolioEditor"),
+                ),
+                KeyBinding::new(
+                    &format!("{modifier}-shift-l"),
+                    SelectAllOccurrences,
+                    Some("FolioEditor"),
+                ),
+                KeyBinding::new(
+                    &format!("{modifier}-alt-up"),
+                    AddCursorAbove,
+                    Some("FolioEditor"),
+                ),
+                KeyBinding::new(
+                    &format!("{modifier}-alt-down"),
+                    AddCursorBelow,
+                    Some("FolioEditor"),
+                ),
                 // Bound to the code editor's key context rather than the app's,
                 // so brackets still type normally in the search box and the
                 // settings fields. These replace the editor's own handling of
@@ -91,6 +114,12 @@ fn main() {
                     MenuItem::action("Select All", input::SelectAll),
                     MenuItem::separator(),
                     MenuItem::action("Toggle Comment", ToggleComment),
+                    MenuItem::separator(),
+                    MenuItem::action("Select Next Occurrence", SelectNextOccurrence),
+                    MenuItem::action("Select All Occurrences", SelectAllOccurrences),
+                    MenuItem::separator(),
+                    MenuItem::action("Add Cursor Above", AddCursorAbove),
+                    MenuItem::action("Add Cursor Below", AddCursorBelow),
                     MenuItem::separator(),
                     MenuItem::action("Find", input::Search),
                     MenuItem::action("Replace in File", input::Replace),
