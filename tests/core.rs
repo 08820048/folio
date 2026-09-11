@@ -563,7 +563,11 @@ fn blame_reports_the_commit_that_wrote_each_line() {
 /// which is the part a real server would only make harder to see.
 ///
 /// The stand-in is a python script, because a language server is a program on
-/// the other end of a pipe and anything that speaks the protocol will do.
+/// the other end of a pipe and anything that speaks the protocol will do. It
+/// speaks it the way servers do rather than the way the simplest server could:
+/// its messages are longer than their text (a `Content-Length` counts bytes,
+/// not characters) and it has something to say before it answers, which is what
+/// a server's progress and log notifications are.
 #[test]
 fn the_lsp_client_speaks_the_protocol() {
     use folio::lsp::{self, Server};
@@ -586,7 +590,7 @@ def read_message():
     return json.loads(sys.stdin.buffer.read(length))
 
 def write(message):
-    body = json.dumps(message).encode()
+    body = json.dumps(message, ensure_ascii=False).encode()
     sys.stdout.buffer.write(b"Content-Length: %d\r\n\r\n" % len(body) + body)
     sys.stdout.buffer.flush()
 
@@ -598,7 +602,15 @@ while True:
     if method == "initialize":
         write({"jsonrpc": "2.0", "id": message["id"],
                "result": {"capabilities": {"textDocumentSync": 1}}})
+    elif method == "initialized":
+        # A server with something to say before it is asked anything.
+        write({"jsonrpc": "2.0", "method": "window/logMessage",
+               "params": {"type": 3, "message": "索引中…"}})
     elif method == "textDocument/definition":
+        # And something to say before it answers: the client has to pass this
+        # over rather than mistake it for the answer.
+        write({"jsonrpc": "2.0", "method": "$/progress",
+               "params": {"token": "rustAnalyzer/Indexing", "value": {"kind": "begin"}}})
         write({"jsonrpc": "2.0", "id": message["id"], "result": [{
             "uri": "file:///tmp/definition.rs",
             "range": {"start": {"line": 3, "character": 1},
@@ -607,7 +619,7 @@ while True:
     elif method == "textDocument/hover":
         write({"jsonrpc": "2.0", "id": message["id"],
                "result": {"contents": {"kind": "markdown",
-                                       "value": "```rust\nfn f() -> ()\n```"}}})
+                                       "value": "```rust\nfn 加(a: u32, b: u32) -> u32\n```\n\n---\n\n把两个数加起来 🦀"}}})
     elif "id" in message:
         write({"jsonrpc": "2.0", "id": message["id"], "result": None})
 "#;
@@ -629,11 +641,15 @@ while True:
     let client = lsp::Client::start(&server, root).expect("the stand-in starts");
 
     // A document is introduced before it is asked about, and the answer comes
-    // back to the request that asked for it.
+    // back to the request that asked for it. The text is not ASCII: a
+    // `Content-Length` counts bytes, so a client that counted characters would
+    // send a body the server cannot parse — and this one does.
     let file = root.join("main.rs");
-    client.sync(&file, "fn main() {}\n", "rust").unwrap();
     client
-        .sync(&file, "fn main() { let x = 1; }\n", "rust")
+        .sync(&file, "fn 加(a: u32) -> u32 { a }\n", "rust")
+        .unwrap();
+    client
+        .sync(&file, "fn 加(a: u32) -> u32 { a + 1 }\n", "rust")
         .unwrap();
 
     let result = client
@@ -656,10 +672,22 @@ while True:
         Some(3)
     );
 
+    // A hover, with the server logging and reporting progress first: what comes
+    // back is the answer, and the text of it survived the pipe unserialized —
+    // the line of it, the separator the server wrote, and the prose under it.
     let hover = client
         .request("textDocument/hover", json!({}))
         .expect("a hover");
-    assert_eq!(lsp::hover_lines(&hover), vec!["fn f() -> ()"]);
+    assert_eq!(
+        lsp::hover_lines(&hover),
+        vec![
+            "fn 加(a: u32, b: u32) -> u32",
+            "",
+            "---",
+            "",
+            "把两个数加起来 🦀"
+        ]
+    );
 }
 
 /// A server that will not start says why, which is the difference between a
