@@ -337,6 +337,13 @@ from having done it. It looks for `rust-analyzer`, `typescript-language-server`,
 bundled and nothing is downloaded: a server that is not installed means the two
 things below are not there, and nothing else changes.
 
+An executable on `PATH` is not the same as a server that runs, and the
+difference is worth hearing about: the `rust-analyzer` a rustup installs is a
+shim that reports `Unknown binary 'rust-analyzer' in official toolchain` until
+`rustup component add rust-analyzer` has been run for that toolchain. What the
+server said on its way out is passed on, once, rather than leaving the two
+without hover and go-to-definition wondering why.
+
 **Hover** shows what the symbol under the pointer is — the type, usually, with
 the markdown fences taken off — in a card under the line it is on. Holding `⌘`
 while hovering asks a different question and underlines the symbol instead, and

@@ -661,3 +661,40 @@ while True:
         .expect("a hover");
     assert_eq!(lsp::hover_lines(&hover), vec!["fn f() -> ()"]);
 }
+
+/// A server that will not start says why, which is the difference between a
+/// feature that is missing and a toolchain that is missing a component: the
+/// `rust-analyzer` a rustup installs is a shim, and running it is how you find
+/// out whether the toolchain it points at has it.
+#[test]
+fn a_language_server_that_will_not_start_says_why() {
+    use folio::lsp::{self, Server};
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let script = root.join("failed_server.sh");
+    fs::write(
+        &script,
+        "#!/bin/sh\necho \"error: Unknown binary 'rust-analyzer' in official toolchain\" >&2\nexit 1\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let script: &'static str = Box::leak(script.to_string_lossy().into_owned().into_boxed_str());
+
+    let server = Server {
+        command: "sh",
+        args: Box::leak(vec![script].into_boxed_slice()),
+        language: "rust",
+    };
+    let error = lsp::Client::start(&server, root)
+        .err()
+        .expect("a server that exits is not a server");
+    assert!(
+        error.to_string().contains("Unknown binary"),
+        "the server's own words: {error}"
+    );
+}

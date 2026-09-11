@@ -101,6 +101,10 @@ struct Inner {
     child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
+    /// What the server wrote to say why it stopped, if it did. A file rather
+    /// than a pipe: reading a pipe would wait for a process that may still be
+    /// running, and this is only read once it is not.
+    stderr: tempfile::NamedTempFile,
     /// Per open document: its version, and where the server was last told the
     /// document ends — which is what makes it possible to describe the whole of
     /// it as one change.
@@ -120,13 +124,19 @@ struct Document {
 
 impl Client {
     /// Start the server for `root`, and introduce the client to it.
+    ///
+    /// A server that will not start is reported with what it said about it: an
+    /// executable on `PATH` is not the same as a server that runs — the
+    /// `rust-analyzer` a rustup installs is a shim that will say, if asked,
+    /// that the toolchain it points at has no such component.
     pub fn start(server: &Server, root: &Path) -> io::Result<Client> {
+        let stderr = tempfile::NamedTempFile::new()?;
         let mut child = Command::new(server.command)
             .args(server.args)
             .current_dir(root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(stderr.reopen()?))
             .spawn()?;
         let stdin = child.stdin.take().expect("piped");
         let stdout = BufReader::new(child.stdout.take().expect("piped"));
@@ -136,6 +146,7 @@ impl Client {
                 child,
                 stdin,
                 stdout,
+                stderr,
                 documents: HashMap::new(),
                 incremental: false,
                 next_id: 0,
@@ -143,23 +154,31 @@ impl Client {
         };
 
         let root_uri = uri(root);
-        let result = client.request(
-            "initialize",
-            json!({
-                "processId": std::process::id(),
-                "rootUri": root_uri,
-                "workspaceFolders": [{"uri": root_uri, "name": "project"}],
-                "capabilities": {
-                    "textDocument": {
-                        "hover": {"contentFormat": ["markdown", "plaintext"]},
-                        "definition": {"linkSupport": true},
-                        "synchronization": {"didSave": false},
+        let result = client
+            .request(
+                "initialize",
+                json!({
+                    "processId": std::process::id(),
+                    "rootUri": root_uri,
+                    "workspaceFolders": [{"uri": root_uri, "name": "project"}],
+                    "capabilities": {
+                        "textDocument": {
+                            "hover": {"contentFormat": ["markdown", "plaintext"]},
+                            "definition": {"linkSupport": true},
+                            "synchronization": {"didSave": false},
+                        },
+                        "workspace": {"workspaceFolders": true},
                     },
-                    "workspace": {"workspaceFolders": true},
-                },
-                "clientInfo": {"name": "Folio", "version": env!("CARGO_PKG_VERSION")},
-            }),
-        )?;
+                    "clientInfo": {"name": "Folio", "version": env!("CARGO_PKG_VERSION")},
+                }),
+            )
+            .map_err(|e| {
+                let said = client.inner.lock().expect("not poisoned").stderr_message();
+                match said {
+                    Some(said) => io::Error::other(format!("{}: {said}", server.command)),
+                    None => e,
+                }
+            })?;
         client
             .inner
             .lock()
@@ -257,6 +276,23 @@ impl Client {
 }
 
 impl Inner {
+    /// The first thing the server said about why it stopped, if it said
+    /// anything.
+    ///
+    /// Read from a file rather than a pipe, so this cannot wait on a process
+    /// that is still running — it is only asked after the server has stopped
+    /// answering.
+    fn stderr_message(&mut self) -> Option<String> {
+        let mut said = String::new();
+        self.stderr.as_file_mut().read_to_string(&mut said).ok()?;
+        let line = said
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())?
+            .to_string();
+        Some(line)
+    }
+
     fn remember_sync_kind(&mut self, initialize_result: &Value) {
         let sync = &initialize_result["capabilities"]["textDocumentSync"];
         // Either a number or an object with a `change` in it, and either may be
@@ -301,8 +337,10 @@ impl Inner {
 impl Drop for Inner {
     fn drop(&mut self) {
         // A server left running is a process the user cannot see and did not
-        // ask for.
+        // ask for. Waited for as well as killed, or it is a zombie until this
+        // process exits.
         let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }
 

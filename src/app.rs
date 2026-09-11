@@ -654,6 +654,10 @@ struct Project {
     /// kept for as long as the project is, because what they cost is indexing
     /// it and what they give back comes from having done that.
     lsp: HashMap<&'static str, LanguageServer>,
+    /// The ones that would not start, by grammar, with what they said about it.
+    /// Kept so that neither the start nor the explanation is repeated on every
+    /// file of that language.
+    lsp_unavailable: HashMap<&'static str, String>,
 }
 
 pub struct Folio {
@@ -3986,7 +3990,9 @@ impl Folio {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.project.lsp.contains_key(grammar) {
+        if self.project.lsp.contains_key(grammar)
+            || self.project.lsp_unavailable.contains_key(grammar)
+        {
             return;
         }
         let Some(server) = lsp::server_for(grammar) else {
@@ -4003,11 +4009,20 @@ impl Folio {
         cx.spawn_in(window, async move |this, cx| {
             let result = task.await;
             let _ = this.update_in(cx, |this, _, cx| {
-                let Ok(client) = result else {
-                    // A server that will not start is not worth a message: the
-                    // feature is simply not there, the same as on a machine
-                    // that has none installed.
-                    return;
+                let client = match result {
+                    Ok(client) => client,
+                    Err(error) => {
+                        // An executable on `PATH` is not a server that runs.
+                        // What the failure said is worth passing on — a
+                        // rustup-installed `rust-analyzer` is a shim that will
+                        // explain, when asked, that the toolchain it points at
+                        // has no such component.
+                        this.project
+                            .lsp_unavailable
+                            .insert(grammar, error.to_string());
+                        cx.notify();
+                        return;
+                    }
                 };
                 if this.project.id != project_id {
                     return;
@@ -4083,6 +4098,13 @@ impl Folio {
             return;
         };
         let grammar = document.language;
+        if let Some(reason) = self.project.lsp_unavailable.get(grammar) {
+            // Asked again rather than started again: whatever was wrong the
+            // first time is still wrong.
+            let reason = reason.clone();
+            self.error(format!("No language server for this file: {reason}"), cx);
+            return;
+        }
         let Some(server) = self.project.lsp.get(grammar) else {
             // The first press starts it rather than doing nothing: the server
             // is the slow part, and it is wanted either way.
