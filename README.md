@@ -50,6 +50,8 @@ does not survive a restart.
 | Go to line | ⌘G | Ctrl+G |
 | Toggle sidebar | ⌘B | Ctrl+B |
 | Toggle comment | ⌘/ | Ctrl+/ |
+| Fold | ⌥⌘[ | Ctrl+Alt+[ |
+| Unfold | ⌥⌘] | Ctrl+Alt+] |
 | Select next occurrence | ⌘D | Ctrl+D |
 | Select all occurrences | ⇧⌘L | Ctrl+Shift+L |
 | Add cursor above | ⌥⌘↑ | Ctrl+Alt+Up |
@@ -179,8 +181,8 @@ Others when everything else is pinned.
 
 ## Editing
 
-Three things beyond plain typing. Two are bound to the code editor's own key
-context, so they never reach the search box or a settings field; the third is
+Four things beyond plain typing. Three are bound to the code editor's own key
+context, so they never reach the search box or a settings field; the fourth is
 Enter, which the editor already had.
 
 **Brackets pair.** `(`, `[`, `{`, `"`, `'` and `` ` `` insert both characters
@@ -205,6 +207,16 @@ to the line it broke, as it always did.
 
 Quotes are not brackets and do not do this: a line break inside a pair of them
 is a string being written over two lines, not a block with a body in it.
+
+**Blocks fold.** The gutter's chevron folds the block on that line away, and
+`⌥⌘[` folds the block the caret is in — the innermost one, so pressing it again
+takes the block around it. `⌥⌘]` unfolds the innermost folded block the caret is
+in or on. Chevrons are drawn on the line the caret is on, on whatever line the
+pointer is over the gutter for, and on the lines that are folded: a chevron on
+every foldable line would be a column of noise down the file.
+
+What a fold hides is not laid out at all, so a caret inside it would be on a
+line nothing draws. It goes to the end of the line that stays visible.
 
 The editor's own in-file replace answers to `⌥⌘F` rather than the `⇧⌘F` its
 component binds it to. `⇧⌘F` is the project search, and a binding on the
@@ -424,7 +436,9 @@ recorded where the app was told to write it, the settings form's every page
 with its headings open and shut, tabs opening, closing and guarding unsaved
 changes, the tab menu's bulk closes and what pinning keeps out of them, drag
 reordering in both directions, brackets pairing and stepping over, Enter
-laying out a pair of brackets over three lines, comment toggling, the
+laying out a pair of brackets over three lines, folding the innermost block at
+the caret and where the caret goes when the line under it stops being drawn,
+comment toggling, the
 multi-cursor commands with the edit that lands at every selection they make,
 and the changes view following the active file. What no test covers is the
 Trash call itself: it would move real files and raise an automation prompt. The
@@ -498,7 +512,9 @@ the set is one step on the undo stack and comes back in one, though the cursors
 it covered are not restored. Enter indents to the line it breaks, but not when
 the line merely ends with an opener: a `{` whose pair is not there — deleted,
 or never inserted because the character in front of it was a word — gets the
-break and no extra level. The changes view is a unified diff — there is no
+break and no extra level. There is no fold-all and no unfold-all, and a fold is
+not remembered across a restart: it belongs to the open buffer. The changes view
+is a unified diff — there is no
 side-by-side — and its counts count rows, so a changed line reads as one gone
 and one arrived. Window geometry is written when a window closes and again on
 quit, so a force-killed process loses wherever the windows were — the same is

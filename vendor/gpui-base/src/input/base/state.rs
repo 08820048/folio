@@ -746,6 +746,85 @@ impl InputBaseState {
         cx.notify();
     }
 
+    /// Which lines are folded shut, in order.
+    pub fn folded_lines(&self) -> Vec<usize> {
+        self.display_map
+            .folded_ranges()
+            .iter()
+            .map(|range| range.start_line)
+            .collect()
+    }
+
+    /// Fold the innermost block the caret is in, if it can be folded.
+    ///
+    /// Innermost, not outermost: with blocks inside blocks that is what makes
+    /// the key repeatable — pressing it again folds the one around it.
+    ///
+    /// Answers whether there was anything to fold.
+    pub fn fold_at_cursor(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.mode.is_folding() {
+            return false;
+        }
+        let row = self.text.offset_to_point(self.cursor()).row;
+        let Some(start_line) = self
+            .display_map
+            .fold_candidates()
+            .iter()
+            .filter(|range| range.start_line <= row && row <= range.end_line)
+            .map(|range| range.start_line)
+            .max()
+        else {
+            return false;
+        };
+        self.set_fold(start_line, true, cx);
+        true
+    }
+
+    /// Unfold the innermost folded block the caret is in — the one it is on the
+    /// header of counts. Answers whether there was anything to unfold.
+    pub fn unfold_at_cursor(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.mode.is_folding() {
+            return false;
+        }
+        let row = self.text.offset_to_point(self.cursor()).row;
+        let Some(start_line) = self
+            .display_map
+            .folded_ranges()
+            .iter()
+            .filter(|range| range.start_line <= row && row <= range.end_line)
+            .map(|range| range.start_line)
+            .max()
+        else {
+            return false;
+        };
+        self.set_fold(start_line, false, cx);
+        true
+    }
+
+    /// Fold or unfold one block, and take the caret out of what is hidden.
+    ///
+    /// A folded block is not drawn at all, so a caret or a selection inside one
+    /// would be somewhere the editor cannot show — and, being on a line nothing
+    /// lays out, somewhere the next keystroke would land blind. It goes to the
+    /// end of the line that stays visible.
+    fn set_fold(&mut self, start_line: usize, folded: bool, cx: &mut Context<Self>) {
+        self.display_map.set_folded(start_line, folded);
+
+        let row = self.text.offset_to_point(self.cursor()).row;
+        let hidden = self
+            .display_map
+            .folded_ranges()
+            .iter()
+            .any(|range| row > range.start_line && row <= range.end_line);
+        if hidden {
+            let offset = self.text.line_end_offset(start_line);
+            self.selections = (offset..offset).into();
+            self.scroll_to(offset, None, cx);
+            self.update_preferred_column();
+        }
+        cx.notify();
+    }
+
     /// Set enable/disable line number, only for [`InputMode::CodeEditor`] mode.
     #[doc(hidden)]
     pub fn line_number(mut self, line_number: bool) -> Self {

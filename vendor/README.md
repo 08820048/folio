@@ -45,9 +45,9 @@ project adds — and not the editor's internals at large.
 
 ## What this project changed
 
-The diff against the revision that was copied is small and lives in six files.
-Knowing where it is turns the re-apply step below into a review rather than a
-read of the whole crate.
+The diff against the revision that was copied is small, and it is named here
+file by file: knowing where it is turns the re-apply step below into a review
+rather than a read of the whole crate.
 
 - `input/base/cursor.rs` — `Selection` unchanged, with `Selections` beside it:
   the set the editor edits through, ordered, non-overlapping, primary last, and
@@ -57,12 +57,15 @@ read of the whole crate.
   one.
 - `input/base/state.rs` — where the set is read and written: a keystroke, a
   backspace, an Enter, an escape, a paste and a cut, and the hooks that reach
-  `multi_cursor.rs`.
+  `multi_cursor.rs` — plus the two folding commands and what they do with a
+  caret the fold has hidden.
 - `input/base/element.rs` — drawing every selection as a path of its own and
   every caret as a quad, in the coordinates the primary's already used.
 - `input/editor/indent.rs` — `line_break_at`: what Enter inserts and where the
   caret goes in it. `indent_of_next_line` was deleted, its next-line branch
   having been unreachable.
+- `input/editor/display_map/display_map.rs` — a `fold_candidates` accessor
+  beside the `folded_ranges` one.
 - `input/mod.rs` — the `mod` line for the new file.
 
 ## Re-vendoring, which an upgrade requires

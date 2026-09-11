@@ -164,6 +164,15 @@ impl DisplayMap {
         self.fold_map.folded_ranges()
     }
 
+    /// Get the blocks that can be folded, in the order of the text.
+    ///
+    /// The counterpart of [`Self::folded_ranges`]: what folding *could* hide,
+    /// not what it is hiding.
+    #[inline]
+    pub fn fold_candidates(&self) -> &[FoldRange] {
+        self.fold_map.fold_candidates()
+    }
+
     /// Clear all folds
     pub fn clear_folds(&mut self) {
         self.fold_map.clear_folds();

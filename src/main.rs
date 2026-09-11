@@ -42,6 +42,11 @@ fn main() {
                 // only the key it answers to changes.
                 KeyBinding::new(&format!("{modifier}-alt-f"), input::Replace, Some("Folio")),
                 KeyBinding::new(&format!("{modifier}-/"), ToggleComment, Some("Folio")),
+                // Folding, beside the indent keys the editor binds itself:
+                // `⌘[` and `⌘]` are indentation, so folding takes the option
+                // key as well, which is where VS Code puts it.
+                KeyBinding::new(&format!("{modifier}-alt-["), Fold, Some("FolioEditor")),
+                KeyBinding::new(&format!("{modifier}-alt-]"), Unfold, Some("FolioEditor")),
                 // More than one cursor: also the code editor's alone. In the
                 // search box and the settings fields `⌘D` and `⌥⌘↑` mean
                 // whatever the platform means by them.
@@ -114,6 +119,8 @@ fn main() {
                     MenuItem::action("Select All", input::SelectAll),
                     MenuItem::separator(),
                     MenuItem::action("Toggle Comment", ToggleComment),
+                    MenuItem::action("Fold", Fold),
+                    MenuItem::action("Unfold", Unfold),
                     MenuItem::separator(),
                     MenuItem::action("Select Next Occurrence", SelectNextOccurrence),
                     MenuItem::action("Select All Occurrences", SelectAllOccurrences),

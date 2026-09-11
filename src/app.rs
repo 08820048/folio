@@ -200,6 +200,8 @@ actions!(
         OpenAbout,
         ToggleDiff,
         ToggleComment,
+        Fold,
+        Unfold,
         SelectNextOccurrence,
         SelectAllOccurrences,
         AddCursorAbove,
@@ -3206,7 +3208,7 @@ impl Folio {
                             EditorState::new(language, window, cx)
                                 .default_value(saved.clone())
                                 .line_number(true)
-                                .folding(false)
+                                .folding(true)
                                 .tab_size(TabSize {
                                     tab_size: tabs.tab_size,
                                     hard_tabs: tabs.hard_tabs,
@@ -6060,8 +6062,18 @@ impl Render for Folio {
             .on_action(
                 cx.listener(|this, _: &ToggleComment, window, cx| this.toggle_comment(window, cx)),
             )
-            // The rest of the editor's multi-cursor commands, bound only where
-            // the code editor has the keyboard.
+            // The editor's own commands, bound only where the code editor has
+            // the keyboard.
+            .on_action(cx.listener(|this, _: &Fold, _, cx| {
+                this.on_active_buffer(cx, |base, cx| {
+                    base.fold_at_cursor(cx);
+                })
+            }))
+            .on_action(cx.listener(|this, _: &Unfold, _, cx| {
+                this.on_active_buffer(cx, |base, cx| {
+                    base.unfold_at_cursor(cx);
+                })
+            }))
             .on_action(cx.listener(|this, _: &SelectNextOccurrence, _, cx| {
                 this.on_active_buffer(cx, |base, cx| base.select_next_occurrence(cx))
             }))
@@ -7862,6 +7874,98 @@ mod tests {
             app.on_active_buffer(cx, |base, cx| base.add_cursor_below(cx));
             app.toggle_comment(window, cx);
             assert_eq!(value(cx), "// x = 1;\n// y = 2;\n");
+        });
+    }
+
+    /// Folding: the block the caret is in closes, and a caret that was inside
+    /// what closed goes to the header rather than staying on a line nothing
+    /// draws.
+    ///
+    /// The fold candidates are handed in rather than derived: in the app they
+    /// come from the grammar's fold query, through a highlighter the component
+    /// library attaches when it renders the input — which this harness cannot
+    /// do (see the note above `a_keystroke_matches_the_shortcut_it_prints`).
+    /// That the query produces them is the crate's business; what is checked
+    /// here is what the editor does with them.
+    #[gpui::test]
+    fn folding_closes_the_block_at_the_caret(cx: &mut TestAppContext) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let file = root.join("main.rs");
+        std::fs::write(&file, "fn main() {}\n").unwrap();
+        cx.update(gpui_component::init);
+        let cx = cx.add_empty_window();
+        let view = cx.update(|window, cx| {
+            cx.new(|cx| {
+                let mut app = Folio::new(window, cx);
+                app.recent_task = None;
+                app.recent_file = root.join("recent.json");
+                app.settings_file = root.join("settings.json");
+                app.window_file = root.join("window.json");
+                app.settings = Settings::default();
+                app.applied_ignored = app.settings.ignored.clone();
+                app
+            })
+        });
+        view.update_in(cx, |app, window, cx| {
+            app.request(Next::Open(root.clone()), window, cx)
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |app, window, cx| {
+            app.open_file(file.clone(), window, cx)
+        });
+        cx.run_until_parked();
+
+        view.update_in(cx, |app, _window, cx| {
+            let base = app.project.documents[&file]
+                .editor
+                .read(cx)
+                .base_state()
+                .clone();
+            let caret = |cx: &App| base.read(cx).selected_range();
+            let folded = |cx: &App| base.read(cx).folded_lines();
+
+            // `fn main() {` on line 0 with the `if` block on 1..3 inside it, so
+            // the caret in `let y` is in two blocks at once.
+            base.update(cx, |base, cx| {
+                base.set_value(
+                    "fn main() {\n    if x {\n        let y = 1;\n    }\n}\n",
+                    _window,
+                    cx,
+                );
+                base.apply_highlighter_fold_candidates(
+                    vec![input::FoldRange::new(0, 4), input::FoldRange::new(1, 3)],
+                    cx,
+                );
+                base.set_selected_range(30..30, cx);
+            });
+            assert!(folded(cx).is_empty());
+
+            // The innermost block, so pressing again takes the one around it.
+            base.update(cx, |base, cx| assert!(base.fold_at_cursor(cx)));
+            assert_eq!(folded(cx), vec![1]);
+            // The caret was on a line that stopped being drawn.
+            assert_eq!(caret(cx), 22..22);
+
+            base.update(cx, |base, cx| assert!(base.unfold_at_cursor(cx)));
+            assert!(folded(cx).is_empty());
+
+            // The outer block, from the header line.
+            base.update(cx, |base, cx| {
+                base.set_selected_range(0..0, cx);
+                assert!(base.fold_at_cursor(cx));
+            });
+            assert_eq!(folded(cx), vec![0]);
+
+            // Nothing to fold and nothing to unfold are both quiet, and the
+            // caret is left alone either way.
+            base.update(cx, |base, cx| {
+                base.set_selected_range(50..50, cx);
+                assert!(!base.fold_at_cursor(cx));
+                assert!(!base.unfold_at_cursor(cx));
+            });
+            assert_eq!(folded(cx), vec![0]);
+            assert_eq!(caret(cx), 50..50);
         });
     }
 
