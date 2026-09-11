@@ -12,7 +12,7 @@ use gpui::{prelude::*, *};
 use gpui_component::{
     ActiveTheme, Disableable, Icon, IconName, Root, Sizable, Theme, TitleBar,
     button::{Button, ButtonVariants},
-    input::{self, EditorState, Input, InputEvent, InputState, Position, TabSize},
+    input::{self, EditorState, Input, InputBaseState, InputEvent, InputState, Position, TabSize},
     native_menu::NativeMenu,
 };
 use serde::{Deserialize, Serialize};
@@ -198,6 +198,16 @@ actions!(
         OpenSettings,
         CloseSettings,
         ToggleDiff,
+        ToggleComment,
+        PairParen,
+        PairBracket,
+        PairBrace,
+        PairQuote,
+        PairApostrophe,
+        PairBacktick,
+        SkipParen,
+        SkipBracket,
+        SkipBrace,
         Quit
     ]
 );
@@ -454,6 +464,23 @@ fn menu_height(target: &MenuTarget) -> f32 {
         .filter(|(position, index)| *position > 0 && rules.contains(index))
         .count();
     visible.len() as f32 * MENU_ROW + separators as f32 * 9. + 8.
+}
+
+/// Whether a closing bracket may be inserted in front of this character.
+///
+/// Zed's rule, and the reason it exists: a pair typed in front of a word would
+/// swallow it — `foo` becomes `()foo` — when the opener was meant to go before
+/// it. Whitespace and an existing closer are the only things a pair may be
+/// opened against.
+fn allows_autoclose(next: Option<char>) -> bool {
+    next.is_none_or(|next| next.is_whitespace() || ")]}".contains(next))
+}
+
+/// Whether a character is part of a word as far as pairing is concerned. Zed
+/// asks the language's character classifier; a letter, a digit or an
+/// underscore is the whole of what that resolves to here.
+fn is_word_char(previous: Option<char>) -> bool {
+    previous.is_some_and(|previous| previous.is_alphanumeric() || previous == '_')
 }
 
 /// An open right-click menu, anchored where the pointer was.
@@ -2295,6 +2322,159 @@ impl Folio {
         } else {
             self.tree_focus.focus(window, cx);
         }
+    }
+
+    /// The buffer being edited, if one is. An image preview has none.
+    fn active_editor(&self) -> Option<Entity<EditorState>> {
+        let path = self.project.active.as_ref()?;
+        self.project
+            .documents
+            .get(path)
+            .map(|document| document.editor.clone())
+    }
+
+    /// What an opening bracket does: a pair around the selection, or an empty
+    /// pair with the caret between the two.
+    ///
+    /// Both characters go in at once, so an opener is one edit and one step on
+    /// the undo stack rather than two.
+    fn open_pair(
+        &mut self,
+        open: &'static str,
+        close: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(editor) = self.active_editor() else {
+            return;
+        };
+        let base = editor.read(cx).base_state().clone();
+        let value = base.read(cx).value().to_string();
+        let selection = base.read(cx).selected_range();
+        let Some(selected) = value.get(selection.clone()) else {
+            return;
+        };
+        // Wrapping a selection is always what was meant. An empty pair is not:
+        // in front of a word the closer would land where the rest of the word
+        // has to go, so the opener is typed on its own.
+        if selected.is_empty() && !allows_autoclose(value[selection.start..].chars().next()) {
+            base.update(cx, |base, cx| base.replace(open, window, cx));
+            cx.notify();
+            return;
+        }
+        // Wrapping leaves the caret after the pair; an empty pair leaves it
+        // between the two.
+        let caret = if selected.is_empty() {
+            selection.start + open.len()
+        } else {
+            selection.start + open.len() + selected.len() + close.len()
+        };
+        let text = format!("{open}{selected}{close}");
+        base.update(cx, |base, cx| {
+            base.replace(text, window, cx);
+            base.set_selected_range(caret..caret, cx);
+        });
+        cx.notify();
+    }
+
+    /// A quote closes itself, so it is its own pair.
+    fn pair_quote(&mut self, quote: &'static str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(editor) = self.active_editor() else {
+            return;
+        };
+        let base = editor.read(cx).base_state().clone();
+        let value = base.read(cx).value().to_string();
+        let selection = base.read(cx).selected_range();
+        let follows = || {
+            value
+                .get(selection.start..)
+                .is_some_and(|rest| rest.starts_with(quote))
+        };
+        if selection.is_empty() && follows() {
+            self.step_over(&base, selection.start + quote.len(), cx);
+            return;
+        }
+        // A quote after a word is not opening a quote — it is an apostrophe,
+        // or a lifetime. Zed asks the language; a word character is what that
+        // amounts to for the languages here.
+        let after_word =
+            selection.is_empty() && is_word_char(value[..selection.start].chars().next_back());
+        if after_word {
+            base.update(cx, |base, cx| base.replace(quote, window, cx));
+            cx.notify();
+            return;
+        }
+        self.open_pair(quote, quote, window, cx);
+    }
+
+    /// A closing bracket typed where one already is steps over it, and
+    /// anywhere else is typed as itself.
+    fn skip_closer(&mut self, close: &'static str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(editor) = self.active_editor() else {
+            return;
+        };
+        let base = editor.read(cx).base_state().clone();
+        let value = base.read(cx).value().to_string();
+        let selection = base.read(cx).selected_range();
+        let follows = || {
+            value
+                .get(selection.start..)
+                .is_some_and(|rest| rest.starts_with(close))
+        };
+        if selection.is_empty() && follows() {
+            self.step_over(&base, selection.start + close.len(), cx);
+            return;
+        }
+        base.update(cx, |base, cx| base.replace(close, window, cx));
+        cx.notify();
+    }
+
+    /// Move the caret past a bracket that is already there.
+    fn step_over(&self, base: &Entity<InputBaseState>, caret: usize, cx: &mut Context<Self>) {
+        base.update(cx, |base, cx| base.set_selected_range(caret..caret, cx));
+        cx.notify();
+    }
+
+    /// `⌘/`: comment out every line the selection touches, or bring them back.
+    ///
+    /// The editor offers no hook for this and no way to replace an arbitrary
+    /// range, so it is done by selecting the lines and replacing the selection
+    /// — which is also what puts it on the undo stack as one step.
+    fn toggle_comment(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(path) = self.project.active.clone() else {
+            return;
+        };
+        let Some(marker) = buffer::line_comment(buffer::language(&path)) else {
+            // Plenty of languages only have a block form; saying so beats
+            // inserting a marker the file cannot use.
+            self.toast("This language has only block comments", cx);
+            return;
+        };
+        // An image has no buffer to comment.
+        let Some(editor) = self
+            .project
+            .documents
+            .get(&path)
+            .map(|document| document.editor.clone())
+        else {
+            return;
+        };
+        let base = editor.read(cx).base_state().clone();
+        let text = base.read(cx).value().to_string();
+        let selection = base.read(cx).selected_range();
+        let lines = buffer::line_range(&text, selection);
+        let Some(block) = text.get(lines.clone()) else {
+            return;
+        };
+        let toggled = buffer::toggle_comments(block, marker);
+        let reselect = lines.start..lines.start + toggled.len();
+        base.update(cx, |base, cx| {
+            base.set_selected_range(lines, cx);
+            base.replace(toggled, window, cx);
+            // Left selected, so pressing again undoes what this one did.
+            base.set_selected_range(reselect, cx);
+        });
+        cx.notify();
     }
 
     /// `⇧⌘D`: show the active file as its changes against HEAD, or go back to
@@ -4896,26 +5076,34 @@ impl Folio {
                                                         .has_code_actions(),
                                                 }
                                             };
-                                            Input::from_base(&base)
-                                                .bordered(false)
-                                                .focus_bordered(false)
-                                                .readonly(
-                                                    self.saving
-                                                        || self.loading
-                                                        || self.prompting
-                                                        || locked,
-                                                )
-                                                .context_menu(move |menu, window, cx| {
-                                                    editor_context_menu(editor, menu, window, cx)
-                                                })
-                                                // The code size is its own setting, so it
-                                                // is absolute rather than in the
-                                                // interface's scale.
-                                                .text_size(px(self.settings.code_font_size))
-                                                .font_family(self.code_font())
-                                                .line_height(gpui::relative(1.6))
-                                                .rounded_none()
-                                                .h_full()
+                                            // The wrapper gives the code editor a
+                                            // key context of its own, which is what
+                                            // scopes the bracket bindings to it and
+                                            // keeps them off every other text field.
+                                            div().key_context("FolioEditor").size_full().child(
+                                                Input::from_base(&base)
+                                                    .bordered(false)
+                                                    .focus_bordered(false)
+                                                    .readonly(
+                                                        self.saving
+                                                            || self.loading
+                                                            || self.prompting
+                                                            || locked,
+                                                    )
+                                                    .context_menu(move |menu, window, cx| {
+                                                        editor_context_menu(
+                                                            editor, menu, window, cx,
+                                                        )
+                                                    })
+                                                    // The code size is its own setting, so it
+                                                    // is absolute rather than in the
+                                                    // interface's scale.
+                                                    .text_size(px(self.settings.code_font_size))
+                                                    .font_family(self.code_font())
+                                                    .line_height(gpui::relative(1.6))
+                                                    .rounded_none()
+                                                    .h_full(),
+                                            )
                                         })
                                     })
                                     .when_some(image, |el, (path, image)| {
@@ -5713,6 +5901,45 @@ impl Render for Folio {
             }))
             .on_action(cx.listener(|this, _: &OpenSettings, _, cx| this.show_settings(cx)))
             .on_action(cx.listener(|this, _: &ToggleDiff, window, cx| this.toggle_diff(window, cx)))
+            .on_action(
+                cx.listener(|this, _: &ToggleComment, window, cx| this.toggle_comment(window, cx)),
+            )
+            // These are bound to the code editor's own key context, so the
+            // search box and the settings fields keep typing brackets the
+            // ordinary way.
+            .on_action(
+                cx.listener(|this, _: &PairParen, window, cx| this.open_pair("(", ")", window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &PairBracket, window, cx| {
+                    this.open_pair("[", "]", window, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &PairBrace, window, cx| this.open_pair("{", "}", window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &PairQuote, window, cx| this.pair_quote("\"", window, cx)),
+            )
+            // An apostrophe is safe to pair only because a quote after a word
+            // is not treated as an opening quote.
+            .on_action(
+                cx.listener(|this, _: &PairApostrophe, window, cx| {
+                    this.pair_quote("'", window, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &PairBacktick, window, cx| this.pair_quote("`", window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &SkipParen, window, cx| this.skip_closer(")", window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &SkipBracket, window, cx| this.skip_closer("]", window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &SkipBrace, window, cx| this.skip_closer("}", window, cx)),
+            )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
                 this.resizing &= event.dragging();
                 if this.resizing {
@@ -7158,6 +7385,136 @@ mod tests {
         // The form took the settings it was handed, without asking for them.
         view.update_in(cx, |app, _, _| {
             assert_eq!(app.settings, Settings::default())
+        });
+    }
+
+    /// The two predicates the pairing rules are built on, which are the part
+    /// worth pinning down: both come from Zed's editor, and both stop the
+    /// shortcut from doing something the user did not ask for.
+    #[test]
+    fn pairing_knows_where_a_closer_fits() {
+        // Nothing after the caret, whitespace, or a closer already there.
+        assert!(allows_autoclose(None));
+        assert!(allows_autoclose(Some(' ')));
+        assert!(allows_autoclose(Some(')')));
+        assert!(allows_autoclose(Some(']')));
+        assert!(allows_autoclose(Some('}')));
+        // Anything else is where the rest of a word has to go, and a pair
+        // opened there would swallow it.
+        assert!(!allows_autoclose(Some('f')));
+        assert!(!allows_autoclose(Some('1')));
+        assert!(!allows_autoclose(Some('_')));
+        assert!(!allows_autoclose(Some('"')));
+
+        // A quote after a word is an apostrophe or a lifetime, not an opening
+        // quote.
+        assert!(is_word_char(Some('n')));
+        assert!(is_word_char(Some('9')));
+        assert!(is_word_char(Some('_')));
+        assert!(!is_word_char(Some(' ')));
+        assert!(!is_word_char(Some('(')));
+        assert!(!is_word_char(None));
+    }
+
+    /// An opening bracket makes a pair with the caret between the two, a
+    /// closing one steps over a closer already there, and a selection is
+    /// wrapped rather than replaced.
+    #[gpui::test]
+    fn brackets_pair_and_step_over(cx: &mut TestAppContext) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let file = root.join("main.rs");
+        std::fs::write(&file, "fn main() {}\n").unwrap();
+        cx.update(gpui_component::init);
+        let cx = cx.add_empty_window();
+        let view = cx.update(|window, cx| {
+            cx.new(|cx| {
+                let mut app = Folio::new(window, cx);
+                app.recent_task = None;
+                app.recent_file = root.join("recent.json");
+                app.settings_file = root.join("settings.json");
+                app.window_file = root.join("window.json");
+                app.settings = Settings::default();
+                app.applied_ignored = app.settings.ignored.clone();
+                app
+            })
+        });
+        view.update_in(cx, |app, window, cx| {
+            app.request(Next::Open(root.clone()), window, cx)
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |app, window, cx| {
+            app.open_file(file.clone(), window, cx)
+        });
+        cx.run_until_parked();
+
+        view.update_in(cx, |app, window, cx| {
+            let base = app.project.documents[&file]
+                .editor
+                .read(cx)
+                .base_state()
+                .clone();
+            let value = |cx: &App| base.read(cx).value().to_string();
+            let caret = |cx: &App| base.read(cx).selected_range();
+            // Every case starts from a known buffer, so each one reads on its
+            // own rather than off whatever the one before it left behind.
+            // Takes the window rather than capturing it, so the calls below
+            // can borrow it in turn.
+            let start = |text: &str,
+                         selection: std::ops::Range<usize>,
+                         window: &mut Window,
+                         cx: &mut Context<Folio>| {
+                base.update(cx, |base, cx| {
+                    base.set_value(text, window, cx);
+                    base.set_selected_range(selection, cx);
+                });
+            };
+
+            // An empty pair at the end of a line, with the caret between the
+            // two characters.
+            start("fn main() {}\n", 12..12, window, cx);
+            app.open_pair("(", ")", window, cx);
+            assert_eq!(value(cx), "fn main() {}()\n");
+            assert_eq!(caret(cx), 13..13);
+
+            // In front of a word it is typed alone: the closer would land
+            // where the rest of the word has to go.
+            start("fn main() {}\n", 0..0, window, cx);
+            app.open_pair("(", ")", window, cx);
+            assert_eq!(value(cx), "(fn main() {}\n");
+
+            // A closing bracket steps over the one that is already there
+            // instead of adding a second.
+            start("()fn main() {}\n", 1..1, window, cx);
+            app.skip_closer(")", window, cx);
+            assert_eq!(value(cx), "()fn main() {}\n");
+            assert_eq!(caret(cx), 2..2);
+
+            // With nothing to step over it is just typed.
+            start("()fn main() {}\n", 0..0, window, cx);
+            app.skip_closer("}", window, cx);
+            assert_eq!(value(cx), "}()fn main() {}\n");
+
+            // A selection is wrapped, and the caret lands after the pair.
+            start("fn main() {}\n", 0..2, window, cx);
+            app.open_pair("(", ")", window, cx);
+            assert_eq!(value(cx), "(fn) main() {}\n");
+            assert_eq!(caret(cx), 4..4);
+
+            // A quote makes a pair, and the next one steps over it.
+            start(" \n", 1..1, window, cx);
+            app.pair_quote("\"", window, cx);
+            assert_eq!(value(cx), " \"\"\n");
+            assert_eq!(caret(cx), 2..2);
+            app.pair_quote("\"", window, cx);
+            assert_eq!(value(cx), " \"\"\n");
+            assert_eq!(caret(cx), 3..3);
+
+            // A quote after a word is not opening a quote — an apostrophe
+            // stays an apostrophe.
+            start("don\n", 3..3, window, cx);
+            app.pair_quote("'", window, cx);
+            assert_eq!(value(cx), "don'\n");
         });
     }
 

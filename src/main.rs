@@ -37,6 +37,20 @@ fn main() {
                 KeyBinding::new(&format!("{modifier}-g"), GoToLine, Some("Folio")),
                 KeyBinding::new(&format!("{modifier}-b"), ToggleSidebar, Some("Folio")),
                 KeyBinding::new(&format!("{modifier}-shift-d"), ToggleDiff, Some("Folio")),
+                KeyBinding::new(&format!("{modifier}-/"), ToggleComment, Some("Folio")),
+                // Bound to the code editor's key context rather than the app's,
+                // so brackets still type normally in the search box and the
+                // settings fields. These replace the editor's own handling of
+                // the key, which is the only way to insert a pair as one edit.
+                KeyBinding::new("(", PairParen, Some("FolioEditor")),
+                KeyBinding::new("[", PairBracket, Some("FolioEditor")),
+                KeyBinding::new("{", PairBrace, Some("FolioEditor")),
+                KeyBinding::new("\"", PairQuote, Some("FolioEditor")),
+                KeyBinding::new("'", PairApostrophe, Some("FolioEditor")),
+                KeyBinding::new("`", PairBacktick, Some("FolioEditor")),
+                KeyBinding::new(")", SkipParen, Some("FolioEditor")),
+                KeyBinding::new("]", SkipBracket, Some("FolioEditor")),
+                KeyBinding::new("}", SkipBrace, Some("FolioEditor")),
                 KeyBinding::new(&format!("{modifier}-,"), OpenSettings, Some("Folio")),
                 KeyBinding::new(&format!("{modifier}-q"), Quit, Some("Folio")),
                 // The settings window has its own context: `⌘W` closes that
@@ -71,6 +85,8 @@ fn main() {
                     MenuItem::action("Copy", input::Copy),
                     MenuItem::action("Paste", input::Paste),
                     MenuItem::action("Select All", input::SelectAll),
+                    MenuItem::separator(),
+                    MenuItem::action("Toggle Comment", ToggleComment),
                     MenuItem::separator(),
                     MenuItem::action("Find", input::Search),
                 ]),
