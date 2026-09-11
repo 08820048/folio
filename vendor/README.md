@@ -43,6 +43,28 @@ project's tests are the only net under changes made here. They cover what the
 application does with the editor — typing, selection, undo, the commands this
 project adds — and not the editor's internals at large.
 
+## What this project changed
+
+The diff against the revision that was copied is small and lives in six files.
+Knowing where it is turns the re-apply step below into a review rather than a
+read of the whole crate.
+
+- `input/base/cursor.rs` — `Selection` unchanged, with `Selections` beside it:
+  the set the editor edits through, ordered, non-overlapping, primary last, and
+  the operations a multi-cursor is built out of.
+- `input/base/multi_cursor.rs` — new. The commands that make more than one
+  selection, the edit that lands at every one of them, and the collapse back to
+  one.
+- `input/base/state.rs` — where the set is read and written: a keystroke, a
+  backspace, an Enter, an escape, a paste and a cut, and the hooks that reach
+  `multi_cursor.rs`.
+- `input/base/element.rs` — drawing every selection as a path of its own and
+  every caret as a quad, in the coordinates the primary's already used.
+- `input/editor/indent.rs` — `line_break_at`: what Enter inserts and where the
+  caret goes in it. `indent_of_next_line` was deleted, its next-line branch
+  having been unreachable.
+- `input/mod.rs` — the `mod` line for the new file.
+
 ## Re-vendoring, which an upgrade requires
 
 1. Copy the crate out of the new revision:

@@ -6,4 +6,5 @@
 - 组件库允许 fork。功能需要而 gpui-component 公开 API 够不到时（例如多光标 ——
   它固定的输入内核里根本没有多光标模型），可以 vendored 对应 crate 并用
   `[patch]` 指过去，不要因此砍掉功能。钉住的版本就是这个 fork 的基线，
-  升级等于对着一个具名 commit 做 rebase。
+  升级等于对着一个具名 commit 做 rebase。当前改了哪些文件见
+  `vendor/README.md`。

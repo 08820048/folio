@@ -199,8 +199,8 @@ so it is typed as itself and `don't` stays `don't`.
 between them — which is what typing `{`, `[` or `(` leaves behind — it lays the
 pair out over three lines: the caret on the line between them, indented one
 level further in, and the closer moved to the line after, at the indentation
-the opener's line has. Typing a function is `{`, Enter, the body, and the `}`
-is already where it belongs. Everywhere else Enter breaks the line and indents
+the opener's line has. Typing a function is `{`, Enter, the body — the `}` is
+already where it belongs. Everywhere else Enter breaks the line and indents
 to the line it broke, as it always did.
 
 Quotes are not brackets and do not do this: a line break inside a pair of them
@@ -240,10 +240,11 @@ with one cursor it does whatever it did before.
 
 Everything the editor does to one selection, it then does to all of them:
 typing, pasting, `⌫` and `⌦`, and Enter, which breaks the line at every caret
-with the indentation of the line it breaks. Copying joins the selections with
-newlines, so pasting them somewhere else gives back one line each. However many
-selections the edit covered, it is one edit: one step on the undo stack, and
-one change to the file.
+with the indentation of the line it breaks — and lays out the pair, the way it
+does for one cursor, wherever a caret sits inside a pair of brackets. Copying
+joins the selections with newlines, so pasting them somewhere else gives back
+one line each. However many selections the edit covered, it is one edit: one
+step on the undo stack, and one change to the file.
 
 Three things do not multiply, and each says so rather than half-working. A
 bracket is typed at every cursor instead of pairing around a selection, because
@@ -422,15 +423,16 @@ menu driving create, rename, cut, paste, duplicate, delete and Find in Folder
 recorded where the app was told to write it, the settings form's every page
 with its headings open and shut, tabs opening, closing and guarding unsaved
 changes, the tab menu's bulk closes and what pinning keeps out of them, drag
-reordering in both directions, brackets pairing and stepping over, Enter laying
-out a pair of brackets over three lines, comment
-toggling, the multi-cursor commands with the edit that lands at every selection
-they make, and the changes view following the active file. What no test covers is the Trash call itself:
-it would move real files and raise an automation prompt. The guard that stops
-to confirm when unsaved edits are under the entry, and that cancelling leaves
-the entry alone, is covered. Nor is `⌘,` opening the settings window: a test
-window has no platform window behind it, so the form is driven directly
-instead. None of this stands in for native IME or rendering acceptance.
+reordering in both directions, brackets pairing and stepping over, Enter
+laying out a pair of brackets over three lines, comment toggling, the
+multi-cursor commands with the edit that lands at every selection they make,
+and the changes view following the active file. What no test covers is the
+Trash call itself: it would move real files and raise an automation prompt. The
+guard that stops to confirm when unsaved edits are under the entry, and that
+cancelling leaves the entry alone, is covered. Nor is `⌘,` opening the settings
+window: a test window has no platform window behind it, so the form is driven
+directly instead. None of this stands in for native IME or rendering
+acceptance.
 
 Every registered grammar has its highlight query compiled and asserted not to
 fall back to plain text. `SyntaxHighlighter::new` degrades silently on a bad
@@ -493,13 +495,16 @@ add a cursor, an arrow key collapses the set rather than moving it, and the
 word- and line-delete commands (`⌥⌫`, `⌥⌦`, `⌘⌫`, `⌘⌦`) were left as they
 were, so they can act on one cursor rather than all of them. An edit through
 the set is one step on the undo stack and comes back in one, though the cursors
-it covered are not restored. The changes view is a unified diff — there is no side-by-side — and its counts
-count rows, so a changed line reads as one gone and one arrived. Window
-geometry is written when a window closes
-and again on quit, so a force-killed process loses wherever the windows were —
-the same is true of the settings window. The settings sidebar has no search
-box, and its pages do not scroll, which is fine at five pages and would need
-fixing before there were many more.
+it covered are not restored. Enter indents to the line it breaks, but not when
+the line merely ends with an opener: a `{` whose pair is not there — deleted,
+or never inserted because the character in front of it was a word — gets the
+break and no extra level. The changes view is a unified diff — there is no
+side-by-side — and its counts count rows, so a changed line reads as one gone
+and one arrived. Window geometry is written when a window closes and again on
+quit, so a force-killed process loses wherever the windows were — the same is
+true of the settings window. The settings sidebar has no search box, and its
+pages do not scroll, which is fine at five pages and would need fixing before
+there were many more.
 
 Full progress and the outstanding acceptance items are in
 [docs/开发进度.md](docs/开发进度.md); the original requirements are in
