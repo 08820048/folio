@@ -197,20 +197,6 @@ impl InputBaseState {
         cx.notify();
         true
     }
-
-    /// The indentation a new line at `offset` should start with: the whitespace
-    /// the caret's own line starts with.
-    fn indent_of_line_at(&self, offset: usize) -> String {
-        if self.mode.is_single_line() {
-            return String::new();
-        }
-        let row = self.text.offset_to_point(offset).row;
-        self.text
-            .slice_line(row)
-            .chars()
-            .take_while(|c| c.is_whitespace())
-            .collect()
-    }
 }
 
 /// Editing through the set.
@@ -253,19 +239,20 @@ impl InputBaseState {
     }
 
     /// `Enter` with more than one cursor: a line break at each, indented to the
-    /// line it breaks.
+    /// line it breaks and laid out around a bracket pair, exactly as it is for
+    /// one cursor.
     pub fn insert_line_break_at_every_selection(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let texts: Vec<String> = self
+        let breaks: Vec<(String, usize)> = self
             .selections
             .in_text_order()
             .iter()
-            .map(|selection| format!("\n{}", self.indent_of_line_at(selection.end)))
+            .map(|selection| self.line_break_at(*selection))
             .collect();
-        self.replace_in_every_selection_with(&texts, window, cx);
+        self.replace_in_every_selection_with(&breaks, window, cx);
     }
 
     /// The same text at every selection. What typing and pasting are.
@@ -275,11 +262,15 @@ impl InputBaseState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let texts = vec![new_text.to_string(); self.selections.len()];
+        let texts = vec![(new_text.to_string(), new_text.len()); self.selections.len()];
         self.replace_in_every_selection_with(&texts, window, cx);
     }
 
     /// One edit at every selection, as one step on the undo stack.
+    ///
+    /// Each edit is the text to insert and where in it the caret belongs —
+    /// usually the end of it, but not always, since a line break between a pair
+    /// of brackets puts the caret in the middle of what it inserted.
     ///
     /// The edits have to run last selection first, or each one would move the
     /// bytes the ones before it are addressed by. The undo stack is turned off
@@ -289,7 +280,7 @@ impl InputBaseState {
     /// that were recorded one after another.
     fn replace_in_every_selection_with(
         &mut self,
-        texts: &[String],
+        texts: &[(String, usize)],
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -311,10 +302,13 @@ impl InputBaseState {
         self.silent_replace_text = true;
 
         let mut carets = Vec::with_capacity(selections.len());
-        for (selection, text) in selections.iter().zip(texts).rev() {
+        for (selection, (text, caret)) in selections.iter().zip(texts).rev() {
             let range = self.range_to_utf16(&Range::from(*selection));
             self.replace_text_in_range(Some(range), text, window, cx);
-            carets.push(self.selections.primary().end);
+            // The edit leaves the caret at the end of what it inserted; where
+            // it belongs may be earlier in it.
+            let tail = text.len() - caret;
+            carets.push(self.selections.primary().end.saturating_sub(tail));
         }
 
         self.silent_replace_text = was_silent;
@@ -326,7 +320,7 @@ impl InputBaseState {
         // stood at the time.
         carets.reverse();
         let mut shift = 0isize;
-        for (caret, (selection, text)) in carets.iter_mut().zip(selections.iter().zip(texts)) {
+        for (caret, (selection, (text, _))) in carets.iter_mut().zip(selections.iter().zip(texts)) {
             *caret = (*caret as isize + shift).max(0) as usize;
             shift += text.len() as isize - selection.len() as isize;
         }

@@ -179,8 +179,9 @@ Others when everything else is pinned.
 
 ## Editing
 
-Two things beyond plain typing, both bound to the code editor's own key
-context so they never reach the search box or a settings field.
+Three things beyond plain typing. Two are bound to the code editor's own key
+context, so they never reach the search box or a settings field; the third is
+Enter, which the editor already had.
 
 **Brackets pair.** `(`, `[`, `{`, `"`, `'` and `` ` `` insert both characters
 and leave the caret between them, as one edit and so one step on the undo
@@ -193,6 +194,17 @@ of whitespace or another closer — anywhere else it would swallow the word that
 is already there, turning `foo` into `()foo` where `(foo` was meant. And a
 quote after a word is not opening a quote: it is an apostrophe or a lifetime,
 so it is typed as itself and `don't` stays `don't`.
+
+**Enter opens a block.** Pressed between a pair of brackets with nothing
+between them — which is what typing `{`, `[` or `(` leaves behind — it lays the
+pair out over three lines: the caret on the line between them, indented one
+level further in, and the closer moved to the line after, at the indentation
+the opener's line has. Typing a function is `{`, Enter, the body, and the `}`
+is already where it belongs. Everywhere else Enter breaks the line and indents
+to the line it broke, as it always did.
+
+Quotes are not brackets and do not do this: a line break inside a pair of them
+is a string being written over two lines, not a block with a body in it.
 
 The editor's own in-file replace answers to `⌥⌘F` rather than the `⇧⌘F` its
 component binds it to. `⇧⌘F` is the project search, and a binding on the
@@ -410,7 +422,8 @@ menu driving create, rename, cut, paste, duplicate, delete and Find in Folder
 recorded where the app was told to write it, the settings form's every page
 with its headings open and shut, tabs opening, closing and guarding unsaved
 changes, the tab menu's bulk closes and what pinning keeps out of them, drag
-reordering in both directions, brackets pairing and stepping over, comment
+reordering in both directions, brackets pairing and stepping over, Enter laying
+out a pair of brackets over three lines, comment
 toggling, the multi-cursor commands with the edit that lands at every selection
 they make, and the changes view following the active file. What no test covers is the Trash call itself:
 it would move real files and raise an automation prompt. The guard that stops
@@ -480,8 +493,7 @@ add a cursor, an arrow key collapses the set rather than moving it, and the
 word- and line-delete commands (`⌥⌫`, `⌥⌦`, `⌘⌫`, `⌘⌦`) were left as they
 were, so they can act on one cursor rather than all of them. An edit through
 the set is one step on the undo stack and comes back in one, though the cursors
-it covered are not restored. A bracket pair does not indent when Enter is
-pressed between the two. The changes view is a unified diff — there is no side-by-side — and its counts
+it covered are not restored. The changes view is a unified diff — there is no side-by-side — and its counts
 count rows, so a changed line reads as one gone and one arrived. Window
 geometry is written when a window closes
 and again on quit, so a force-killed process loses wherever the windows were —

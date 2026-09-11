@@ -7696,6 +7696,29 @@ mod tests {
             start("don\n", 3..3, window, cx);
             app.pair_quote("'", window, cx);
             assert_eq!(value(cx), "don'\n");
+
+            // Enter between a fresh pair lays it out over three lines, with
+            // the caret on the line between and the closer at the opener's
+            // indentation. One newline would leave the closer under the caret,
+            // on the line the body was going to go on.
+            start("    if x {}\n", 10..10, window, cx);
+            base.update(cx, |base, cx| base.insert_line_break(window, cx));
+            assert_eq!(value(cx), "    if x {\n        \n    }\n");
+            assert_eq!(caret(cx), 19..19);
+
+            // Anywhere else it is a line break and the indentation of the line
+            // it breaks, which is what it has always been.
+            start("    let x = 1;\n", 14..14, window, cx);
+            base.update(cx, |base, cx| base.insert_line_break(window, cx));
+            assert_eq!(value(cx), "    let x = 1;\n    \n");
+            assert_eq!(caret(cx), 19..19);
+
+            // Quotes are not brackets: a line break inside one is a string
+            // being written over two lines, not a block with a body.
+            start("let s = \"\";\n", 9..9, window, cx);
+            base.update(cx, |base, cx| base.insert_line_break(window, cx));
+            assert_eq!(value(cx), "let s = \"\n\";\n");
+            assert_eq!(caret(cx), 10..10);
         });
     }
 
@@ -7815,6 +7838,16 @@ mod tests {
             });
             assert_eq!(value(cx), "  one\n  \n  two\n  \n");
             assert_eq!(ranges(cx), vec![8..8, 17..17]);
+
+            // Enter between two brackets at once lays out both pairs, and each
+            // caret lands on the line between its own — not at the end of what
+            // was inserted, which is where a caret goes for every other edit.
+            start("if a {}\nif b {}\n", 6..6, window, cx);
+            app.on_active_buffer(cx, |base, cx| base.add_cursor_below(cx));
+            assert_eq!(ranges(cx), vec![6..6, 14..14]);
+            base.update(cx, |base, cx| base.insert_line_break(window, cx));
+            assert_eq!(value(cx), "if a {\n    \n}\nif b {\n    \n}\n");
+            assert_eq!(ranges(cx), vec![11..11, 25..25]);
 
             // A bracket with more than one cursor is typed at each of them
             // rather than paired around one selection.

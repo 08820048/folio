@@ -1,6 +1,6 @@
 use crate::input::{
-    Indent, IndentInline, InputBaseState, Outdent, OutdentInline, RopeExt, element::TextElement,
-    layout::LastLayout, mode::InputMode,
+    Indent, IndentInline, InputBaseState, Outdent, OutdentInline, RopeExt, Selection,
+    element::TextElement, layout::LastLayout, mode::InputMode,
 };
 use gpui::{
     Bounds, Context, EntityInputHandler as _, Hsla, Path, PathBuilder, Pixels, SharedString,
@@ -222,6 +222,65 @@ impl InputBaseState {
             _ => {}
         }
         cx.notify();
+    }
+
+    /// The whitespace the line containing `offset` starts with.
+    pub(super) fn indentation_at(&self, offset: usize) -> String {
+        let row = self.text.offset_to_point(offset).row;
+        self.text
+            .slice_line(row)
+            .chars()
+            .take_while(|c| c.is_whitespace())
+            .collect()
+    }
+
+    /// Whether the selection sits between a pair of brackets that has nothing
+    /// in it: the character before it opens, the one after it closes.
+    ///
+    /// Only the three brackets. A pair of quotes with a line break in it is a
+    /// string that is being written on two lines, which is a different thing
+    /// from a block with a body in it, and is not what the key was pressed
+    /// for.
+    fn between_brackets(&self, selection: Selection) -> bool {
+        if !self.mode.is_code_editor() || !selection.is_empty() {
+            return false;
+        }
+        let offset = selection.end;
+        let Some(before) = self.text.chars_at(offset).reversed().next() else {
+            return false;
+        };
+        let Some(after) = self.text.char_at(offset) else {
+            return false;
+        };
+        matches!((before, after), ('(', ')') | ('[', ']') | ('{', '}'))
+    }
+
+    /// What a line break at `selection` inserts, and where in that text the
+    /// caret ends up.
+    ///
+    /// A newline and the indentation of the line it breaks — or, between an
+    /// empty pair of brackets, the pair laid out over three lines with the
+    /// caret on the middle one. `{`, Enter, the body, `}` is how code gets
+    /// written, and one newline leaves the closer on the line the body was
+    /// going to go on.
+    ///
+    /// Indentation is a code editor's business: a plain multi-line input gets
+    /// the line break and nothing else.
+    pub(super) fn line_break_at(&self, selection: Selection) -> (String, usize) {
+        if !self.mode.is_code_editor() {
+            return ("\n".to_string(), 1);
+        }
+
+        let indent = self.indentation_at(selection.end);
+        if self.between_brackets(selection) {
+            let inner = format!("{indent}{}", self.mode.tab_size().to_string());
+            let text = format!("\n{inner}\n{indent}");
+            return (text, 1 + inner.len());
+        }
+
+        let text = format!("\n{indent}");
+        let caret = text.len();
+        (text, caret)
     }
 
     pub(super) fn indent_inline(

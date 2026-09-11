@@ -1715,43 +1715,25 @@ impl InputBaseState {
         line
     }
 
-    /// Get indent string of next line.
+    /// Enter: a line break at the caret, or at every selection.
     ///
-    /// To get current and next line indent, to return more depth one.
-    pub(super) fn indent_of_next_line(&mut self) -> String {
-        if self.mode.is_single_line() {
-            return "".into();
+    /// Public because it is what an application presses when it means "new
+    /// line"; the `Enter` action reaches it from below. The caret does not
+    /// always end up at the end of what was inserted — between a pair of
+    /// brackets it belongs on the line between them — which is why the
+    /// position comes back from `line_break_at` rather than being assumed.
+    pub fn insert_line_break(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selections.len() > 1 {
+            self.insert_line_break_at_every_selection(window, cx);
+            return;
         }
 
-        let mut current_indent = String::new();
-        let mut next_indent = String::new();
-        let current_line_start_pos = self.start_of_line();
-        let next_line_start_pos = self.end_of_line();
-        for c in self.text.slice(current_line_start_pos..).chars() {
-            if !c.is_whitespace() {
-                break;
-            }
-            if c == '\n' || c == '\r' {
-                break;
-            }
-            current_indent.push(c);
-        }
-
-        for c in self.text.slice(next_line_start_pos..).chars() {
-            if !c.is_whitespace() {
-                break;
-            }
-            if c == '\n' || c == '\r' {
-                break;
-            }
-            next_indent.push(c);
-        }
-
-        if next_indent.len() > current_indent.len() {
-            return next_indent;
-        } else {
-            return current_indent;
-        }
+        let selection = self.selections.primary();
+        let start = selection.start;
+        let (text, caret) = self.line_break_at(selection);
+        self.replace_text_in_range_silent(None, &text, window, cx);
+        self.selections = (start + caret..start + caret).into();
+        self.pause_blink_cursor(cx);
     }
 
     pub(super) fn backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
@@ -1889,21 +1871,7 @@ impl InputBaseState {
         let insert_newline = self.mode.is_multi_line() && (!self.submit_on_enter || action.shift);
 
         if insert_newline {
-            if self.selections.len() > 1 {
-                self.insert_line_break_at_every_selection(window, cx);
-            } else {
-                // Get current line indent
-                let indent = if self.mode.is_code_editor() {
-                    self.indent_of_next_line()
-                } else {
-                    "".to_string()
-                };
-
-                // Add newline and indent
-                let new_line_text = format!("\n{}", indent);
-                self.replace_text_in_range_silent(None, &new_line_text, window, cx);
-                self.pause_blink_cursor(cx);
-            }
+            self.insert_line_break(window, cx);
         } else {
             // Single line input or submit-on-enter: just emit the event
             // (e.g.: in a dialog to confirm, or a chat textarea to send).
