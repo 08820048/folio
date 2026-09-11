@@ -37,6 +37,7 @@ fn main() {
                 KeyBinding::new(&format!("{modifier}-g"), GoToLine, Some("Folio")),
                 KeyBinding::new(&format!("{modifier}-b"), ToggleSidebar, Some("Folio")),
                 KeyBinding::new(&format!("{modifier}-shift-d"), ToggleDiff, Some("Folio")),
+                KeyBinding::new(&format!("{modifier}-alt-b"), ToggleBlame, Some("Folio")),
                 // The editor's own ⌘⇧F, moved off it so `⇧⌘F` can be the
                 // project search everywhere. The action is the component's;
                 // only the key it answers to changes.
@@ -149,6 +150,8 @@ fn main() {
                 Menu::new("View").items([
                     MenuItem::action("Toggle Sidebar", ToggleSidebar),
                     MenuItem::action("Go to Line…", GoToLine),
+                    MenuItem::separator(),
+                    MenuItem::action("Blame", ToggleBlame),
                 ]),
             ]);
             let state = WindowState::load(&config_dir().join("window.json"));

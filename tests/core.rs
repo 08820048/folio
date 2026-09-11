@@ -483,3 +483,77 @@ fn a_file_diff_reports_edits_and_untracked_files() {
     assert!(outside.is_empty());
     assert!(!outside.untracked);
 }
+
+/// Blame is read against the buffer rather than the file on disk: they differ
+/// as soon as anything is typed, and a line number that means the buffer has to
+/// be answered against the buffer.
+#[test]
+fn blame_reports_the_commit_that_wrote_each_line() {
+    use folio::blame;
+    use std::process::Command;
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&["init", "-q"]);
+    let file = root.join("main.rs");
+    fs::write(&file, "let one = 1;\nlet two = 2;\n").unwrap();
+    git(&["add", "."]);
+    git(&[
+        "-c",
+        "user.name=Folio Test",
+        "-c",
+        "user.email=test@localhost",
+        "commit",
+        "-qm",
+        "fixture",
+    ]);
+    fs::write(&file, "let one = 1;\nlet two = 22;\n").unwrap();
+    git(&["add", "."]);
+    git(&[
+        "-c",
+        "user.name=Ada Lovelace",
+        "-c",
+        "user.email=ada@example.com",
+        "commit",
+        "-qm",
+        "second pass",
+    ]);
+
+    let text = fs::read_to_string(&file).unwrap();
+    let read = blame::run(&file, &text).unwrap();
+    assert_eq!(read.lines.len(), 2);
+    assert_eq!(read.lines[0].summary, "fixture");
+    assert_eq!(read.lines[0].author, "Folio Test");
+    assert_eq!(read.lines[1].summary, "second pass");
+    assert_eq!(read.lines[1].author, "Ada Lovelace");
+    // Both commits are made in the same second, so this is the field having
+    // been read at all rather than an ordering.
+    assert!(read.lines[0].time > 0);
+    assert!(read.lines[1].time >= read.lines[0].time);
+
+    // A buffer with a line that was never committed: blame is looked up by
+    // line, so the extra line is the third one and it belongs to no commit.
+    let written = "let one = 1;\nlet two = 22;\nlet three = 3;\n";
+    let read = blame::run(&file, written).unwrap();
+    assert_eq!(read.lines.len(), 3);
+    assert!(read.lines[2].uncommitted());
+    assert_eq!(read.lines[1].summary, "second pass");
+
+    // A file git has never seen has no history to read.
+    let fresh = root.join("未跟踪.rs");
+    fs::write(&fresh, "// new\n").unwrap();
+    assert!(blame::run(&fresh, "// new\n").is_err());
+}

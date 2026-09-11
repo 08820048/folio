@@ -1,7 +1,7 @@
 use crate::assets::FolioIcon;
 use crate::preview::{self, Content};
 use folio::{
-    buffer, diff, editorconfig, fs_op, git,
+    blame, buffer, diff, editorconfig, fs_op, git,
     recent::{self, RecentProject},
     search, session,
     settings::{self, Settings},
@@ -199,6 +199,7 @@ actions!(
         CloseWindow,
         OpenAbout,
         ToggleDiff,
+        ToggleBlame,
         ToggleComment,
         Fold,
         Unfold,
@@ -705,6 +706,11 @@ pub struct Folio {
     /// opening a project and opening a file are both asynchronous and neither
     /// can be started while the other is in flight.
     restore: VecDeque<Restore>,
+    /// The blame being shown for the file being read, when it is on.
+    blame: Option<BlameView>,
+    /// Which blame read is the current one: a read of one file can land after
+    /// the user has moved to another.
+    blame_request: u64,
     /// The file a recovered buffer belongs to, waiting for its own open to
     /// land. Keyed by path so that an open the user started in the meantime
     /// cannot pick it up.
@@ -722,6 +728,12 @@ pub struct Folio {
 /// enough that a crash costs seconds of work, rarely enough that it is not
 /// doing file work while the user types.
 const UNSAVED_EVERY: Duration = Duration::from_secs(5);
+
+/// What the caret's line was last written by, for the file being read.
+struct BlameView {
+    path: PathBuf,
+    blame: blame::Blame,
+}
 
 /// The two files a session lives in, and what has changed in them.
 struct Writes {
@@ -883,6 +895,8 @@ impl Folio {
             session_file: config_dir().join("session.json"),
             unsaved_file: config_dir().join("unsaved.json"),
             restore: VecDeque::new(),
+            blame: None,
+            blame_request: 0,
             restoring: None,
             recovered: 0,
             written_unsaved: session::UnsavedBuffers::new(),
@@ -2636,6 +2650,86 @@ impl Folio {
         cx.notify();
     }
 
+    /// `⌥⌘B`: show what the caret's line was last written by, or stop showing
+    /// it.
+    fn toggle_blame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.blame.take().is_some() {
+            cx.notify();
+            return;
+        }
+        self.read_blame(window, cx);
+    }
+
+    /// Read the blame of the file being read, against what its buffer holds.
+    ///
+    /// The buffer rather than the file, because blame is looked up by line and
+    /// the lines are the buffer's: a file with an edit in it would otherwise
+    /// have everything below that edit attributed to the wrong commit.
+    fn read_blame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(path) = self.project.active.clone() else {
+            return;
+        };
+        let Some(document) = self.project.documents.get(&path) else {
+            // An image preview has no lines to blame.
+            return;
+        };
+        let text = document.editor.read(cx).value().to_string();
+        self.blame_request += 1;
+        let request = self.blame_request;
+        let blamed = path.clone();
+        let task = cx
+            .background_executor()
+            .spawn(async move { blame::run(&blamed, &text) });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            let _ = this.update_in(cx, |this, _, cx| {
+                // The user may have moved on to another file while this was
+                // being read, in which case its own read is the one that counts.
+                if this.blame_request != request {
+                    return;
+                }
+                match result {
+                    Ok(blame) => this.blame = Some(BlameView { path, blame }),
+                    Err(e) => {
+                        this.blame = None;
+                        this.error(format!("Could not read blame: {e}"), cx);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// What the blame strip says for the line the caret is on, if it is on and
+    /// there is anything to say.
+    fn blame_text(&self, cx: &App) -> Option<String> {
+        let view = self.blame.as_ref()?;
+        let path = self.project.active.as_ref()?;
+        if view.path != *path {
+            return None;
+        }
+        let document = self.project.documents.get(path)?;
+        let line = document
+            .editor
+            .read(cx)
+            .base_state()
+            .read(cx)
+            .cursor_position()
+            .line as usize;
+        let blamed = view.blame.line(line)?;
+        if blamed.uncommitted() {
+            return Some("Not committed yet".to_string());
+        }
+        Some(format!(
+            "{} · {}, {} — {}",
+            blamed.short(),
+            blamed.author,
+            relative_time(blamed.time),
+            blamed.summary
+        ))
+    }
+
     /// `⇧⌘D`: show the active file as its changes against HEAD, or go back to
     /// reading it.
     fn toggle_diff(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -3346,6 +3440,11 @@ impl Folio {
                         this.apply_recovered(&path, window, cx);
                         this.update_title(window);
                         this.follow_diff(window, cx);
+                        // The blame belongs to the file that was open, and it
+                        // is not this one.
+                        if this.blame.is_some() {
+                            this.read_blame(window, cx);
+                        }
                     }
                     Err(e) => this.error(e.to_string(), cx),
                 }
@@ -3484,6 +3583,11 @@ impl Folio {
                             {
                                 doc.saved = text;
                                 doc.dirty = doc.editor.read(cx).value() != doc.saved;
+                            }
+                            // The blame was read against the buffer as it was;
+                            // saving is what makes the two agree again.
+                            if this.blame.is_some() {
+                                this.read_blame(window, cx);
                             }
                         }
                         Err(e) => errors.push(format!("{}：{e}", name(&path))),
@@ -5392,6 +5496,9 @@ impl Folio {
     }
 
     fn render_workspace(&self, cx: &mut Context<Self>) -> AnyElement {
+        // Read here rather than stored: what it says is about the line the
+        // caret is on, which moves without anything else changing.
+        let blame = self.blame_text(cx);
         // The changes view takes the whole area, so whatever the editor would
         // have shown steps out of the way rather than being covered up.
         let showing_diff = self.project.diff.is_some();
@@ -5524,6 +5631,24 @@ impl Folio {
                                                     .h_full(),
                                             )
                                         })
+                                        // The line the caret is on, and who last
+                                        // wrote it. One line rather than a
+                                        // column in the gutter: the same
+                                        // reading, without narrowing every line
+                                        // of code for it.
+                                        .when_some(
+                                            blame,
+                                            |el, text| {
+                                                el.child(
+                                                    div()
+                                                        .px_4()
+                                                        .py_1()
+                                                        .text_size(ui(11.))
+                                                        .text_color(cx.theme().muted_foreground)
+                                                        .child(text),
+                                                )
+                                            },
+                                        )
                                     })
                                     .when_some(image, |el, (path, image)| {
                                         el.child(
@@ -6368,6 +6493,9 @@ impl Render for Folio {
             }))
             .on_action(cx.listener(|this, _: &OpenSettings, _, cx| this.show_settings(cx)))
             .on_action(cx.listener(|this, _: &ToggleDiff, window, cx| this.toggle_diff(window, cx)))
+            .on_action(
+                cx.listener(|this, _: &ToggleBlame, window, cx| this.toggle_blame(window, cx)),
+            )
             .on_action(cx.listener(|this, _: &OpenAbout, _, cx| this.show_about(cx)))
             .on_action(
                 cx.listener(|this, _: &ToggleComment, window, cx| this.toggle_comment(window, cx)),
@@ -8595,6 +8723,104 @@ mod tests {
             assert!(session_file.exists());
         });
         assert!(session::load_unsaved(&unsaved_file).is_empty());
+    }
+
+    /// Blame: the strip says who last wrote the line the caret is on, and says
+    /// something else when the caret moves to a line another commit wrote.
+    #[gpui::test]
+    fn blame_follows_the_caret(cx: &mut TestAppContext) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let file = root.join("main.rs");
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "-q"]);
+        std::fs::write(&file, "let one = 1;\nlet two = 2;\n").unwrap();
+        git(&["add", "."]);
+        git(&[
+            "-c",
+            "user.name=Folio Test",
+            "-c",
+            "user.email=test@localhost",
+            "commit",
+            "-qm",
+            "fixture",
+        ]);
+        std::fs::write(&file, "let one = 1;\nlet two = 22;\n").unwrap();
+        git(&["add", "."]);
+        git(&[
+            "-c",
+            "user.name=Ada Lovelace",
+            "-c",
+            "user.email=ada@example.com",
+            "commit",
+            "-qm",
+            "second pass",
+        ]);
+
+        cx.update(gpui_component::init);
+        let cx = cx.add_empty_window();
+        let view = cx.update(|window, cx| {
+            cx.new(|cx| {
+                let mut app = Folio::new(window, cx);
+                app.recent_task = None;
+                app.recent_file = root.join("recent.json");
+                app.settings_file = root.join("settings.json");
+                app.window_file = root.join("window.json");
+                app.settings = Settings::default();
+                app.applied_ignored = app.settings.ignored.clone();
+                app
+            })
+        });
+        view.update_in(cx, |app, window, cx| {
+            app.request(Next::Open(root.clone()), window, cx)
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |app, window, cx| {
+            app.open_file(file.clone(), window, cx)
+        });
+        cx.run_until_parked();
+
+        view.update_in(cx, |app, _, cx| {
+            // Nothing is shown until it is asked for.
+            assert!(app.blame_text(cx).is_none());
+        });
+        view.update_in(cx, |app, window, cx| app.toggle_blame(window, cx));
+        // The blame is a git call, which happens behind the window.
+        cx.run_until_parked();
+
+        view.update_in(cx, |app, _, cx| {
+            let base = app.project.documents[&file]
+                .editor
+                .read(cx)
+                .base_state()
+                .clone();
+            let text = app.blame_text(cx).expect("a line to blame");
+            assert!(text.contains("fixture"), "{text}");
+            assert!(text.contains("Folio Test"), "{text}");
+
+            // The second line was rewritten by someone else.
+            base.update(cx, |base, cx| base.set_selected_range(17..17, cx));
+            let text = app.blame_text(cx).expect("a line to blame");
+            assert!(text.contains("second pass"), "{text}");
+            assert!(text.contains("Ada Lovelace"), "{text}");
+        });
+
+        view.update_in(cx, |app, window, cx| {
+            app.toggle_blame(window, cx);
+            assert!(app.blame_text(cx).is_none());
+        });
     }
 
     /// The shortcut strings the menus print are matched against real

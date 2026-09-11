@@ -59,6 +59,7 @@ does not survive a restart.
 | Select column up | ⇧⌥↑ | Ctrl+Shift+Alt+Up |
 | Select column down | ⇧⌥↓ | Ctrl+Shift+Alt+Down |
 | Show file changes | ⇧⌘D | Ctrl+Shift+D |
+| Blame | ⌥⌘B | Ctrl+Alt+B |
 | Settings | ⌘, | Ctrl+, |
 | Close project | ⌘W | Ctrl+W |
 | Quit | ⌘Q | Ctrl+Q |
@@ -312,6 +313,19 @@ reads the file itself. Outside a repository, or with git not installed, there
 is nothing to show. Escape, `⌘⇧D` again, the close button in the header, or
 Hide File Changes on the view's own right-click all put the editor back.
 
+`⌥⌘B`, or Blame in the View menu, shows what the line the caret is on was last
+written by — short hash, author, when, and the commit's summary — in a strip
+under the code. It follows the caret, so reading down a function tells you who
+wrote each part of it. A line that is not committed yet says so.
+
+It is one line rather than a column in the gutter, which keeps every line of
+code its full width, and blame is read against the *buffer* rather than the file
+on disk: `git blame --contents` blames the text the editor is showing, so an
+edit does not throw every line below it onto the wrong commit. What is read is
+read when the strip is turned on, when a file is opened, and after a save;
+editing in between leaves it describing the lines as they were until one of
+those happens.
+
 ## Settings
 
 `⌘,`, or Settings… in the app menu, opens a window of its own rather than a
@@ -465,7 +479,8 @@ the two rules that decide where a bracket may pair, the `.editorconfig` reader
 — its globs, its sections applied in order, `unset` removing a property, `root`
 ending the search and the nearest file winning — the session files against real
 bytes (a round trip, paths that are gone being dropped, a corrupt file reading
-as an empty session), and project search (case,
+as an empty session), blame against a real repository — including a buffer with
+a line that was never committed — and project search (case,
 whole word, regex, long-line windowing, CRLF, multi-byte columns, capture-group
 replacement, skipping binary and oversized files). `desktop-tests` uses the
 GPUI test executor for the rest: repeated expand and collapse, recents written
@@ -566,8 +581,9 @@ is no fold-all: the two keys fold and unfold one block. A brace group in an
 `.editorconfig` pattern holding a range rather than a list, `{1..3}`, is the
 one part of that format not read. The session is written every few seconds, so a
 crash can lose the last few seconds of tab changes, and a recovered buffer whose
-project is no longer in the session is dropped rather than shown. The changes
-view is a unified diff — there is
+project is no longer in the session is dropped rather than shown. Blame is one
+line at a time rather than a gutter, and describes the lines as they were when
+it was read. The changes view is a unified diff — there is
 no side-by-side — and its counts count rows, so a changed line reads as one
 gone and one arrived. Window geometry is written when a window closes and again
 on quit, so a force-killed process loses wherever the windows were — the same
