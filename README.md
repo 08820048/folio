@@ -35,8 +35,9 @@ Once a project is open, pick a file in the tree or press `⌘P` to fuzzy-match
 file names. Type `:123` to go to a line. Switching files keeps each one's
 cursor, contents and undo history; closing a project releases that project's
 buffers. Click "Add Project" in the sidebar to bring in more folders — each
-keeps its own buffers and expansion state — though the list of open projects
-does not survive a restart.
+keeps its own buffers and expansion state, and the whole set comes back on the
+next launch, with each project's tabs in order and the file that was on screen
+(see [Sessions](#sessions)).
 
 | Action | macOS | Windows / Linux |
 | --- | --- | --- |
@@ -564,20 +565,23 @@ matches. Project search skips files above 2 MiB and caps results at 1000
 matches over 200 files, with no streaming results and no cancel button. Bitmaps
 are capped at 32M pixels and 16,384 pixels per side, and SVG rasterization is
 size-limited by GPUI. Git status refreshes when a project is opened or switched
-and after a save. Move to Trash goes through Finder, so macOS raises an
-automation permission prompt the first time and a refusal surfaces as an error;
-the Recycle Bin and `gio trash` paths behind the other platforms are written
-but untested on real hardware. Multi-cursor covers typing, pasting, deleting,
-Enter and the four cursor commands, and stops there: there is no `⌥`-click to
-add a cursor, an arrow key collapses the set rather than moving it, and the
-word- and line-delete commands (`⌥⌫`, `⌥⌦`, `⌘⌫`, `⌘⌦`) were left as they
-were, so they can act on one cursor rather than all of them. An edit through
-the set is one step on the undo stack and comes back in one, though the cursors
-it covered are not restored. Enter indents to the line it breaks, but not when
-the line merely ends with an opener: a `{` whose pair is not there — deleted,
-or never inserted because the character in front of it was a word — gets the
-break and no extra level. Folding is not remembered across a restart, and there
-is no fold-all: the two keys fold and unfold one block. A brace group in an
+and after a save. A file that changes on disk while it is open is noticed by the
+conflict check when a save runs, and not before — there is no file-system
+watcher, so nothing reports an outside edit as it happens. Move to Trash goes
+through Finder, so macOS raises an automation permission prompt the first time
+and a refusal surfaces as an error; the Recycle Bin and `gio trash` paths behind
+the other platforms are written but untested on real hardware. Multi-cursor
+covers typing, pasting, deleting, Enter and the four cursor commands, and stops
+there: there is no `⌥`-click to add a cursor, an arrow key collapses the set
+rather than moving it, and the word- and line-delete commands (`⌥⌫`, `⌥⌦`,
+`⌘⌫`, `⌘⌦`) were left as they were, so they can act on one cursor rather than
+all of them. An edit through the set is one step on the undo stack and comes
+back in one, though the cursors it covered are not restored. Enter indents to
+the line it breaks, but not when the line merely ends with an opener: a `{`
+whose pair is not there — deleted, or never inserted because the character in
+front of it was a word — gets the break and no extra level. Folding is not
+remembered across a restart, and there is no fold-all: the two keys fold and
+unfold one block. A brace group in an
 `.editorconfig` pattern holding a range rather than a list, `{1..3}`, is the
 one part of that format not read. The session is written every few seconds, so a
 crash can lose the last few seconds of tab changes, and a recovered buffer whose
@@ -592,8 +596,16 @@ it. Window geometry is written when a window closes and again
 on quit, so a force-killed process loses wherever the windows were — the same
 is true of the settings window. The settings sidebar has no search box, and its
 pages do not scroll, which is fine at five pages and would need fixing before
-there were many more.
+there were many more. Word wrap is off and not offered: a long line scrolls
+sideways, and there is no switch for it. Neither the sidebar nor the toast
+animates — the sidebar is drawn at its width and the toast is a layer that
+removes itself after two seconds. Times in the recent list are the English
+relative strings `just now`, `N hours ago` and `N days ago` rather than anything
+formatted for the system locale, and the interface itself is English only. The
+performance targets in the specification have not been measured, and the
+Windows, Linux, input-method and accessibility checks have not been run.
 
-Full progress and the outstanding acceptance items are in
-[docs/开发进度.md](docs/开发进度.md); the original requirements are in
-[docs/Folio需求文档.md](docs/Folio需求文档.md). Both are in Chinese.
+The specification in [docs/Folio需求文档.md](docs/Folio需求文档.md) is revised
+to match what is implemented, and lists what is not. Full progress and the
+outstanding acceptance items are in
+[docs/开发进度.md](docs/开发进度.md). Both are in Chinese.
