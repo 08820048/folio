@@ -206,6 +206,8 @@ actions!(
         SelectAllOccurrences,
         AddCursorAbove,
         AddCursorBelow,
+        SelectColumnUp,
+        SelectColumnDown,
         PairParen,
         PairBracket,
         PairBrace,
@@ -6097,6 +6099,12 @@ impl Render for Folio {
             .on_action(cx.listener(|this, _: &AddCursorBelow, _, cx| {
                 this.on_active_buffer(cx, |base, cx| base.add_cursor_below(cx))
             }))
+            .on_action(cx.listener(|this, _: &SelectColumnUp, _, cx| {
+                this.on_active_buffer(cx, |base, cx| base.extend_box(-1, cx))
+            }))
+            .on_action(cx.listener(|this, _: &SelectColumnDown, _, cx| {
+                this.on_active_buffer(cx, |base, cx| base.extend_box(1, cx))
+            }))
             // These are bound to the code editor's own key context, so the
             // search box and the settings fields keep typing brackets the
             // ordinary way.
@@ -7885,6 +7893,106 @@ mod tests {
             app.on_active_buffer(cx, |base, cx| base.add_cursor_below(cx));
             app.toggle_comment(window, cx);
             assert_eq!(value(cx), "// x = 1;\n// y = 2;\n");
+        });
+    }
+
+    /// Column selection: a rectangle becomes one selection per line it covers,
+    /// and typing replaces every line of it.
+    #[gpui::test]
+    fn a_column_selection_covers_a_rectangle(cx: &mut TestAppContext) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let file = root.join("main.rs");
+        std::fs::write(&file, "fn main() {}\n").unwrap();
+        cx.update(gpui_component::init);
+        let cx = cx.add_empty_window();
+        let view = cx.update(|window, cx| {
+            cx.new(|cx| {
+                let mut app = Folio::new(window, cx);
+                app.recent_task = None;
+                app.recent_file = root.join("recent.json");
+                app.settings_file = root.join("settings.json");
+                app.window_file = root.join("window.json");
+                app.settings = Settings::default();
+                app.applied_ignored = app.settings.ignored.clone();
+                app
+            })
+        });
+        view.update_in(cx, |app, window, cx| {
+            app.request(Next::Open(root.clone()), window, cx)
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |app, window, cx| {
+            app.open_file(file.clone(), window, cx)
+        });
+        cx.run_until_parked();
+
+        view.update_in(cx, |app, window, cx| {
+            let base = app.project.documents[&file]
+                .editor
+                .read(cx)
+                .base_state()
+                .clone();
+            let value = |cx: &App| base.read(cx).value().to_string();
+            let ranges = |cx: &App| base.read(cx).selected_ranges();
+            let start = |text: &str,
+                         selection: std::ops::Range<usize>,
+                         window: &mut Window,
+                         cx: &mut Context<Folio>| {
+                base.update(cx, |base, cx| {
+                    base.set_value(text, window, cx);
+                    base.set_selected_range(selection, cx);
+                });
+            };
+
+            // The keys grow a column of carets, a line at a time, and take it
+            // back the same way.
+            start("aaa\nbbb\nccc\n", 1..1, window, cx);
+            app.on_active_buffer(cx, |base, cx| {
+                base.extend_box(1, cx);
+            });
+            assert_eq!(ranges(cx), vec![1..1, 5..5]);
+            app.on_active_buffer(cx, |base, cx| {
+                base.extend_box(1, cx);
+            });
+            assert_eq!(ranges(cx), vec![1..1, 5..5, 9..9]);
+            app.on_active_buffer(cx, |base, cx| {
+                base.extend_box(-1, cx);
+            });
+            assert_eq!(ranges(cx), vec![1..1, 5..5]);
+
+            // The mouse's rectangle: the columns between the corner it started
+            // at and the one it was dragged to, on every line between them.
+            start("aaa\nbbb\nccc\n", 0..0, window, cx);
+            base.update(cx, |base, cx| {
+                base.begin_box(0, cx);
+                base.drag_box_to(10, cx);
+            });
+            assert_eq!(ranges(cx), vec![0..2, 4..6, 8..10]);
+
+            // Typing goes into every line of it, as one edit.
+            base.update(cx, |base, cx| {
+                base.replace_in_every_selection("X", window, cx)
+            });
+            assert_eq!(value(cx), "Xa\nXb\nXc\n");
+            assert_eq!(ranges(cx), vec![1..1, 4..4, 7..7]);
+
+            // A line too short for the rectangle gives up at its own end
+            // rather than reaching into the next one.
+            start("aaa\nb\nccc\n", 0..0, window, cx);
+            base.update(cx, |base, cx| {
+                base.begin_box(0, cx);
+                base.drag_box_to(8, cx);
+            });
+            assert_eq!(ranges(cx), vec![0..2, 4..5, 6..8]);
+
+            // A movement is not part of the rectangle, so the keys start a new
+            // one from where the caret has gone.
+            base.update(cx, |base, cx| base.set_selected_range(1..1, cx));
+            app.on_active_buffer(cx, |base, cx| {
+                base.extend_box(1, cx);
+            });
+            assert_eq!(ranges(cx), vec![1..1, 5..5]);
         });
     }
 

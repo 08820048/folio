@@ -53,12 +53,12 @@ rather than a read of the whole crate.
   the set the editor edits through, ordered, non-overlapping, primary last, and
   the operations a multi-cursor is built out of.
 - `input/base/multi_cursor.rs` — new. The commands that make more than one
-  selection, the edit that lands at every one of them, and the collapse back to
-  one.
+  selection, the edit that lands at every one of them, the collapse back to one,
+  and the rectangle the mouse and the column keys draw.
 - `input/base/state.rs` — where the set is read and written: a keystroke, a
   backspace, an Enter, an escape, a paste and a cut, and the hooks that reach
-  `multi_cursor.rs` — plus the two folding commands and what they do with a
-  caret the fold has hidden.
+  `multi_cursor.rs`, an option-drag among them — plus the two folding commands
+  and what they do with a caret the fold has hidden.
 - `input/base/element.rs` — drawing every selection as a path of its own and
   every caret as a quad, in the coordinates the primary's already used.
 - `input/editor/indent.rs` — `line_break_at`: what Enter inserts and where the

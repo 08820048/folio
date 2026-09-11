@@ -270,6 +270,20 @@ pub(crate) fn init(cx: &mut App) {
     ]);
 }
 
+/// A rectangle being selected: the corner it was started from and the corner
+/// the pointer or the key has taken it to, each a line and a byte column in it.
+///
+/// A box is not a kind of selection. Drawing one produces a set of them, one
+/// per line, all with the same columns; the two corners are what is kept while
+/// it is being drawn, and the set is rebuilt from them on every move.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct BoxSelection {
+    pub(super) anchor_row: usize,
+    pub(super) anchor_column: usize,
+    pub(super) focus_row: usize,
+    pub(super) focus_column: usize,
+}
+
 /// InputBaseState to keep editing state of the [`super::Input`].
 pub struct InputBaseState {
     pub(super) focus_handle: FocusHandle,
@@ -300,6 +314,8 @@ pub struct InputBaseState {
     pub(super) last_bounds: Option<Bounds<Pixels>>,
     pub(super) last_selected_range: Option<Selection>,
     pub(super) selecting: bool,
+    /// The rectangle the mouse or the column keys are drawing, if they are.
+    pub(super) box_selection: Option<BoxSelection>,
     pub(crate) disabled: bool,
     pub(crate) readonly: bool,
     pub(crate) text_align: TextAlign,
@@ -581,6 +597,7 @@ impl InputBaseState {
             ime_marked_range: None,
             input_bounds: Bounds::default(),
             selecting: false,
+            box_selection: None,
             disabled: false,
             readonly: false,
             text_align: TextAlign::Left,
@@ -2079,6 +2096,13 @@ impl InputBaseState {
             return;
         }
 
+        // The option key is what makes a drag a rectangle instead of a run of
+        // text: the same columns on every line it covers.
+        if event.modifiers.alt {
+            self.begin_box(offset, cx);
+            return;
+        }
+
         if event.modifiers.shift {
             self.select_to(offset, cx);
         } else {
@@ -2535,6 +2559,7 @@ impl InputBaseState {
     /// Ensure the offset use self.next_boundary or self.previous_boundary to get the correct offset.
     pub(crate) fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
         self.clear_inline_completion(cx);
+        self.end_box();
 
         let offset = offset.clamp(0, self.text.len());
         if self.selection_reversed {
@@ -2744,7 +2769,7 @@ impl InputBaseState {
 
         self.auto_scroll.last_drag_position = Some(event.position);
         let offset = self.index_for_mouse_position(event.position);
-        self.select_to(offset, cx);
+        self.drag_to(offset, cx);
 
         if !self.mode.is_single_line() {
             let delta = AutoScroll::compute_delta(event.position.y, self.input_bounds);
@@ -2755,9 +2780,19 @@ impl InputBaseState {
                 state.update_scroll_offset(Some(point(current.x, current.y + delta)), cx);
                 if let Some(pos) = state.auto_scroll.last_drag_position {
                     let offset = state.index_for_mouse_position(pos);
-                    state.select_to(offset, cx);
+                    state.drag_to(offset, cx);
                 }
             });
+        }
+    }
+
+    /// During a drag: the rectangle follows the pointer if one is being drawn,
+    /// and the selection otherwise.
+    fn drag_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        if self.box_selection.is_some() {
+            self.drag_box_to(offset, cx);
+        } else {
+            self.select_to(offset, cx);
         }
     }
 
@@ -3013,6 +3048,10 @@ impl EntityInputHandler for InputBaseState {
         if !self.is_editable() {
             return;
         }
+
+        // An edit through the set leaves carets behind, which two corners
+        // cannot describe.
+        self.end_box();
 
         if self.blink_cursor.read(cx).visible() {
             self.pause_blink_cursor(cx);

@@ -17,7 +17,7 @@ use std::ops::Range;
 use gpui::{Context, EntityInputHandler as _, Window};
 use sum_tree::Bias;
 
-use super::{InputBaseState, Selection};
+use super::{BoxSelection, InputBaseState, Selection};
 use crate::input::change::Change;
 use crate::input::{RopeExt as _, SearchMatcher};
 
@@ -191,11 +191,136 @@ impl InputBaseState {
             return false;
         }
         self.selections.select_only(self.selections.primary());
+        self.end_box();
         self.selected_word_range = None;
         self.pause_blink_cursor(cx);
         self.update_preferred_column();
         cx.notify();
         true
+    }
+}
+
+/// The rectangle: dragged with the mouse, or grown a line at a time with the
+/// column keys.
+///
+/// What it makes is the ordinary set of selections — one per line, the same
+/// columns on each — so everything else here treats a box as what it is: typing
+/// lands on every line of it, `⌘D` adds to it, Escape collapses it to the caret.
+/// Only the two corners are kept while it is being drawn.
+impl InputBaseState {
+    /// Start a rectangle at `offset`: where the mouse went down, or the caret.
+    pub fn begin_box(&mut self, offset: usize, cx: &mut Context<Self>) {
+        if !self.mode.is_multi_line() {
+            return;
+        }
+        let point = self.text.offset_to_point(offset);
+        self.box_selection = Some(BoxSelection {
+            anchor_row: point.row,
+            anchor_column: point.column,
+            focus_row: point.row,
+            focus_column: point.column,
+        });
+        self.selections.select_only(offset..offset);
+        self.pause_blink_cursor(cx);
+        cx.notify();
+    }
+
+    /// Take the rectangle's moving corner to `offset`, which is what a drag
+    /// does with it.
+    pub fn drag_box_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        let Some(mut box_selection) = self.box_selection else {
+            return;
+        };
+        let point = self.text.offset_to_point(offset);
+        box_selection.focus_row = point.row;
+        box_selection.focus_column = point.column;
+        self.box_selection = Some(box_selection);
+        self.apply_box(cx);
+    }
+
+    /// Grow or shrink the rectangle by a line, starting one from the caret when
+    /// there is none yet.
+    ///
+    /// This is what makes a column of carets: press it twice from a caret and
+    /// three lines have one each, in the column the caret was in.
+    pub fn extend_box(&mut self, step: isize, cx: &mut Context<Self>) {
+        if !self.mode.is_multi_line() || step == 0 {
+            return;
+        }
+        let current = match self.box_selection {
+            Some(box_selection) => box_selection,
+            None => {
+                let point = self.text.offset_to_point(self.cursor());
+                BoxSelection {
+                    anchor_row: point.row,
+                    anchor_column: point.column,
+                    focus_row: point.row,
+                    focus_column: point.column,
+                }
+            }
+        };
+        let last = self.text.lines_len().saturating_sub(1) as isize;
+        let row = (current.focus_row as isize + step).clamp(0, last) as usize;
+        self.box_selection = Some(BoxSelection {
+            focus_row: row,
+            ..current
+        });
+        self.apply_box(cx);
+    }
+
+    /// The rectangle is over: something has taken the set somewhere two corners
+    /// cannot describe.
+    pub(super) fn end_box(&mut self) {
+        self.box_selection = None;
+    }
+
+    /// Rebuild the set from the corners: one selection per line the rectangle
+    /// covers, spanning the columns between them.
+    fn apply_box(&mut self, cx: &mut Context<Self>) {
+        let Some(box_selection) = self.box_selection else {
+            return;
+        };
+        let rows = box_selection.anchor_row.min(box_selection.focus_row)
+            ..=box_selection.anchor_row.max(box_selection.focus_row);
+        let first = box_selection
+            .anchor_column
+            .min(box_selection.focus_column);
+        let last = box_selection
+            .anchor_column
+            .max(box_selection.focus_column);
+
+        let mut selections = Vec::with_capacity(rows.clone().count());
+        let mut focus = None;
+        for row in rows {
+            let start = self.text.line_start_offset(row);
+            let end = start + self.text.line_len(row);
+            // A short line gives up at its own end rather than reaching into
+            // the next one, which is what a rectangle means on ragged text.
+            let from = self.column_offset(start, first).min(end);
+            let to = self.column_offset(start, last).min(end);
+            let selection = Selection::new(from, to);
+            if row == box_selection.focus_row {
+                focus = Some(selection);
+            }
+            selections.push(selection);
+        }
+
+        // The corner being moved is the one the caret is in, so the view and
+        // the next keystroke follow the pointer rather than the anchor.
+        match focus {
+            Some(focus) => self.selections.replace_all_keeping(selections, focus),
+            None => self.selections.replace_all(selections),
+        }
+        self.pause_blink_cursor(cx);
+        self.update_preferred_column();
+        cx.notify();
+    }
+
+    /// The offset `column` bytes into the line starting at `start`, on a
+    /// character boundary — a column can land inside a wide character on the
+    /// lines that have one.
+    fn column_offset(&self, start: usize, column: usize) -> usize {
+        self.text.clip_offset(start + column, Bias::Left)
     }
 }
 

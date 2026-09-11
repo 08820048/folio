@@ -56,6 +56,8 @@ does not survive a restart.
 | Select all occurrences | ⇧⌘L | Ctrl+Shift+L |
 | Add cursor above | ⌥⌘↑ | Ctrl+Alt+Up |
 | Add cursor below | ⌥⌘↓ | Ctrl+Alt+Down |
+| Select column up | ⇧⌥↑ | Ctrl+Shift+Alt+Up |
+| Select column down | ⇧⌥↓ | Ctrl+Shift+Alt+Down |
 | Show file changes | ⇧⌘D | Ctrl+Shift+D |
 | Settings | ⌘, | Ctrl+, |
 | Close project | ⌘W | Ctrl+W |
@@ -258,6 +260,16 @@ joins the selections with newlines, so pasting them somewhere else gives back
 one line each. However many selections the edit covered, it is one edit: one
 step on the undo stack, and one change to the file.
 
+**A rectangle puts a selection on every line it covers.** Drag with `⌥` held, or
+press `⇧⌥↑` / `⇧⌥↓` at a caret to grow a column of them a line at a time.
+Typing then lands on every line of it, as one edit, like any other set. A line
+too short for the rectangle gives up at its own end rather than reaching into
+the next one, and any movement or click ends the rectangle and leaves the
+ordinary set behind.
+
+The columns are counted in characters rather than in pixels: on lines holding
+tabs or wide characters, it is a column of text rather than a drawn rectangle.
+
 Three things do not multiply, and each says so rather than half-working. A
 bracket is typed at every cursor instead of pairing around a selection, because
 with several there is no single selection to wrap. `⌘/` comments the block from
@@ -453,6 +465,8 @@ the caret and where the caret goes when the line under it stops being drawn,
 a project's `.editorconfig` deciding what indentation an opened file gets,
 comment toggling, the
 multi-cursor commands with the edit that lands at every selection they make,
+a rectangle becoming a selection on every line it covers and stopping at the
+end of a short one,
 and the changes view following the active file. What no test covers is the
 Trash call itself: it would move real files and raise an automation prompt. The
 guard that stops to confirm when unsaved edits are under the entry, and that

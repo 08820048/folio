@@ -46,6 +46,9 @@ impl InputBaseState {
     ) {
         let offset = offset.clamp(0, self.text.len());
         self.cursor_line_end_affinity = false;
+        // A movement is not part of drawing a rectangle: it takes the set
+        // somewhere two corners cannot describe.
+        self.end_box();
         self.selections = (offset..offset).into();
         self.scroll_to(offset, direction, cx);
         self.pause_blink_cursor(cx);

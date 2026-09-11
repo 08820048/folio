@@ -70,6 +70,19 @@ fn main() {
                     AddCursorBelow,
                     Some("FolioEditor"),
                 ),
+                // Column selection adds a line to a rectangle rather than a
+                // cursor: the same key with shift, the way the mouse gets a
+                // rectangle by holding option.
+                KeyBinding::new(
+                    &format!("{modifier}-alt-shift-up"),
+                    SelectColumnUp,
+                    Some("FolioEditor"),
+                ),
+                KeyBinding::new(
+                    &format!("{modifier}-alt-shift-down"),
+                    SelectColumnDown,
+                    Some("FolioEditor"),
+                ),
                 // Bound to the code editor's key context rather than the app's,
                 // so brackets still type normally in the search box and the
                 // settings fields. These replace the editor's own handling of
@@ -127,6 +140,8 @@ fn main() {
                     MenuItem::separator(),
                     MenuItem::action("Add Cursor Above", AddCursorAbove),
                     MenuItem::action("Add Cursor Below", AddCursorBelow),
+                    MenuItem::action("Select Column Up", SelectColumnUp),
+                    MenuItem::action("Select Column Down", SelectColumnDown),
                     MenuItem::separator(),
                     MenuItem::action("Find", input::Search),
                     MenuItem::action("Replace in File", input::Replace),
