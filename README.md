@@ -48,6 +48,8 @@ does not survive a restart.
 | Find in file | ⌘F | Ctrl+F |
 | Go to line | ⌘G | Ctrl+G |
 | Toggle sidebar | ⌘B | Ctrl+B |
+| Toggle comment | ⌘/ | Ctrl+/ |
+| Show file changes | ⇧⌘D | Ctrl+Shift+D |
 | Settings | ⌘, | Ctrl+, |
 | Close project | ⌘W | Ctrl+W |
 | Quit | ⌘Q | Ctrl+Q |
@@ -59,8 +61,8 @@ bar are gone. The sidebar is drag-resizable. Its top row shows the project
 folder's name and collapses or expands the whole tree on click, keeping
 subdirectory state, and it also answers to Enter, Space and the left and right
 arrows. The file tree takes the arrow keys and Enter. Editing uses
-gpui-component's Rope editor and a Tree-sitter allowlist; the defaults are
-14px type, 1.6 line height, a 4-space indent and no soft wrap.
+gpui-component's Rope editor and a Tree-sitter allowlist; type sizes, font and
+indentation come from the settings, and soft wrap is off.
 
 Images preview in place, scaled to fit: PNG, JPEG, GIF, WebP, BMP, TIFF, ICO
 and SVG. GIF and WebP show their first frame, and an image never enters the
@@ -127,6 +129,87 @@ confirm when unsaved edits sit under the entry, which it would otherwise drop
 silently. Both release the buffers, previews and cached directories that
 pointed at the entry. Reveal, Open in Default App and Open in Terminal hand the
 path to the OS, so what they launch follows the platform.
+
+## Tabs
+
+Every file opened gets a tab, in a strip above the code. The strip is 26px and
+appears only once a second file is open, so a single file looks exactly as it
+did before tabs existed. A tab carries the file's name, a mark when its buffer
+has edits that are not on disk, and a close button. Opening a file that already
+has a tab focuses it rather than adding another.
+
+Closing a tab with unsaved changes asks first — Save, Don't Save or Cancel —
+and Save writes only that file, not every dirty buffer open alongside it. The
+buffer is released when the tab goes, and the tab that slid into its place
+takes over unless the closed one was in the background.
+
+Tabs can be dragged. A tab dropped on another lands in that tab's place and
+everything between shifts back towards where it came from, which reaches every
+position including the last and moves a tab one slot in either direction. A
+caret between the tabs shows where it will land. Pinned tabs stay at the front:
+a drop can neither strand one among the unpinned ones nor put an unpinned one
+ahead of them. Dropping a tab on itself changes nothing, which is how a drag is
+abandoned.
+
+The strip has its own right-click menu, acting on the tab that was clicked
+rather than on the one showing:
+
+- **Close**, **Close Others**, **Close Left**, **Close Right**, **Close Clean**
+  (the tabs with nothing unsaved) and **Close All**. Every one of them leaves
+  pinned tabs alone.
+- **Make Tab Read-Only** locks the buffer against edits. It is view state and
+  never touches the file's permissions, and the entry turns into "Make Tab
+  Writable" once it is on.
+- **Copy Path** and **Copy Relative Path** put one of them on the system
+  clipboard.
+- **Reveal in Finder** and **Open in Terminal**, the terminal opening at the
+  folder holding the file.
+- **Pin Tab**, which moves it to the front and takes it out of the bulk closes'
+  reach.
+- **Reveal In Project Panel**, which opens the folders above the file and puts
+  the tree's cursor on its row.
+
+An entry that would do nothing is disabled — Close Left on the first tab, Close
+Others when everything else is pinned.
+
+## Editing
+
+Two things beyond plain typing, both bound to the code editor's own key
+context so they never reach the search box or a settings field.
+
+**Brackets pair.** `(`, `[`, `{`, `"`, `'` and `` ` `` insert both characters
+and leave the caret between them, as one edit and so one step on the undo
+stack. With a selection they wrap it instead. A closing bracket typed where one
+already is steps over it rather than adding a second.
+
+Neither happens where it would do harm, which is the part worth spelling out
+because both rules come from Zed's editor. A closer is only inserted in front
+of whitespace or another closer — anywhere else it would swallow the word that
+is already there, turning `foo` into `()foo` where `(foo` was meant. And a
+quote after a word is not opening a quote: it is an apostrophe or a lifetime,
+so it is typed as itself and `don't` stays `don't`.
+
+**`⌘/` comments lines.** It works on every line the selection touches, so a
+caret comments one line and a selection comments the lines it covers. The
+marker follows the language: `//`, `#`, `--`, `%` or `;`. It goes after the
+indentation rather than at the start of the line, blank lines do not block the
+toggle, and a selection that is only partly commented gets commented rather
+than uncommented. The block is left selected, so the same shortcut undoes it.
+Languages whose comments are only a block form — HTML, XML, CSS, Markdown,
+JSON — say so instead of inserting a marker the file cannot use.
+
+## File changes
+
+`⇧⌘D`, or Show File Changes on the editor's right-click, replaces the editor
+with the active file's changes against HEAD: both line numbers in a gutter, a
+marker, the line itself, tinted green or red, with hunk headers on their own
+rows and a count of what changed. The view follows the file, so a review can
+walk the tree rather than reopening it per file.
+
+A file git has never seen is shown as all new, which is the one case the view
+reads the file itself. Outside a repository, or with git not installed, there
+is nothing to show. Escape, `⌘⇧D` again, the close button in the header, or
+Hide File Changes on the view's own right-click all put the editor back.
 
 ## Settings
 
@@ -215,8 +298,7 @@ truncated" when it hits that ceiling.
 ## Syntax highlighting
 
 Highlighting comes from Tree-sitter. gpui-component ships 37 grammars;
-`src/syntax.rs` registers 23 more through the public `LanguageRegistry`,
-without patching or forking the component library:
+`src/syntax.rs` registers 23 more through the public `LanguageRegistry`:
 
 | Source | Languages |
 | --- | --- |
@@ -266,7 +348,9 @@ status, the extension-to-grammar map, the file operations behind the tree menu
 (create collisions, a recursive duplicate and rename, paste refusals, a
 case-only rename, deleting a tree), the settings file against real bytes
 (defaults, round trip, clamping, unknown keys, a corrupt file left alone), the
-ignore list reaching both the tree and the index, and project search (case,
+ignore list reaching both the tree and the index, the diff parser on
+hand-written hunks and against a real repository, the line-comment markers and
+the two rules that decide where a bracket may pair, and project search (case,
 whole word, regex, long-line windowing, CRLF, multi-byte columns, capture-group
 replacement, skipping binary and oversized files). `desktop-tests` uses the
 GPUI test executor for the rest: repeated expand and collapse, recents written
@@ -277,8 +361,11 @@ project search reading unsaved content, landing the cursor on a hit, and the
 open-buffer-in-memory versus closed-file-on-disk split in replace, the tree
 menu driving create, rename, cut, paste, duplicate, delete and Find in Folder
 — including the entries the root menu omits, both windows' geometry being
-recorded where the app was told to write it, and the settings form's every page
-with its headings open and shut. What no test covers is the Trash call itself:
+recorded where the app was told to write it, the settings form's every page
+with its headings open and shut, tabs opening, closing and guarding unsaved
+changes, the tab menu's bulk closes and what pinning keeps out of them, drag
+reordering in both directions, brackets pairing and stepping over, comment
+toggling, and the changes view following the active file. What no test covers is the Trash call itself:
 it would move real files and raise an automation prompt. The guard that stops
 to confirm when unsaved edits are under the entry, and that cancelling leaves
 the entry alone, is covered. Nor is `⌘,` opening the settings window: a test
@@ -313,6 +400,14 @@ Only the GPUI framework and the components actually used are compiled; none of
 Zed's editor, language or workspace application modules are involved. Cargo's
 Git source download still fetches a checkout of the upstream repository.
 
+The component library may be forked. A feature that needs something its public
+API does not reach — an editor with more than one cursor, say, which the pinned
+input has no model for — is allowed to vendor the crate it lives in and point
+at it with a `[patch]`, rather than being dropped. What keeps that reviewable
+is the pin: the fork is a diff against one known revision, so an upgrade is a
+rebase against a named commit rather than a merge against a moving target.
+Nothing here has been forked yet; this records the option, not a change.
+
 ## Current limits
 
 This is a runnable development version. First-release performance and
@@ -326,7 +421,12 @@ size-limited by GPUI. Git status refreshes when a project is opened or switched
 and after a save. Move to Trash goes through Finder, so macOS raises an
 automation permission prompt the first time and a refusal surfaces as an error;
 the Recycle Bin and `gio trash` paths behind the other platforms are written
-but untested on real hardware. Window geometry is written when a window closes
+but untested on real hardware. There is no multi-cursor: the pinned editor
+holds a single selection and has no model for more, so it needs the component
+library forked before it can exist. A bracket pair does not indent when Enter
+is pressed between the two. The changes view is a unified diff — there is no
+side-by-side — and its counts count rows, so a changed line reads as one gone
+and one arrived. Window geometry is written when a window closes
 and again on quit, so a force-killed process loses wherever the windows were —
 the same is true of the settings window. The settings sidebar has no search
 box, and its pages do not scroll, which is fine at five pages and would need
