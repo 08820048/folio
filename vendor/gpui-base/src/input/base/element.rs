@@ -456,7 +456,7 @@ impl TextElement {
         let lines = &last_layout.lines;
         let line_number_width = last_layout.line_number_width;
 
-        let mut selected_range = state.selected_range;
+        let mut selected_range = state.selections.primary();
 
         if let Some(ime_marked_range) = &state.ime_marked_range {
             selected_range = (ime_marked_range.end..ime_marked_range.end).into();
@@ -833,7 +833,7 @@ impl TextElement {
             return None;
         }
 
-        let mut selected_range = state.selected_range;
+        let mut selected_range = state.selections.primary();
         if let Some(ime_marked_range) = &state.ime_marked_range {
             if !ime_marked_range.is_empty() {
                 selected_range = (ime_marked_range.end..ime_marked_range.end).into();
@@ -2078,7 +2078,7 @@ impl Element for TextElement {
                 state.focus_handle.clone(),
                 state.show_cursor(window, cx),
                 state.disabled,
-                state.selected_range,
+                state.selections.primary(),
                 state.editor_style.clone(),
                 state.editor_paddings,
             )

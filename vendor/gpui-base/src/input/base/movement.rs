@@ -46,7 +46,7 @@ impl InputBaseState {
     ) {
         let offset = offset.clamp(0, self.text.len());
         self.cursor_line_end_affinity = false;
-        self.selected_range = (offset..offset).into();
+        self.selections = (offset..offset).into();
         self.scroll_to(offset, direction, cx);
         self.pause_blink_cursor(cx);
         self.update_preferred_column();
@@ -138,19 +138,19 @@ impl InputBaseState {
 
     pub(super) fn left(&mut self, _: &MoveLeft, _: &mut Window, cx: &mut Context<Self>) {
         self.pause_blink_cursor(cx);
-        if self.selected_range.is_empty() {
+        if self.selections.primary().is_empty() {
             self.move_to(self.previous_boundary(self.cursor()), None, cx);
         } else {
-            self.move_to(self.selected_range.start, None, cx)
+            self.move_to(self.selections.primary().start, None, cx)
         }
     }
 
     pub(super) fn right(&mut self, _: &MoveRight, _: &mut Window, cx: &mut Context<Self>) {
         self.pause_blink_cursor(cx);
-        if self.selected_range.is_empty() {
-            self.move_to(self.next_boundary(self.selected_range.end), None, cx);
+        if self.selections.primary().is_empty() {
+            self.move_to(self.next_boundary(self.selections.primary().end), None, cx);
         } else {
-            self.move_to(self.selected_range.end, None, cx)
+            self.move_to(self.selections.primary().end, None, cx)
         }
     }
 
@@ -163,9 +163,9 @@ impl InputBaseState {
             return;
         }
 
-        if !self.selected_range.is_empty() {
+        if !self.selections.primary().is_empty() {
             self.move_to(
-                self.previous_boundary(self.selected_range.start.saturating_sub(1)),
+                self.previous_boundary(self.selections.primary().start.saturating_sub(1)),
                 Some(MoveDirection::Up),
                 cx,
             );
@@ -183,9 +183,9 @@ impl InputBaseState {
             return;
         }
 
-        if !self.selected_range.is_empty() {
+        if !self.selections.primary().is_empty() {
             self.move_to(
-                self.next_boundary(self.selected_range.end.saturating_sub(1)),
+                self.next_boundary(self.selections.primary().end.saturating_sub(1)),
                 Some(MoveDirection::Down),
                 cx,
             );

@@ -52,7 +52,7 @@ pub(crate) fn init(cx: &mut App) {
 
 pub use crate::number_input::{NumberInputEvent, NumberStep};
 pub use base::{InputBase, InputContextMenuCapabilities, InputStyles};
-pub use cursor::Selection;
+pub use cursor::{Selection, Selections};
 pub use decorations::{TextDecoration, TextDecorationCollection};
 pub use diagnostics::{
     Diagnostic, DiagnosticEntry, DiagnosticRelatedInformation, DiagnosticSet, DiagnosticSeverity,

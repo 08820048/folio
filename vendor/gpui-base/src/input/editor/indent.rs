@@ -266,9 +266,9 @@ impl InputBaseState {
         };
 
         let tab_indent = self.mode.tab_size().to_string();
-        let selected_range = self.selected_range;
+        let selected_range = self.selections.primary();
         let mut added_len = 0;
-        let is_selected = !self.selected_range.is_empty();
+        let is_selected = !self.selections.primary().is_empty();
 
         if is_selected || block {
             let start_offset = self.start_of_line_of_selection(window, cx);
@@ -296,14 +296,14 @@ impl InputBaseState {
             }
 
             if is_selected {
-                self.selected_range = (start_offset..selected_range.end + added_len).into();
+                self.selections = (start_offset..selected_range.end + added_len).into();
             } else {
-                self.selected_range =
+                self.selections =
                     (selected_range.start + added_len..selected_range.end + added_len).into();
             }
         } else {
             // Selected none
-            let offset = self.selected_range.start;
+            let offset = self.selections.primary().start;
             self.replace_text_in_range_silent(
                 Some(self.range_to_utf16(&(offset..offset))),
                 &tab_indent,
@@ -312,7 +312,7 @@ impl InputBaseState {
             );
             added_len = tab_indent.len();
 
-            self.selected_range =
+            self.selections =
                 (selected_range.start + added_len..selected_range.end + added_len).into();
         }
     }
@@ -324,9 +324,9 @@ impl InputBaseState {
         };
 
         let tab_indent = self.mode.tab_size().to_string();
-        let selected_range = self.selected_range;
+        let selected_range = self.selections.primary();
         let mut removed_len = 0;
-        let is_selected = !self.selected_range.is_empty();
+        let is_selected = !self.selections.primary().is_empty();
 
         if is_selected || block {
             let start_offset = self.start_of_line_of_selection(window, cx);
@@ -359,16 +359,16 @@ impl InputBaseState {
             }
 
             if is_selected {
-                self.selected_range =
+                self.selections =
                     (start_offset..selected_range.end.saturating_sub(removed_len)).into();
             } else {
-                self.selected_range = (selected_range.start.saturating_sub(removed_len)
+                self.selections = (selected_range.start.saturating_sub(removed_len)
                     ..selected_range.end.saturating_sub(removed_len))
                     .into();
             }
         } else {
             // Selected none
-            let start_offset = self.selected_range.start;
+            let start_offset = self.selections.primary().start;
             let offset = self.start_of_line_of_selection(window, cx);
             let offset = self.offset_from_utf16(self.offset_to_utf16(offset));
             // FIXME: To improve performance
@@ -386,7 +386,7 @@ impl InputBaseState {
                 );
                 removed_len = tab_indent.len();
                 let new_offset = start_offset.saturating_sub(removed_len);
-                self.selected_range = (new_offset..new_offset).into();
+                self.selections = (new_offset..new_offset).into();
             }
         }
     }

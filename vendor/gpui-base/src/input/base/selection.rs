@@ -15,8 +15,8 @@ impl InputBaseState {
             return;
         };
 
-        self.selected_range = (range.start..range.end).into();
-        self.selected_word_range = Some(self.selected_range);
+        self.selections = (range.start..range.end).into();
+        self.selected_word_range = Some(self.selections.primary());
         cx.notify()
     }
 
@@ -25,7 +25,7 @@ impl InputBaseState {
     /// The offset is the UTF-8 offset.
     pub(super) fn select_line(&mut self, offset: usize, _: &mut Window, cx: &mut Context<Self>) {
         let range = TextSelector::line_range(&self.text, offset);
-        self.selected_range = (range.start..range.end).into();
+        self.selections = (range.start..range.end).into();
         self.selected_word_range = None;
         cx.notify()
     }
