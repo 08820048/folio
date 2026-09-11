@@ -413,7 +413,13 @@ input has no model for — is allowed to vendor the crate it lives in and point
 at it with a `[patch]`, rather than being dropped. What keeps that reviewable
 is the pin: the fork is a diff against one known revision, so an upgrade is a
 rebase against a named commit rather than a merge against a moving target.
-Nothing here has been forked yet; this records the option, not a change.
+`gpui-base` is that fork today, vendored in `vendor/gpui-base` and pointed at
+by a `[patch]` in the root manifest. It is the crate holding the editor's
+input — its text, its selections, the element that draws them — which is the
+one part of the application that has to change to hold more than one cursor.
+`gpui-component` itself still comes from the pinned revision, so exactly one
+package in the graph is local, and `vendor/README.md` has the procedure for
+moving the copy to a new revision.
 
 ## Current limits
 

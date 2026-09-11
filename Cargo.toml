@@ -91,3 +91,7 @@ debug = 0
 lto = "thin"
 codegen-units = 1
 strip = true
+
+# Experiment: can a workspace-internal path dependency be redirected?
+[patch."https://github.com/longbridge/gpui-component"]
+gpui-base = { path = "vendor/gpui-base" }
