@@ -60,6 +60,7 @@ does not survive a restart.
 | Select column down | ⇧⌥↓ | Ctrl+Shift+Alt+Down |
 | Show file changes | ⇧⌘D | Ctrl+Shift+D |
 | Blame | ⌥⌘B | Ctrl+Alt+B |
+| Go to definition | F12 | F12 |
 | Settings | ⌘, | Ctrl+, |
 | Close project | ⌘W | Ctrl+W |
 | Quit | ⌘Q | Ctrl+Q |
@@ -326,6 +327,32 @@ read when the strip is turned on, when a file is opened, and after a save;
 editing in between leaves it describing the lines as they were until one of
 those happens.
 
+## Language server
+
+If the language of the file being opened has a server installed, Folio starts
+one — in the background, once per project, kept for as long as the project is,
+because what a server costs is indexing the project and what it gives back comes
+from having done it. It looks for `rust-analyzer`, `typescript-language-server`,
+`pyright-langserver`, `gopls` and `clangd`, on `PATH`, by name. Nothing is
+bundled and nothing is downloaded: a server that is not installed means the two
+things below are not there, and nothing else changes.
+
+**Hover** shows what the symbol under the pointer is — the type, usually, with
+the markdown fences taken off — in a card under the line it is on. Holding `⌘`
+while hovering asks a different question and underlines the symbol instead, and
+**`⌘`-click** or **F12** goes to where it is defined, opening the file and
+putting the caret on it.
+
+What is read is the buffer, not the file on disk, for the same reason blame is:
+the positions a server answers in are line numbers, and the line numbers are the
+ones on screen. A definition outside the project — the standard library, a
+package in a cache — is named rather than opened, since the window has no
+project to show it in.
+
+This is deliberately the read-only end of the protocol: no completions, no code
+actions, no diagnostics, no renaming. It answers questions about code rather
+than writing it.
+
 ## Settings
 
 `⌘,`, or Settings… in the app menu, opens a window of its own rather than a
@@ -480,7 +507,9 @@ the two rules that decide where a bracket may pair, the `.editorconfig` reader
 ending the search and the nearest file winning — the session files against real
 bytes (a round trip, paths that are gone being dropped, a corrupt file reading
 as an empty session), blame against a real repository — including a buffer with
-a line that was never committed — and project search (case,
+a line that was never committed — the LSP client against a stand-in server of
+its own, which is what makes the framing, the handshake and the matching of an
+answer to its request visible — and project search (case,
 whole word, regex, long-line windowing, CRLF, multi-byte columns, capture-group
 replacement, skipping binary and oversized files). `desktop-tests` uses the
 GPUI test executor for the rest: repeated expand and collapse, recents written
@@ -535,6 +564,11 @@ query, so only an assertion catches a misconfigured grammar.
   `Cargo.lock`, and are gated behind the `syntax` feature (which `desktop`
   enables). Only the binary uses them, so a library-only build such as
   `cargo test --locked` does not compile them.
+- `lsp-types` is a direct dependency at the version GPUI pins, because the
+  component library's hover and definition provider traits are written in those
+  types: another version would be another type, and the traits would not
+  implement at all. Only the types are used — the client in `src/lsp.rs` speaks
+  the protocol itself, over the pipe.
 
 Only the GPUI framework and the components actually used are compiled; none of
 Zed's editor, language or workspace application modules are involved. Cargo's
@@ -583,7 +617,10 @@ one part of that format not read. The session is written every few seconds, so a
 crash can lose the last few seconds of tab changes, and a recovered buffer whose
 project is no longer in the session is dropped rather than shown. Blame is one
 line at a time rather than a gutter, and describes the lines as they were when
-it was read. The changes view is a unified diff — there is
+it was read. The language server does hover and go-to-definition and nothing
+else, only for the six languages it looks for a server for, and it answers about
+the file on screen rather than saving it first. The changes view is a unified
+diff — there is
 no side-by-side — and its counts count rows, so a changed line reads as one
 gone and one arrived. Window geometry is written when a window closes and again
 on quit, so a force-killed process loses wherever the windows were — the same

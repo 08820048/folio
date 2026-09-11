@@ -5,6 +5,7 @@ pub mod diff;
 pub mod editorconfig;
 pub mod fs_op;
 pub mod git;
+pub mod lsp;
 pub mod recent;
 pub mod search;
 pub mod session;

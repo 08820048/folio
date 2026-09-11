@@ -557,3 +557,107 @@ fn blame_reports_the_commit_that_wrote_each_line() {
     fs::write(&fresh, "// new\n").unwrap();
     assert!(blame::run(&fresh, "// new\n").is_err());
 }
+
+/// The LSP client against a server that is not one: what is being checked is
+/// the framing, the handshake and the matching of an answer to its request,
+/// which is the part a real server would only make harder to see.
+///
+/// The stand-in is a python script, because a language server is a program on
+/// the other end of a pipe and anything that speaks the protocol will do.
+#[test]
+fn the_lsp_client_speaks_the_protocol() {
+    use folio::lsp::{self, Server};
+    use serde_json::json;
+
+    const FAKE_SERVER: &str = r#"
+import json, sys
+
+def read_message():
+    length = None
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        line = line.strip()
+        if not line:
+            break
+        if line.lower().startswith(b"content-length:"):
+            length = int(line.split(b":")[1])
+    return json.loads(sys.stdin.buffer.read(length))
+
+def write(message):
+    body = json.dumps(message).encode()
+    sys.stdout.buffer.write(b"Content-Length: %d\r\n\r\n" % len(body) + body)
+    sys.stdout.buffer.flush()
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    method = message.get("method")
+    if method == "initialize":
+        write({"jsonrpc": "2.0", "id": message["id"],
+               "result": {"capabilities": {"textDocumentSync": 1}}})
+    elif method == "textDocument/definition":
+        write({"jsonrpc": "2.0", "id": message["id"], "result": [{
+            "uri": "file:///tmp/definition.rs",
+            "range": {"start": {"line": 3, "character": 1},
+                      "end": {"line": 3, "character": 4}},
+        }]})
+    elif method == "textDocument/hover":
+        write({"jsonrpc": "2.0", "id": message["id"],
+               "result": {"contents": {"kind": "markdown",
+                                       "value": "```rust\nfn f() -> ()\n```"}}})
+    elif "id" in message:
+        write({"jsonrpc": "2.0", "id": message["id"], "result": None})
+"#;
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let script = root.join("fake_server.py");
+    fs::write(&script, FAKE_SERVER).unwrap();
+    // The server table asks for `&'static str`, and a test may leak its own.
+    let script: &'static str = Box::leak(script.to_string_lossy().into_owned().into_boxed_str());
+
+    // Anything the machine has will do for the executable; the script is what
+    // speaks the protocol, and the build already needs python3 to be there.
+    let server = Server {
+        command: "python3",
+        args: Box::leak(vec![script].into_boxed_slice()),
+        language: "rust",
+    };
+    let client = lsp::Client::start(&server, root).expect("the stand-in starts");
+
+    // A document is introduced before it is asked about, and the answer comes
+    // back to the request that asked for it.
+    let file = root.join("main.rs");
+    client.sync(&file, "fn main() {}\n", "rust").unwrap();
+    client
+        .sync(&file, "fn main() { let x = 1; }\n", "rust")
+        .unwrap();
+
+    let result = client
+        .request(
+            "textDocument/definition",
+            json!({
+                "textDocument": {"uri": lsp::uri(&file)},
+                "position": {"line": 0, "character": 3},
+            }),
+        )
+        .unwrap();
+    let links = lsp::definition_links(&result);
+    assert_eq!(links.len(), 1);
+    assert_eq!(
+        lsp::target(&links[0]).map(|(path, _)| path),
+        Some(std::path::PathBuf::from("/tmp/definition.rs"))
+    );
+    assert_eq!(
+        lsp::target(&links[0]).map(|(_, position)| position.line),
+        Some(3)
+    );
+
+    let hover = client
+        .request("textDocument/hover", json!({}))
+        .expect("a hover");
+    assert_eq!(lsp::hover_lines(&hover), vec!["fn f() -> ()"]);
+}

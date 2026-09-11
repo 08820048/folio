@@ -40,6 +40,10 @@ desktop = ["dep:gpui", "dep:gpui_platform", "dep:gpui-component", "dep:gpui-comp
 
 [dependencies]
 anyhow = "1"
+# The types the component library's LSP provider traits are written in, at the
+# version gpui pins. Only the types: the client in `src/lsp.rs` speaks the
+# protocol itself.
+lsp-types = "0.97"
 regex = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
