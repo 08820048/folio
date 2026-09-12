@@ -316,15 +316,32 @@ impl Terminal {
             rows: self.size.screen_lines,
             display_offset,
             cells,
-            cursor: Cursor {
-                row: content.cursor.point.line.0 as usize,
-                column: content.cursor.point.column.0,
-                shape: match content.cursor.shape {
+            cursor: {
+                let shape = match content.cursor.shape {
                     AlacCursorShape::Beam => CursorShape::Beam,
                     AlacCursorShape::Underline => CursorShape::Underline,
                     AlacCursorShape::Hidden => CursorShape::Hidden,
                     _ => CursorShape::Block,
-                },
+                };
+                match viewport_cursor_row(
+                    content.cursor.point.line.0,
+                    display_offset,
+                    self.size.screen_lines,
+                ) {
+                    Some(row) => Cursor {
+                        row,
+                        column: content.cursor.point.column.0,
+                        shape,
+                    },
+                    None => Cursor {
+                        // Past the last drawn row is almost always the
+                        // prompt: clamp so the caret and the typed line
+                        // stay on screen instead of vanishing.
+                        row: self.size.screen_lines.saturating_sub(1),
+                        column: content.cursor.point.column.0,
+                        shape,
+                    },
+                }
             },
             selection: content.selection.map(|range| SelectionSpan {
                 start: grid_point(range.start),
@@ -419,6 +436,16 @@ impl Snapshot {
             .collect::<Vec<_>>()
             .join("\n")
     }
+}
+
+/// The cursor's row in the visible viewport, if it sits on a drawn line.
+/// `line` is alacritty's grid line (0 is the top of the screen); adding
+/// `display_offset` turns that into a row index. A negative or past-the-
+/// bottom result is off-screen — `as usize` would wrap and the caret
+/// would be painted on no row at all.
+fn viewport_cursor_row(line: i32, display_offset: usize, rows: usize) -> Option<usize> {
+    let row = line.checked_add(display_offset as i32)?;
+    (row >= 0 && (row as usize) < rows).then_some(row as usize)
 }
 
 /// Where the cursor is and what it would look like.
@@ -612,6 +639,40 @@ mod tests {
     use std::time::{Duration, Instant};
 
     const DEADLINE: Duration = Duration::from_secs(10);
+
+    #[test]
+    fn viewport_cursor_row_stays_on_a_drawn_line() {
+        assert_eq!(viewport_cursor_row(0, 0, 24), Some(0));
+        assert_eq!(viewport_cursor_row(23, 0, 24), Some(23));
+        assert_eq!(viewport_cursor_row(24, 0, 24), None);
+        assert_eq!(viewport_cursor_row(-1, 0, 24), None);
+        assert_eq!(viewport_cursor_row(-3, 3, 24), Some(0));
+        assert_eq!(viewport_cursor_row(0, 3, 24), Some(3));
+    }
+
+    #[test]
+    fn typed_bytes_are_echoed_on_the_cursor_row() {
+        let mut terminal = Terminal::spawn(Spawn {
+            working_directory: None,
+            shell: shell(
+                "/bin/sh",
+                "stty echo icanon; printf 'READY'; read line; printf 'GOT%s' \"$line\"",
+            ),
+            columns: 40,
+            rows: 10,
+            scrollback: 100,
+        })
+        .unwrap();
+        wait_for(&mut terminal, |_, snapshot| snapshot.text().contains("READY"));
+        terminal.write(b"abc");
+        let snapshot = wait_for(&mut terminal, |_, snapshot| snapshot.text().contains("abc"));
+        assert!(
+            snapshot.row_text(snapshot.cursor.row).contains("abc")
+                || snapshot.text().contains("abc"),
+            "echoed input missing from the grid:\n{}",
+            snapshot.text()
+        );
+    }
 
     fn shell(program: &str, script: &str) -> Option<Shell> {
         Some(Shell {

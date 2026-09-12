@@ -1,6 +1,6 @@
 use crate::assets::FolioIcon;
 use crate::preview::{self, Content};
-use crate::terminal_view::{self, TerminalView};
+use crate::terminal_view::TerminalView;
 use folio::{
     blame, buffer, diff, editorconfig, fs_op, git,
     recent::{self, RecentProject},
@@ -4248,9 +4248,8 @@ impl Folio {
     /// The drawer: a drag handle on top, a tab strip with one entry per
     /// terminal — each closing itself, the last closing the drawer — a
     /// `+` for another one, and the active terminal filling the rest. The
-    /// grid is sized after layout, so the pixels the body gets are
-    /// deferred to the view.
-    fn render_terminal_dock(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+    /// grid sizes itself to the pixels the body gives it.
+    fn render_terminal_dock(&self, _: &Window, cx: &mut Context<Self>) -> AnyElement {
         let Some((root, active)) = self
             .project
             .workspace
@@ -4279,37 +4278,6 @@ impl Folio {
                 }
             })
             .collect();
-        let font_size = self.settings.code_font_size;
-        // The drawer spans the content column — the window beside the
-        // sidebar and its drag edge — and the body is what is left after
-        // the drag handle and the header take theirs.
-        let viewport = window.viewport_size();
-        let width = f32::from(viewport.width)
-            - self.workspace_left_inset()
-            - WORKSPACE_INSET
-            - if self.sidebar {
-                self.sidebar_width + 3.
-            } else {
-                0.
-            };
-        let height = self.terminal_height - 4. - 26.;
-        let (cell_width, line_height) = terminal_view::measure(font_size, window);
-        let columns = ((width / f32::from(cell_width)).floor() as usize).clamp(2, 500);
-        let rows = ((height / f32::from(line_height)).floor() as usize).clamp(2, 200);
-        window.defer(cx, {
-            let entity = entity.clone();
-            move |_, cx| {
-                entity.update(cx, |view, cx| {
-                    view.sync(
-                        columns,
-                        rows,
-                        f32::from(cell_width) as u16,
-                        f32::from(line_height) as u16,
-                        cx,
-                    )
-                })
-            }
-        });
         div()
             .flex_shrink_0()
             .h(px(self.terminal_height))
@@ -4351,7 +4319,13 @@ impl Folio {
                         cx,
                     )),
             )
-            .child(div().flex_1().min_h_0().child(entity))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_hidden()
+                    .child(entity),
+            )
             .into_any_element()
     }
 

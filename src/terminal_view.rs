@@ -1,13 +1,13 @@
-//! The terminal dock's view: a running backend grid drawn row by row.
+//! The terminal dock's view: a running backend grid painted like Zed's.
 //!
 //! The backend (`folio::terminal`) owns the pty and the parser; this side
-//! owns nothing but presentation. Each frame takes a snapshot and turns it
-//! into one shaped line per row — runs of same-styled cells become a
-//! [`TextRun`], and the cursor restyles the cell it sits on — while keys
-//! and wheel turns go back to the child as bytes. A background task drains
-//! the backend's events every few frames so output arrives while the user
-//! works elsewhere, and a dock-wide `sync` keeps the grid sized to the
-//! panel the dock gives it.
+//! owns presentation. Each frame a custom element sizes the pty to the
+//! pixels it actually received, then paints cells with the text system —
+//! `shape_line` at a cell origin, the way Zed's `TerminalElement` does —
+//! instead of flowing `StyledText` through flex. Keys and wheel turns go
+//! back to the child as bytes. A background task drains the backend's
+//! events every few frames so output arrives while the user works
+//! elsewhere.
 
 use std::{cell::RefCell, ops::Range, path::Path, rc::Rc, time::Duration};
 
@@ -15,16 +15,20 @@ use folio::terminal::{self, Color, GridPoint, SelectionKind, Terminal, TerminalE
 use folio::terminal_keys::{Key, Modifiers, encode};
 use folio::terminal_mouse::{self, Button};
 use gpui::{
-    AnyElement, App, Bounds, ClipboardItem, Context, Element, ElementId, FocusHandle, Focusable,
-    Font, FontStyle, FontWeight, GlobalElementId, Hsla, InputHandler, InspectorElementId,
-    IntoElement, KeyDownEvent, Keystroke, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ParentElement, Pixels, Render, ScrollWheelEvent, Style, Styled, StyledText,
-    TextRun, UTF16Selection, UnderlineStyle, Window, div, point, prelude::*, px, rgb, size,
+    App, Bounds, ClipboardItem, ContentMask, Context, Element, ElementId, Entity, FocusHandle,
+    Focusable, Font, FontStyle, FontWeight, GlobalElementId, Hsla, InputHandler,
+    InspectorElementId, IntoElement, KeyDownEvent, Keystroke, LayoutId, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Overflow, ParentElement, Pixels, Point, Render,
+    ScrollWheelEvent, SharedString, Style, Styled, TextAlign, TextRun, UTF16Selection,
+    UnderlineStyle, Window, div, fill, point, prelude::*, px, relative, rgb, size,
 };
 use gpui_component::ActiveTheme;
 
-/// The terminal font. One family, the code font; the size follows settings.
+/// Fallback when the theme has not set a mono family.
 const FONT: &str = "JetBrains Mono";
+
+/// Zed's default terminal line height: font size times this.
+const LINE_HEIGHT: f32 = 1.3;
 
 /// Sixteen colors the grid's palette entries resolve to, one set per
 /// appearance. Calm defaults tuned to sit beside the editor's own colors;
@@ -89,16 +93,15 @@ pub struct TerminalView {
     focus: FocusHandle,
     /// Wheel turns not yet worth a whole line, so trackpads scroll smoothly.
     scroll_px: Pixels,
-    /// The cell metrics the last sync measured, for the wheel and for the
-    /// dock's own arithmetic.
+    /// The cell metrics the last paint measured, for the wheel and for
+    /// turning a mouse position into a cell.
     metrics: (Pixels, Pixels),
     /// The selection a drag is building, as its kind; the anchor lives in
     /// the grid and the head follows the mouse.
     selecting: Option<SelectionKind>,
     /// Where the drag started, so the head's side is known.
     selection_anchor: Option<GridPoint>,
-    /// Where the grid painted, shared with the IME element that measures
-    /// it; mouse positions become cells against this.
+    /// Where the grid painted; mouse positions become cells against this.
     grid_bounds: Rc<RefCell<Option<Bounds<Pixels>>>>,
     /// Text the IME has marked but not yet committed.
     marked_text: Option<String>,
@@ -183,24 +186,31 @@ impl TerminalView {
         changed
     }
 
-    /// Size the grid to what the dock computed for it. Nothing happens
-    /// when the shape already fits, so calling this every frame is fine.
-    pub fn sync(
-        &mut self,
-        columns: usize,
-        rows: usize,
-        cell_width: u16,
-        line_height: u16,
-        cx: &mut Context<Self>,
-    ) {
-        self.metrics = (px(f32::from(cell_width)), px(f32::from(line_height)));
-        let Some(terminal) = self.terminal.as_mut() else {
-            return;
-        };
-        if terminal.size() != (columns, rows) {
-            terminal.resize(columns, rows, cell_width, line_height);
-            cx.notify();
+    /// The cell the child's cursor sits in, in window coordinates. IME
+    /// candidate windows park here — the whole grid would put them on
+    /// the first line, away from what the user types.
+    fn cursor_cell_bounds(&self) -> Option<Bounds<Pixels>> {
+        let origin = self.grid_bounds.borrow().as_ref()?.origin;
+        let (cell_width, line_height) = self.metrics;
+        let snapshot = self.terminal.as_ref()?.snapshot();
+        if snapshot.display_offset != 0 {
+            return None;
         }
+        let marked = self
+            .marked_text
+            .as_deref()
+            .filter(|text| !text.is_empty())
+            .map(|text| text.chars().count())
+            .unwrap_or(1)
+            .max(1);
+        Some(Bounds {
+            origin: origin
+                + point(
+                    px(snapshot.cursor.column as f32 * f32::from(cell_width)),
+                    px(snapshot.cursor.row as f32 * f32::from(line_height)),
+                ),
+            size: size(cell_width * marked as f32, line_height),
+        })
     }
 
     /// Where keyboard focus lives while the terminal is in use.
@@ -321,8 +331,7 @@ impl TerminalView {
         let Some((column, row)) = self.cell_at(event.position) else {
             return;
         };
-        if let Some(kind) = self.selecting {
-            let _ = kind;
+        if self.selecting.is_some() {
             let snapshot = terminal.snapshot();
             let head = GridPoint {
                 line: row as i32 - snapshot.display_offset as i32,
@@ -398,13 +407,25 @@ impl TerminalView {
         }
     }
 
+    /// Whether the IME is composing. An empty mark is not composing —
+    /// leaving it set would keep macOS sending every later key, so
+    /// nothing reaches the child and the caret has nowhere to sit.
+    fn composing(&self) -> bool {
+        marked_is_composing(self.marked_text.as_deref())
+    }
+
     fn key(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
         let Some(terminal) = self.terminal.as_ref() else {
             return;
         };
         // A keystroke with the command key belongs to the application's
-        // bindings, not the child's input.
+        // bindings, not the child's input. While the IME is composing,
+        // the platform already has the key.
         if event.keystroke.modifiers.platform {
+            return;
+        }
+        if self.composing() {
+            cx.stop_propagation();
             return;
         }
         let Some((key, mods)) = key_input(&event.keystroke) else {
@@ -414,6 +435,7 @@ impl TerminalView {
         if let Some(bytes) = encode(key, mods, app_cursor) {
             terminal.write(&bytes);
             cx.stop_propagation();
+            cx.notify();
         }
     }
 }
@@ -460,222 +482,45 @@ fn key_input(keystroke: &Keystroke) -> Option<(Key, Modifiers)> {
     Some((key, mods))
 }
 
-/// The code font's cell: width from a shaped row of zeros, height from the
-/// font's own ascent and descent.
-pub(crate) fn measure(font_size: f32, window: &Window) -> (Pixels, Pixels) {
-    let run = TextRun {
-        len: 10,
-        font: plain_font(),
-        color: Default::default(),
-        background_color: None,
-        underline: None,
-        strikethrough: None,
-    };
-    let layout = window
-        .text_system()
-        .layout_line("0000000000", px(font_size), &[run], None);
-    (
-        (f32::from(layout.width) / 10.).max(1.).into(),
-        (f32::from(layout.ascent + layout.descent))
-            .ceil()
-            .max(font_size)
-            .into(),
-    )
+fn grid_cells(span: Pixels, cell: Pixels) -> usize {
+    let cell = f32::from(cell).max(1.);
+    ((f32::from(span) / cell).floor() as usize).clamp(2, 500)
 }
 
-fn plain_font() -> Font {
+fn cell_font(cx: &App) -> Font {
+    let family = cx.theme().mono_font_family.clone();
     Font {
-        family: FONT.into(),
+        family: if family.is_empty() {
+            FONT.into()
+        } else {
+            family
+        },
         ..Default::default()
     }
 }
 
-/// What one cell paints as. The cursor's colors are part of the style, and
-/// the `cursor` flag keeps that one cell a run of its own even when its
-/// colors coincide with a neighbor's.
-#[derive(PartialEq)]
-struct RunStyle {
-    fg: Hsla,
-    bg: Hsla,
-    bold: bool,
-    italic: bool,
-    underline: bool,
-    strike: bool,
-    cursor: bool,
-    selected: bool,
-}
-
-impl RunStyle {
-    fn font(&self) -> Font {
-        Font {
-            family: FONT.into(),
-            weight: if self.bold {
-                FontWeight::BOLD
-            } else {
-                FontWeight::NORMAL
-            },
-            style: if self.italic {
-                FontStyle::Italic
-            } else {
-                FontStyle::Normal
-            },
-            ..Default::default()
-        }
-    }
-}
-
-/// One row of the grid as styled text: runs of same-styled cells, with the
-/// cursor's cell restyled in place and a beam cursor drawn as a bar beside
-/// the text.
-fn row_element(
-    row: usize,
-    snapshot: &terminal::Snapshot,
-    colors: &TermColors,
-    cursor_visible: bool,
-    cell_width: Pixels,
-    line_height: Pixels,
-) -> AnyElement {
-    let start = row * snapshot.columns;
-    let cells = &snapshot.cells[start..start + snapshot.columns];
-    // The cursor is part of the grid only when the viewport is at the
-    // present; scrolled back, the child's cursor is somewhere else.
-    let cursor = (cursor_visible && snapshot.display_offset == 0).then_some(&snapshot.cursor);
-    // The columns of this row the selection covers, if any.
-    let selected = snapshot.selection.and_then(|span| {
-        let line = row as i32 - snapshot.display_offset as i32;
-        if line < span.start.line || line > span.end.line {
-            return None;
-        }
-        let start = if line == span.start.line {
-            span.start.column
-        } else {
-            0
-        };
-        let end = if line == span.end.line {
-            span.end.column
-        } else {
-            snapshot.columns - 1
-        };
-        Some((start.min(end), end.max(start)))
-    });
-
-    let mut text = String::with_capacity(snapshot.columns);
-    let mut runs: Vec<(RunStyle, usize)> = Vec::new();
-    for (column, cell) in cells.iter().enumerate() {
-        let mut fg = colors.resolve(cell.fg);
-        let mut bg = colors.resolve(cell.bg);
-        if cell.attrs.contains(terminal::Attrs::INVERSE) {
-            std::mem::swap(&mut fg, &mut bg);
-        }
-        if cell.attrs.contains(terminal::Attrs::HIDDEN) {
-            fg = bg;
-        }
-        let on_cursor = cursor.is_some_and(|c| c.row == row && c.column == column);
-        let is_selected = selected.is_some_and(|(start, end)| column >= start && column <= end);
-        // The selection color takes the cell's background; the character
-        // keeps its own, which is how an editor draws a selection too.
-        if is_selected {
-            bg = colors.selection;
-        }
-        let mut underline = cell.attrs.contains(terminal::Attrs::UNDERLINE);
-        if on_cursor {
-            // A block fills the cell with the cursor color and paints the
-            // character in the background's place; an underline draws under
-            // the character as-is; a beam is the bar below.
-            match cursor.unwrap().shape {
-                terminal::CursorShape::Block => {
-                    fg = colors.cursor_text;
-                    bg = colors.cursor;
-                }
-                terminal::CursorShape::Underline => underline = true,
-                _ => {}
-            }
-        }
-        let style = RunStyle {
-            fg,
-            bg,
-            bold: cell.attrs.contains(terminal::Attrs::BOLD),
-            italic: cell.attrs.contains(terminal::Attrs::ITALIC),
-            underline,
-            strike: cell.attrs.contains(terminal::Attrs::STRIKETHROUGH),
-            cursor: on_cursor,
-            selected: is_selected,
-        };
-        text.push(cell.c);
-        let len = cell.c.len_utf8();
-        match runs.last_mut() {
-            Some((last, count)) if *last == style => *count += len,
-            _ => runs.push((style, len)),
-        }
-    }
-
-    let beam = cursor
-        .filter(|c| c.row == row && c.shape == terminal::CursorShape::Beam)
-        .map(|c| c.column);
-    div()
-        .relative()
-        .h(line_height)
-        .overflow_hidden()
-        .when(!text.is_empty(), |el| {
-            el.child(
-                StyledText::new(text).with_runs(
-                    runs.into_iter()
-                        .map(|(style, len)| TextRun {
-                            len,
-                            font: style.font(),
-                            color: style.fg,
-                            background_color: (style.bg != colors.background).then_some(style.bg),
-                            underline: style.underline.then(UnderlineStyle::default),
-                            strikethrough: style.strike.then(Default::default),
-                        })
-                        .collect(),
-                ),
-            )
-        })
-        .when_some(beam, |el, column| {
-            el.child(
-                div()
-                    .absolute()
-                    .left(px(column as f32 * f32::from(cell_width)))
-                    .top_0()
-                    .w(px(1.5))
-                    .h_full()
-                    .bg(colors.cursor),
-            )
-        })
-        .into_any_element()
+/// Cell width from the advance of `m`, line height from the font size —
+/// the same arithmetic Zed's `TerminalElement` uses.
+fn cell_metrics(cx: &App) -> (Pixels, Pixels, Pixels) {
+    let font_size = cx.theme().mono_font_size;
+    let font_id = cx.text_system().resolve_font(&cell_font(cx));
+    let cell_width = cx
+        .text_system()
+        .advance(font_id, font_size, 'm')
+        .map(|advance| advance.width)
+        .unwrap_or(px(8.))
+        .max(px(1.));
+    let line_height = px((f32::from(font_size) * LINE_HEIGHT).ceil().max(f32::from(font_size)));
+    (cell_width, line_height, font_size)
 }
 
 impl Render for TerminalView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let grid = self.terminal.as_ref().map(|terminal| {
-            let snapshot = terminal.snapshot();
-            let colors = TermColors::new(cx);
-            let (cell_width, line_height) = self.metrics;
-            let cursor_visible = !self.exited;
-            let ime = ImeRegion {
-                view: cx.entity(),
-                focus: self.focus.clone(),
-                bounds: self.grid_bounds.clone(),
-            };
-            div()
-                .flex()
-                .flex_col()
-                .child(ime)
-                .children((0..snapshot.rows).map(|row| {
-                    row_element(
-                        row,
-                        &snapshot,
-                        &colors,
-                        cursor_visible,
-                        cell_width,
-                        line_height,
-                    )
-                }))
-        });
         div()
             .id("terminal-view")
             .size_full()
+            .overflow_hidden()
+            .bg(cx.theme().background)
             .key_context("FolioTerminal")
             .track_focus(&self.focus)
             .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
@@ -698,21 +543,32 @@ impl Render for TerminalView {
                         .child(error),
                 )
             })
-            .when_some(grid, |el, grid| el.child(grid))
+            .when(self.terminal.is_some(), |el| {
+                el.child(TerminalGrid {
+                    view: cx.entity(),
+                    focus: self.focus.clone(),
+                })
+            })
     }
 }
 
-/// The IME seam. A zero-size element that does nothing but paint: its
-/// paint registers the terminal's input handler with the platform — the
-/// only phase that may happen in — and notes where the grid sits, which is
-/// what turns mouse positions into cells and anchors the candidate window.
-struct ImeRegion {
-    view: gpui::Entity<TerminalView>,
+/// The grid itself, painted the way Zed paints a terminal: one shaped
+/// run per stretch of same-styled cells, placed on the cell grid, with
+/// the IME handler registered in `paint` so the platform has a place
+/// for the caret.
+struct TerminalGrid {
+    view: Entity<TerminalView>,
     focus: FocusHandle,
-    bounds: Rc<RefCell<Option<Bounds<Pixels>>>>,
 }
 
-impl IntoElement for ImeRegion {
+struct GridPaint {
+    origin: Point<Pixels>,
+    cell_width: Pixels,
+    line_height: Pixels,
+    font_size: Pixels,
+}
+
+impl IntoElement for TerminalGrid {
     type Element = Self;
 
     fn into_element(self) -> Self::Element {
@@ -720,12 +576,12 @@ impl IntoElement for ImeRegion {
     }
 }
 
-impl Element for ImeRegion {
+impl Element for TerminalGrid {
     type RequestLayoutState = ();
-    type PrepaintState = ();
+    type PrepaintState = Option<GridPaint>;
 
     fn id(&self) -> Option<ElementId> {
-        Some(ElementId::Name("terminal-ime".into()))
+        Some(ElementId::Name("terminal-grid".into()))
     }
 
     fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
@@ -739,18 +595,51 @@ impl Element for ImeRegion {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, ()) {
-        (window.request_layout(Style::default(), [], cx), ())
+        let mut style = Style::default();
+        style.size.width = relative(1.).into();
+        style.size.height = relative(1.).into();
+        style.overflow.x = Overflow::Hidden;
+        style.overflow.y = Overflow::Hidden;
+        (window.request_layout(style, [], cx), ())
     }
 
     fn prepaint(
         &mut self,
         _: Option<&GlobalElementId>,
         _: Option<&InspectorElementId>,
-        _: Bounds<Pixels>,
+        bounds: Bounds<Pixels>,
         _: &mut (),
         _: &mut Window,
-        _: &mut App,
-    ) {
+        cx: &mut App,
+    ) -> Self::PrepaintState {
+        if bounds.size.width < px(1.) || bounds.size.height < px(1.) {
+            return None;
+        }
+        let (cell_width, line_height, font_size) = cell_metrics(cx);
+        let columns = grid_cells(bounds.size.width, cell_width);
+        let rows = grid_cells(bounds.size.height, line_height);
+        self.view.update(cx, |view, cx| {
+            *view.grid_bounds.borrow_mut() = Some(bounds);
+            view.metrics = (cell_width, line_height);
+            let Some(terminal) = view.terminal.as_mut() else {
+                return;
+            };
+            if terminal.size() != (columns, rows) {
+                terminal.resize(
+                    columns,
+                    rows,
+                    f32::from(cell_width) as u16,
+                    f32::from(line_height) as u16,
+                );
+                cx.notify();
+            }
+        });
+        Some(GridPaint {
+            origin: bounds.origin,
+            cell_width,
+            line_height,
+            font_size,
+        })
     }
 
     fn paint(
@@ -759,11 +648,43 @@ impl Element for ImeRegion {
         _: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
         _: &mut (),
-        _: &mut (),
+        layout: &mut Self::PrepaintState,
         window: &mut Window,
         cx: &mut App,
     ) {
-        *self.bounds.borrow_mut() = Some(bounds);
+        let Some(layout) = layout.as_ref() else {
+            return;
+        };
+        let colors = TermColors::new(cx);
+        let (snapshot, marked, cursor_visible) = {
+            let view = self.view.read(cx);
+            let Some(terminal) = view.terminal.as_ref() else {
+                return;
+            };
+            (
+                terminal.snapshot(),
+                view.marked_text
+                    .as_deref()
+                    .filter(|text| !text.is_empty())
+                    .map(str::to_string),
+                !view.exited,
+            )
+        };
+
+        window.with_content_mask(Some(ContentMask { bounds }), |window| {
+            window.paint_quad(fill(bounds, colors.background));
+            paint_grid(
+                layout,
+                &snapshot,
+                &colors,
+                cell_font(cx),
+                cursor_visible,
+                marked.as_deref(),
+                window,
+                cx,
+            );
+        });
+
         window.handle_input(
             &self.focus,
             TerminalInputHandler {
@@ -774,13 +695,301 @@ impl Element for ImeRegion {
     }
 }
 
+/// One stretch of same-styled cells, painted with `shape_line` at a
+/// cell origin the way Zed's `BatchedTextRun` is.
+struct TextBatch {
+    row: usize,
+    column: usize,
+    text: String,
+    run: TextRun,
+}
+
+/// A run of cells that share a background other than the grid's.
+struct BgRect {
+    row: usize,
+    column: usize,
+    cells: usize,
+    color: Hsla,
+}
+
+fn paint_grid(
+    layout: &GridPaint,
+    snapshot: &terminal::Snapshot,
+    colors: &TermColors,
+    font: Font,
+    cursor_visible: bool,
+    marked: Option<&str>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let (rects, batches) = layout_cells(
+        snapshot,
+        colors,
+        &font,
+        cursor_visible && marked.is_none(),
+    );
+    for rect in &rects {
+        let origin = cell_origin(layout, rect.row, rect.column);
+        window.paint_quad(fill(
+            Bounds {
+                origin,
+                size: size(layout.cell_width * rect.cells as f32, layout.line_height),
+            },
+            rect.color,
+        ));
+    }
+    for batch in &batches {
+        let origin = cell_origin(layout, batch.row, batch.column);
+        let line = window.text_system().shape_line(
+            SharedString::from(batch.text.clone()),
+            layout.font_size,
+            std::slice::from_ref(&batch.run),
+            Some(layout.cell_width),
+        );
+        let _ = line.paint(
+            origin,
+            layout.line_height,
+            TextAlign::Left,
+            None,
+            window,
+            cx,
+        );
+    }
+
+    // IME preedit sits on the cursor, covering whatever the grid has
+    // there, the way Zed paints `marked_text` after the cell runs.
+    if let Some(text) = marked.filter(|text| !text.is_empty())
+        && snapshot.display_offset == 0
+    {
+        let origin = cell_origin(layout, snapshot.cursor.row, snapshot.cursor.column);
+        let underline = Some(UnderlineStyle {
+            color: Some(colors.foreground),
+            thickness: px(1.),
+            wavy: false,
+        });
+        let line = window.text_system().shape_line(
+            SharedString::from(text.to_string()),
+            layout.font_size,
+            &[TextRun {
+                len: text.len(),
+                font: font.clone(),
+                color: colors.foreground,
+                background_color: Some(colors.background),
+                underline,
+                strikethrough: None,
+            }],
+            Some(layout.cell_width),
+        );
+        window.paint_quad(fill(
+            Bounds {
+                origin,
+                size: size(line.width.max(layout.cell_width), layout.line_height),
+            },
+            colors.background,
+        ));
+        let _ = line.paint(
+            origin,
+            layout.line_height,
+            TextAlign::Left,
+            None,
+            window,
+            cx,
+        );
+        return;
+    }
+
+    if cursor_visible && snapshot.display_offset == 0 {
+        paint_cursor(layout, snapshot, colors, window);
+    }
+}
+
+fn paint_cursor(
+    layout: &GridPaint,
+    snapshot: &terminal::Snapshot,
+    colors: &TermColors,
+    window: &mut Window,
+) {
+    if snapshot.cursor.shape == terminal::CursorShape::Hidden {
+        return;
+    }
+    let origin = cell_origin(layout, snapshot.cursor.row, snapshot.cursor.column);
+    match snapshot.cursor.shape {
+        // A block is already the cell's background and inverse glyph,
+        // painted with the other runs. Drawing it again here would cover
+        // the character the user just typed.
+        terminal::CursorShape::Block | terminal::CursorShape::Hidden => {}
+        terminal::CursorShape::Beam => {
+            window.paint_quad(fill(
+                Bounds {
+                    origin,
+                    size: size(px(1.5), layout.line_height),
+                },
+                colors.cursor,
+            ));
+        }
+        terminal::CursorShape::Underline => {
+            window.paint_quad(fill(
+                Bounds {
+                    origin: origin + point(px(0.), layout.line_height - px(2.)),
+                    size: size(layout.cell_width, px(2.)),
+                },
+                colors.cursor,
+            ));
+        }
+    }
+}
+
+fn cell_origin(layout: &GridPaint, row: usize, column: usize) -> Point<Pixels> {
+    layout.origin
+        + point(
+            px(column as f32 * f32::from(layout.cell_width)),
+            px(row as f32 * f32::from(layout.line_height)),
+        )
+}
+
+fn layout_cells(
+    snapshot: &terminal::Snapshot,
+    colors: &TermColors,
+    font: &Font,
+    cursor_visible: bool,
+) -> (Vec<BgRect>, Vec<TextBatch>) {
+    let cursor = (cursor_visible && snapshot.display_offset == 0).then_some(&snapshot.cursor);
+    let mut rects: Vec<BgRect> = Vec::new();
+    let mut batches: Vec<TextBatch> = Vec::new();
+    for row in 0..snapshot.rows {
+        let start = row * snapshot.columns;
+        let cells = &snapshot.cells[start..start + snapshot.columns];
+        let selected = selection_on_row(snapshot, row);
+        for (column, cell) in cells.iter().enumerate() {
+            if cell.attrs.contains(terminal::Attrs::WIDE_CHAR_SPACER) {
+                continue;
+            }
+            let mut fg = colors.resolve(cell.fg);
+            let mut bg = colors.resolve(cell.bg);
+            if cell.attrs.contains(terminal::Attrs::INVERSE) {
+                std::mem::swap(&mut fg, &mut bg);
+            }
+            if cell.attrs.contains(terminal::Attrs::HIDDEN) {
+                fg = bg;
+            }
+            let on_cursor = cursor.is_some_and(|c| {
+                c.shape == terminal::CursorShape::Block && c.row == row && c.column == column
+            });
+            let is_selected = selected.is_some_and(|(start, end)| column >= start && column <= end);
+            if is_selected {
+                bg = colors.selection;
+            }
+            if on_cursor {
+                fg = colors.cursor_text;
+                bg = colors.cursor;
+            }
+            if bg != colors.background {
+                match rects.last_mut() {
+                    Some(last)
+                        if last.row == row
+                            && last.column + last.cells == column
+                            && last.color == bg =>
+                    {
+                        last.cells += 1;
+                    }
+                    _ => rects.push(BgRect {
+                        row,
+                        column,
+                        cells: 1,
+                        color: bg,
+                    }),
+                }
+            }
+            if cell.c == ' '
+                && !cell.attrs.contains(terminal::Attrs::UNDERLINE)
+                && !cell.attrs.contains(terminal::Attrs::STRIKETHROUGH)
+                && !on_cursor
+            {
+                continue;
+            }
+            let font = Font {
+                family: font.family.clone(),
+                weight: if cell.attrs.contains(terminal::Attrs::BOLD) {
+                    FontWeight::BOLD
+                } else {
+                    FontWeight::NORMAL
+                },
+                style: if cell.attrs.contains(terminal::Attrs::ITALIC) {
+                    FontStyle::Italic
+                } else {
+                    FontStyle::Normal
+                },
+                ..Default::default()
+            };
+            let run = TextRun {
+                len: cell.c.len_utf8(),
+                font,
+                color: if on_cursor { colors.cursor_text } else { fg },
+                background_color: None,
+                underline: cell
+                    .attrs
+                    .contains(terminal::Attrs::UNDERLINE)
+                    .then(UnderlineStyle::default),
+                strikethrough: cell
+                    .attrs
+                    .contains(terminal::Attrs::STRIKETHROUGH)
+                    .then(Default::default),
+            };
+            match batches.last_mut() {
+                Some(last)
+                    if last.row == row
+                        && last.column + last.text.chars().count() == column
+                        && same_run(&last.run, &run) =>
+                {
+                    last.text.push(cell.c);
+                    last.run.len += cell.c.len_utf8();
+                }
+                _ => batches.push(TextBatch {
+                    row,
+                    column,
+                    text: cell.c.to_string(),
+                    run,
+                }),
+            }
+        }
+    }
+    (rects, batches)
+}
+
+fn same_run(left: &TextRun, right: &TextRun) -> bool {
+    left.font == right.font
+        && left.color == right.color
+        && left.background_color == right.background_color
+        && left.underline == right.underline
+        && left.strikethrough == right.strikethrough
+}
+
+fn selection_on_row(snapshot: &terminal::Snapshot, row: usize) -> Option<(usize, usize)> {
+    let span = snapshot.selection?;
+    let line = row as i32 - snapshot.display_offset as i32;
+    if line < span.start.line || line > span.end.line {
+        return None;
+    }
+    let start = if line == span.start.line {
+        span.start.column
+    } else {
+        0
+    };
+    let end = if line == span.end.line {
+        span.end.column
+    } else {
+        snapshot.columns - 1
+    };
+    Some((start.min(end), end.max(start)))
+}
+
 /// The platform's view of the terminal as a text target. Composition
 /// updates are held as marked text; a commit goes to the child as if
 /// typed. There is no document to edit, so range queries answer nothing
 /// and the selection is always the empty range at zero — enough for the
 /// candidate window to anchor at the cursor.
 struct TerminalInputHandler {
-    view: gpui::Entity<TerminalView>,
+    view: Entity<TerminalView>,
 }
 
 impl InputHandler for TerminalInputHandler {
@@ -797,7 +1006,12 @@ impl InputHandler for TerminalInputHandler {
     }
 
     fn marked_text_range(&mut self, _: &mut Window, cx: &mut App) -> Option<Range<usize>> {
-        let marked = self.view.read(cx).marked_text.as_deref()?;
+        let marked = self
+            .view
+            .read(cx)
+            .marked_text
+            .as_deref()
+            .filter(|text| !text.is_empty())?;
         Some(0..marked.encode_utf16().count())
     }
 
@@ -815,7 +1029,7 @@ impl InputHandler for TerminalInputHandler {
         &mut self,
         _: Option<Range<usize>>,
         text: &str,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut App,
     ) {
         self.view.update(cx, |view, cx| {
@@ -823,6 +1037,7 @@ impl InputHandler for TerminalInputHandler {
             view.commit(text);
             cx.notify();
         });
+        window.invalidate_character_coordinates();
     }
 
     fn replace_and_mark_text_in_range(
@@ -830,46 +1045,43 @@ impl InputHandler for TerminalInputHandler {
         _: Option<Range<usize>>,
         text: &str,
         _: Option<Range<usize>>,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut App,
     ) {
         self.view.update(cx, |view, cx| {
-            view.marked_text = Some(text.to_string());
+            view.marked_text = (!text.is_empty()).then(|| text.to_string());
             cx.notify();
         });
+        window.invalidate_character_coordinates();
     }
 
-    fn unmark_text(&mut self, _: &mut Window, cx: &mut App) {
+    fn unmark_text(&mut self, window: &mut Window, cx: &mut App) {
         self.view.update(cx, |view, cx| {
             view.marked_text = None;
             cx.notify();
         });
+        window.invalidate_character_coordinates();
     }
 
-    /// The candidate window sits where the child's cursor is, as far as
-    /// the view knows it: the grid's origin plus the cursor's cell. While
-    /// scrolled into history there is no cursor to anchor to.
+    fn element_bounds(&mut self, _: &mut Window, cx: &mut App) -> Option<Bounds<Pixels>> {
+        self.view.read(cx).cursor_cell_bounds()
+    }
+
+    fn prefers_ime_for_printable_keys(&mut self, _: &mut Window, _: &mut App) -> bool {
+        // Zed's terminal keeps the default: printable keys reach the
+        // child so the shell echoes them. Composition still arrives
+        // through `replace_and_mark_text_in_range` when an IME is
+        // actually composing.
+        false
+    }
+
     fn bounds_for_range(
         &mut self,
         _: Range<usize>,
         _: &mut Window,
         cx: &mut App,
     ) -> Option<Bounds<Pixels>> {
-        let view = self.view.read(cx);
-        let origin = view.grid_bounds.borrow().as_ref()?.origin;
-        let (cell_width, line_height) = view.metrics;
-        let snapshot = view.terminal.as_ref()?.snapshot();
-        if snapshot.display_offset != 0 {
-            return None;
-        }
-        Some(Bounds {
-            origin: origin
-                + point(
-                    px(snapshot.cursor.column as f32 * f32::from(cell_width)),
-                    px(snapshot.cursor.row as f32 * f32::from(line_height)),
-                ),
-            size: size(cell_width, line_height),
-        })
+        self.view.read(cx).cursor_cell_bounds()
     }
 
     fn character_index_for_point(
@@ -950,4 +1162,24 @@ mod tests {
         // terminal's to take; the named keys above are the whole list.
         assert!(key_input(&keystroke("menu", None)).is_none());
     }
+
+    #[test]
+    fn empty_ime_mark_is_not_composing() {
+        // macOS ends a composition by marking the empty string. Treating
+        // that as still composing would swallow every later key.
+        assert!(!marked_is_composing(None));
+        assert!(!marked_is_composing(Some("")));
+        assert!(marked_is_composing(Some("ni")));
+    }
+
+    #[test]
+    fn grid_cells_never_overrun_the_span() {
+        assert_eq!(grid_cells(px(100.), px(16.)), 6);
+        assert_eq!(grid_cells(px(16.), px(16.)), 2);
+        assert_eq!(grid_cells(px(15.), px(16.)), 2);
+    }
+}
+
+fn marked_is_composing(marked: Option<&str>) -> bool {
+    marked.is_some_and(|text| !text.is_empty())
 }
