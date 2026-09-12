@@ -63,6 +63,15 @@ fn main() {
                 KeyBinding::new(&format!("{modifier}-shift-g"), ToggleChanges, Some("Folio")),
                 KeyBinding::new("f7", NextHunk, Some("Folio")),
                 KeyBinding::new("shift-f7", PrevHunk, Some("Folio")),
+                KeyBinding::new(&format!("{modifier}-\\"), SplitEditor, Some("Folio")),
+                KeyBinding::new(&format!("{modifier}-alt-left"), FocusLeftPane, Some("Folio")),
+                KeyBinding::new(
+                    &format!("{modifier}-alt-right"),
+                    FocusRightPane,
+                    Some("Folio"),
+                ),
+                KeyBinding::new(&format!("{modifier}-alt-up"), FocusLeftPane, Some("Folio")),
+                KeyBinding::new(&format!("{modifier}-alt-down"), FocusRightPane, Some("Folio")),
                 KeyBinding::new(&format!("{modifier}-alt-b"), ToggleBlame, Some("Folio")),
                 // The editor's own ⌘⇧F, moved off it so `⇧⌘F` can be the
                 // project search everywhere. The action is the component's;

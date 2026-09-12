@@ -28,6 +28,14 @@ pub struct SessionProject {
     pub tabs: Vec<PathBuf>,
     #[serde(default)]
     pub active: Option<PathBuf>,
+    /// The second pane, when the last session was split. Empty means one pane.
+    #[serde(default)]
+    pub right_tabs: Vec<PathBuf>,
+    #[serde(default)]
+    pub right_active: Option<PathBuf>,
+    /// The pair was stacked rather than side by side.
+    #[serde(default)]
+    pub split_vertical: bool,
 }
 
 /// Every project that was open, in the order they were opened.
@@ -52,12 +60,23 @@ impl Session {
         session.projects.retain(|project| project.root.is_dir());
         for project in &mut session.projects {
             project.tabs.retain(|tab| tab.is_file());
+            project.right_tabs.retain(|tab| tab.is_file());
             if project
                 .active
                 .as_ref()
                 .is_some_and(|active| !active.is_file())
             {
                 project.active = None;
+            }
+            if project
+                .right_active
+                .as_ref()
+                .is_some_and(|active| !active.is_file())
+            {
+                project.right_active = None;
+            }
+            if project.right_tabs.is_empty() {
+                project.right_active = None;
             }
         }
         session
@@ -134,8 +153,11 @@ mod tests {
         let session = Session {
             projects: vec![SessionProject {
                 root: project.clone(),
-                tabs: vec![file.clone(), other.clone()],
-                active: Some(other.clone()),
+                tabs: vec![file.clone()],
+                active: Some(file.clone()),
+                right_tabs: vec![other.clone()],
+                right_active: Some(other.clone()),
+                split_vertical: false,
             }],
         };
 
@@ -155,11 +177,13 @@ mod tests {
                     root: project.clone(),
                     tabs: vec![file.clone(), other.clone()],
                     active: Some(other.clone()),
+                    ..Default::default()
                 },
                 SessionProject {
                     root: root.join("missing"),
                     tabs: vec![root.join("missing/main.rs")],
                     active: Some(root.join("missing/main.rs")),
+                    ..Default::default()
                 },
             ],
         };

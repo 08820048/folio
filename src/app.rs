@@ -377,6 +377,13 @@ actions!(
         PrevHunk,
         NextChangeFile,
         PrevChangeFile,
+        SplitEditor,
+        SplitEditorLeft,
+        SplitEditorUp,
+        SplitEditorDown,
+        JoinEditor,
+        FocusLeftPane,
+        FocusRightPane,
         ToggleBlame,
         CheckForUpdates,
         ToggleComment,
@@ -499,6 +506,11 @@ enum MenuItem {
     CopyRelativePath,
     PinTab,
     RevealInTree,
+    // The tab-bar split button, the way Zed's pane menu is.
+    SplitRight,
+    SplitLeft,
+    SplitUp,
+    SplitDown,
 }
 
 /// What a right-click opened over. Which surface it is decides which entries
@@ -511,6 +523,8 @@ enum MenuTarget {
     Changes { path: PathBuf },
     /// A tab in the strip, which is not necessarily the active one.
     Tab { path: PathBuf, index: usize },
+    /// The split button on a pane's tab bar.
+    Split { pane: usize },
 }
 
 impl MenuTarget {
@@ -520,6 +534,7 @@ impl MenuTarget {
             MenuTarget::Tree { path, .. }
             | MenuTarget::Changes { path }
             | MenuTarget::Tab { path, .. } => path,
+            MenuTarget::Split { .. } => Path::new(""),
         }
     }
 }
@@ -529,6 +544,7 @@ enum Surface {
     Tree,
     Changes,
     Tab,
+    Split,
 }
 
 /// `(item, label, shortcut)`. One table per surface, so each one's separators
@@ -576,6 +592,14 @@ const TAB_MENU: &[(MenuItem, &str, &str)] = &[
 ];
 const TAB_SEPARATORS: &[usize] = &[2, 4, 6, 7, 9, 10];
 
+const SPLIT_MENU: &[(MenuItem, &str, &str)] = &[
+    (MenuItem::SplitRight, "Split Right", "⌘K →"),
+    (MenuItem::SplitLeft, "Split Left", "⌘K ←"),
+    (MenuItem::SplitUp, "Split Up", "⌘K ↑"),
+    (MenuItem::SplitDown, "Split Down", "⌘K ↓"),
+];
+const SPLIT_SEPARATORS: &[usize] = &[];
+
 impl Surface {
     /// This surface's entries, and where the rules between them go.
     fn menu(
@@ -588,6 +612,7 @@ impl Surface {
             Surface::Tree => (TREE_MENU, TREE_SEPARATORS),
             Surface::Changes => (CHANGES_MENU, CHANGES_SEPARATORS),
             Surface::Tab => (TAB_MENU, TAB_SEPARATORS),
+            Surface::Split => (SPLIT_MENU, SPLIT_SEPARATORS),
         }
     }
 }
@@ -597,6 +622,7 @@ fn surface_of(target: &MenuTarget) -> Surface {
         MenuTarget::Tree { .. } => Surface::Tree,
         MenuTarget::Changes { .. } => Surface::Changes,
         MenuTarget::Tab { .. } => Surface::Tab,
+        MenuTarget::Split { .. } => Surface::Split,
     }
 }
 
@@ -648,6 +674,10 @@ fn shortcut_key(shortcut: &str) -> Option<String> {
         '⌦' => "delete".into(),
         '↩' => "enter".into(),
         '⎋' => "escape".into(),
+        '→' => "right".into(),
+        '←' => "left".into(),
+        '↑' => "up".into(),
+        '↓' => "down".into(),
         key => key.to_lowercase().to_string(),
     })
 }
@@ -849,7 +879,44 @@ struct DiffView {
     request: u64,
 }
 
-#[derive(Default)]
+/// Which way two panes sit. One axis at a time: Folio is still two panes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum SplitAxis {
+    #[default]
+    Horizontal,
+    Vertical,
+}
+
+/// Where the new pane goes, matching Zed's four split actions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SplitDirection {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+impl SplitDirection {
+    fn axis(self) -> SplitAxis {
+        match self {
+            Self::Left | Self::Right => SplitAxis::Horizontal,
+            Self::Up | Self::Down => SplitAxis::Vertical,
+        }
+    }
+
+    /// The new pane is the first one (left or top).
+    fn leading(self) -> bool {
+        matches!(self, Self::Left | Self::Up)
+    }
+}
+
+/// One editor column: its own strip and the file it is showing.
+#[derive(Clone, Default)]
+struct Pane {
+    tabs: Vec<PathBuf>,
+    active: Option<PathBuf>,
+}
+
 struct Project {
     id: u64,
     image: Option<(PathBuf, std::sync::Arc<RenderImage>)>,
@@ -860,15 +927,16 @@ struct Project {
     selected_row: usize,
     tree_scroll: UniformListScrollHandle,
     documents: HashMap<PathBuf, Document>,
-    /// The open files, in strip order. `documents` holds the buffers; this
-    /// holds which of them are showing and in what order.
-    tabs: Vec<PathBuf>,
+    /// One or two editor columns. A file lives in at most one of them.
+    panes: Vec<Pane>,
+    focused: usize,
+    /// Ignored while there is only one pane.
+    split_axis: SplitAxis,
     /// Tabs the user has pinned, and buffers they have locked. Both are view
     /// state — neither reaches the disk — and both are per project, so
     /// switching projects keeps them.
     pinned: HashSet<PathBuf>,
     read_only: HashSet<PathBuf>,
-    active: Option<PathBuf>,
     git_status: HashMap<String, char>,
     files: Vec<PathBuf>,
     indexing: bool,
@@ -877,6 +945,81 @@ struct Project {
     /// Open buffers whose disk copy no longer matches `saved`. Clean buffers
     /// reload on their own; these are the dirty ones waiting for Reload / Keep.
     disk_notice: HashMap<PathBuf, DiskNotice>,
+}
+
+impl Default for Project {
+    fn default() -> Self {
+        Self {
+            id: 0,
+            image: None,
+            workspace: None,
+            directories: HashMap::new(),
+            expanded: HashSet::new(),
+            rows: Vec::new(),
+            selected_row: 0,
+            tree_scroll: UniformListScrollHandle::new(),
+            documents: HashMap::new(),
+            panes: vec![Pane::default()],
+            focused: 0,
+            split_axis: SplitAxis::Horizontal,
+            pinned: HashSet::new(),
+            read_only: HashSet::new(),
+            git_status: HashMap::new(),
+            files: Vec::new(),
+            indexing: false,
+            diff: None,
+            disk_notice: HashMap::new(),
+        }
+    }
+}
+
+impl Project {
+    fn pane(&self) -> &Pane {
+        self.panes
+            .get(self.focused)
+            .or_else(|| self.panes.first())
+            .expect("a project always has a pane")
+    }
+
+    fn pane_mut(&mut self) -> &mut Pane {
+        let index = self.focused.min(self.panes.len().saturating_sub(1));
+        &mut self.panes[index]
+    }
+
+    fn tabs(&self) -> &[PathBuf] {
+        &self.pane().tabs
+    }
+
+    fn active(&self) -> Option<&PathBuf> {
+        self.pane().active.as_ref()
+    }
+
+    fn pane_index_of(&self, path: &Path) -> Option<usize> {
+        self.panes
+            .iter()
+            .position(|pane| pane.tabs.iter().any(|tab| tab == path))
+    }
+
+    fn showing(&self, path: &Path) -> bool {
+        self.panes
+            .iter()
+            .any(|pane| pane.active.as_ref().is_some_and(|active| active.as_path() == path))
+    }
+
+    /// Put this file on screen. If another column already has it, look there
+    /// instead of copying the tab.
+    fn show_path(&mut self, path: PathBuf) {
+        if let Some(index) = self.pane_index_of(&path) {
+            self.focused = index;
+            self.pane_mut().active = Some(path);
+            return;
+        }
+        let pane = self.pane_mut();
+        if !pane.tabs.contains(&path) {
+            pane.tabs.push(path.clone());
+        }
+        pane.active = Some(path);
+    }
 }
 
 /// What the disk did to a dirty buffer while Folio still holds edits.
@@ -918,6 +1061,9 @@ pub struct Folio {
     activity_bar: bool,
     sidebar_width: f32,
     resizing: bool,
+    /// Share of the editor column the first pane takes when split.
+    pane_ratio: f32,
+    resizing_pane: bool,
     /// The terminal drawer: whether it shows, how tall, whether its top
     /// edge is being dragged, and each project's terminal tabs.
     terminals: HashMap<PathBuf, TerminalTabs>,
@@ -932,9 +1078,12 @@ pub struct Folio {
     match_selected: usize,
     /// The open right-click menu, if any.
     menu: Option<ContextMenu>,
+    /// Zed's `⌘K` then an arrow. Cleared by the next key.
+    split_chord: bool,
     /// Where a dragged tab would land, while one is in flight. Drawn as a
     /// caret between the tabs.
-    tab_drop: Option<usize>,
+    /// Which pane and which slot a dragged tab is hovering.
+    tab_drop: Option<(usize, usize)>,
     /// Where Cut / Copy put the entry, and whether it was a cut.
     clipboard: Option<FileClipboard>,
     /// The tree row being named, if any.
@@ -1058,6 +1207,10 @@ enum Restore {
     /// A file that had edits which never reached the disk: opened, and then
     /// given them back.
     Unsaved(PathBuf, String),
+    /// Open an empty second pane so the next files land there.
+    Split { vertical: bool },
+    /// After the right pane is restored, look at the left one again.
+    FocusPane(usize),
 }
 
 fn remap_project_paths(project: &mut Project, from: &Path, to: &Path) {
@@ -1074,15 +1227,17 @@ fn remap_project_paths(project: &mut Project, from: &Path, to: &Path) {
         .into_iter()
         .map(|(path, document)| (moved(&path, from, to).unwrap_or(path), document))
         .collect();
-    if let Some(active) = project.active.take() {
-        project.active = Some(moved(&active, from, to).unwrap_or(active));
-    }
     if let Some((image, render)) = project.image.take() {
         project.image = Some((moved(&image, from, to).unwrap_or(image), render));
     }
-    for tab in &mut project.tabs {
-        if let Some(renamed) = moved(tab, from, to) {
-            *tab = renamed;
+    for pane in &mut project.panes {
+        if let Some(active) = pane.active.take() {
+            pane.active = Some(moved(&active, from, to).unwrap_or(active));
+        }
+        for tab in &mut pane.tabs {
+            if let Some(renamed) = moved(tab, from, to) {
+                *tab = renamed;
+            }
         }
     }
     let remap_set = |set: HashSet<PathBuf>| {
@@ -1196,6 +1351,8 @@ impl Folio {
             activity_bar: settings.activity_bar,
             sidebar_width: 240.,
             resizing: false,
+            pane_ratio: 0.5,
+            resizing_pane: false,
             terminals: HashMap::new(),
             terminal_open: false,
             terminal_height: 260.,
@@ -1207,6 +1364,7 @@ impl Folio {
             matches: vec![],
             match_selected: 0,
             menu: None,
+            split_chord: false,
             tab_drop: None,
             clipboard: None,
             editing: None,
@@ -1371,18 +1529,18 @@ impl Folio {
     fn close_tabs(&mut self, closing: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
         let active_survives = self
             .project
-            .active
-            .as_ref()
+            .active()
             .is_some_and(|active| !closing.contains(active));
         // Where the view lands if the active tab is one of them: the first tab
         // after the set that survives, else the last one before it.
-        let replacement = self.project.active.as_ref().and_then(|active| {
-            let index = self.project.tabs.iter().position(|tab| tab == active)?;
-            self.project.tabs[index..]
+        let replacement = self.project.active().cloned().and_then(|active| {
+            let tabs = self.project.tabs();
+            let index = tabs.iter().position(|tab| tab == &active)?;
+            tabs[index..]
                 .iter()
                 .find(|tab| !closing.contains(tab))
                 .or_else(|| {
-                    self.project.tabs[..index]
+                    tabs[..index]
                         .iter()
                         .rev()
                         .find(|tab| !closing.contains(tab))
@@ -1390,7 +1548,12 @@ impl Folio {
                 .cloned()
         });
         for path in &closing {
-            self.project.tabs.retain(|tab| tab != path);
+            for pane in &mut self.project.panes {
+                pane.tabs.retain(|tab| tab != path);
+                if pane.active.as_ref() == Some(path) {
+                    pane.active = None;
+                }
+            }
             self.project.documents.remove(path);
             self.project.pinned.remove(path);
             self.project.read_only.remove(path);
@@ -1406,6 +1569,7 @@ impl Folio {
                 self.goto = None;
             }
         }
+        self.prune_empty_panes();
         if active_survives {
             cx.notify();
             return;
@@ -1413,7 +1577,7 @@ impl Folio {
         match replacement {
             Some(next) => self.open_file(next, window, cx),
             None => {
-                self.project.active = None;
+                self.project.pane_mut().active = None;
                 self.open_request += 1;
                 self.loading = false;
                 self.focus_editor(window, cx);
@@ -1421,6 +1585,141 @@ impl Folio {
                 cx.notify();
             }
         }
+    }
+
+    /// Drop a pane that has no tabs, and look at the one that remains.
+    fn prune_empty_panes(&mut self) {
+        if self.project.panes.len() <= 1 {
+            if self.project.panes.is_empty() {
+                self.project.panes.push(Pane::default());
+            }
+            self.project.focused = 0;
+            self.project.split_axis = SplitAxis::Horizontal;
+            return;
+        }
+        let focused_empty = self
+            .project
+            .panes
+            .get(self.project.focused)
+            .is_some_and(|pane| pane.tabs.is_empty());
+        self.project.panes.retain(|pane| !pane.tabs.is_empty());
+        if self.project.panes.is_empty() {
+            self.project.panes.push(Pane::default());
+        }
+        if focused_empty || self.project.focused >= self.project.panes.len() {
+            self.project.focused = self.project.panes.len() - 1;
+        }
+        if self.project.panes.len() <= 1 {
+            self.project.split_axis = SplitAxis::Horizontal;
+        }
+    }
+
+    /// Cut a second pane in `direction`. Two tabs become one each; one file
+    /// leaves the new pane empty. Already split: turn the pair that way so
+    /// the other pane sits on that side of the focused one.
+    fn split_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.split_in(SplitDirection::Right, window, cx);
+    }
+
+    fn split_in(
+        &mut self,
+        direction: SplitDirection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.project.workspace.is_none() {
+            return;
+        }
+        self.project.split_axis = direction.axis();
+        if self.project.panes.len() > 1 {
+            let focused = self.project.focused.min(1);
+            let other_after = focused == 0;
+            let want_other_after = !direction.leading();
+            if other_after != want_other_after {
+                self.project.panes.swap(0, 1);
+                self.project.focused = 1 - focused;
+            }
+            self.focus_editor(window, cx);
+            cx.notify();
+            return;
+        }
+        let other = {
+            let pane = self.project.pane();
+            let Some(active) = pane.active.clone() else {
+                if direction.leading() {
+                    self.project.panes.insert(0, Pane::default());
+                    self.project.focused = 0;
+                } else {
+                    self.project.panes.push(Pane::default());
+                    self.project.focused = 1;
+                }
+                cx.notify();
+                return;
+            };
+            let index = pane.tabs.iter().position(|tab| tab == &active);
+            index.and_then(|index| {
+                pane.tabs
+                    .get(index.saturating_sub(1))
+                    .filter(|tab| *tab != &active)
+                    .cloned()
+                    .or_else(|| {
+                        pane.tabs
+                            .get(index + 1)
+                            .filter(|tab| *tab != &active)
+                            .cloned()
+                    })
+            })
+        };
+        let mut created = Pane::default();
+        if let Some(path) = other {
+            let source = self.project.pane_mut();
+            source.tabs.retain(|tab| tab != &path);
+            created.tabs.push(path.clone());
+            created.active = Some(path);
+        }
+        if direction.leading() {
+            self.project.panes.insert(0, created);
+            self.project.focused = 1;
+            if self.project.panes[0].tabs.is_empty() {
+                self.project.focused = 0;
+            }
+        } else {
+            self.project.panes.push(created);
+            if self.project.panes[1].tabs.is_empty() {
+                self.project.focused = 1;
+            }
+        }
+        self.focus_editor(window, cx);
+        cx.notify();
+    }
+
+    fn join_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.project.panes.len() < 2 {
+            return;
+        }
+        let right = self.project.panes.remove(1);
+        let left = &mut self.project.panes[0];
+        for path in right.tabs {
+            if !left.tabs.contains(&path) {
+                left.tabs.push(path);
+            }
+        }
+        self.project.focused = 0;
+        self.project.split_axis = SplitAxis::Horizontal;
+        self.reorder_tabs();
+        self.focus_editor(window, cx);
+        cx.notify();
+    }
+
+    fn focus_pane(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if index >= self.project.panes.len() {
+            return;
+        }
+        self.project.focused = index;
+        self.focus_editor(window, cx);
+        self.update_title(window);
+        self.follow_diff(window, cx);
+        cx.notify();
     }
 
     fn perform(&mut self, next: Next, window: &mut Window, cx: &mut Context<Self>) {
@@ -1504,6 +1803,8 @@ impl Folio {
         self.loading = false;
         self.project_loading = false;
         self.resizing = false;
+        self.resizing_pane = false;
+        self.split_chord = false;
         self.message = None;
     }
 
@@ -1590,8 +1891,7 @@ impl Folio {
         }
         if let Some(doc) = self
             .project
-            .active
-            .as_ref()
+            .active()
             .and_then(|p| self.project.documents.get(p))
         {
             doc.editor.focus_handle(cx).focus(window, cx);
@@ -2157,15 +2457,13 @@ impl Folio {
         self.project
             .documents
             .retain(|key, _| !key.starts_with(path));
-        self.project.tabs.retain(|tab| !tab.starts_with(path));
-        if self
-            .project
-            .active
-            .as_ref()
-            .is_some_and(|key| key.starts_with(path))
-        {
-            self.project.active = None;
+        for pane in &mut self.project.panes {
+            pane.tabs.retain(|tab| !tab.starts_with(path));
+            if pane.active.as_ref().is_some_and(|key| key.starts_with(path)) {
+                pane.active = None;
+            }
         }
+        self.prune_empty_panes();
         if self
             .project
             .image
@@ -2221,13 +2519,15 @@ impl Folio {
                 if path.starts_with(&root) {
                     project.documents.insert(path, document);
                 } else {
-                    project.tabs.retain(|tab| tab != &path);
+                    for pane in &mut project.panes {
+                        pane.tabs.retain(|tab| tab != &path);
+                        if pane.active.as_ref() == Some(&path) {
+                            pane.active = None;
+                        }
+                    }
                     project.pinned.remove(&path);
                     project.read_only.remove(&path);
                     project.disk_notice.remove(&path);
-                    if project.active.as_ref() == Some(&path) {
-                        project.active = None;
-                    }
                     orphans.push((path, document));
                 }
             }
@@ -2242,8 +2542,8 @@ impl Folio {
                         .is_some_and(|workspace| path.starts_with(&workspace.root))
                 });
             if let Some(project) = home {
-                if !project.tabs.contains(&path) {
-                    project.tabs.push(path.clone());
+                if project.pane_index_of(&path).is_none() {
+                    project.pane_mut().tabs.push(path.clone());
                 }
                 project.documents.insert(path, document);
             }
@@ -2374,7 +2674,12 @@ impl Folio {
     /// The tabs an entry would close, which is nothing for anything else. The
     /// bulk entries leave pinned tabs alone — that is what pinning is for.
     fn tabs_to_close(&self, item: MenuItem, path: &Path) -> Vec<PathBuf> {
-        let tabs = &self.project.tabs;
+        let tabs = self
+            .project
+            .pane_index_of(path)
+            .and_then(|index| self.project.panes.get(index))
+            .map(|pane| pane.tabs.as_slice())
+            .unwrap_or(&[]);
         let Some(index) = tabs.iter().position(|tab| tab == path) else {
             return Vec::new();
         };
@@ -2431,38 +2736,73 @@ impl Folio {
         }
     }
 
-    /// Move a dragged tab into another tab's place: it lands at that tab's
-    /// index and everything between shifts one step back towards where it came
-    /// from. Every position is reachable this way, including the last, and a
-    /// one-slot drag moves in either direction.
+    /// Land `dragged` at `to` in `to_pane`. Same pane reorders the strip;
+    /// another pane takes the tab across, and an emptied pane is pruned.
     ///
-    /// Nothing here reads the pointer. The tab the drop landed on is the one
-    /// thing a drop reliably reports, and a rule built on anything finer — which
-    /// half of a tab the pointer is over — depends on move events arriving for
-    /// every tab on the way, which is exactly what could not be relied on.
+    /// Nothing here reads the pointer. The tab or strip the drop landed on is
+    /// the one thing a drop reliably reports, and a rule built on anything
+    /// finer — which half of a tab the pointer is over — depends on move
+    /// events arriving for every tab on the way, which is exactly what could
+    /// not be relied on.
     ///
-    /// Pinned tabs stay at the front, so a drop can neither strand one among
-    /// the unpinned ones nor put an unpinned one ahead of them.
-    fn move_tab(&mut self, dragged: &Path, to: usize, cx: &mut Context<Self>) {
+    /// Pinned tabs stay at the front of whichever pane they land in.
+    fn move_tab_to(
+        &mut self,
+        dragged: &Path,
+        to_pane: usize,
+        to: usize,
+        cx: &mut Context<Self>,
+    ) {
         self.tab_drop = None;
-        let mut tabs = std::mem::take(&mut self.project.tabs);
-        let Some(from) = tabs.iter().position(|tab| tab == dragged) else {
-            self.project.tabs = tabs;
+        if to_pane >= self.project.panes.len() {
+            return;
+        }
+        let Some(from_pane) = self.project.pane_index_of(dragged) else {
             return;
         };
-        let tab = tabs.remove(from);
-        let to = to.min(tabs.len());
-        let pinned = tabs
+        let Some(from) = self.project.panes[from_pane]
+            .tabs
             .iter()
-            .filter(|tab| self.project.pinned.contains(*tab))
+            .position(|tab| tab == dragged)
+        else {
+            return;
+        };
+        let tab = self.project.panes[from_pane].tabs.remove(from);
+        if from_pane != to_pane {
+            let source = &mut self.project.panes[from_pane];
+            if source.active.as_ref() == Some(&tab) {
+                source.active = source
+                    .tabs
+                    .get(from)
+                    .or_else(|| source.tabs.last())
+                    .cloned();
+            }
+        }
+        let dest = &mut self.project.panes[to_pane];
+        if dest.tabs.iter().any(|open| open == &tab) {
+            dest.active = Some(tab);
+            self.project.focused = to_pane;
+            self.prune_empty_panes();
+            cx.notify();
+            return;
+        }
+        let pinned = dest
+            .tabs
+            .iter()
+            .filter(|open| self.project.pinned.contains(*open))
             .count();
+        let to = to.min(dest.tabs.len());
         let to = if self.project.pinned.contains(&tab) {
             to.min(pinned)
         } else {
             to.max(pinned)
         };
-        tabs.insert(to, tab);
-        self.project.tabs = tabs;
+        dest.tabs.insert(to, tab.clone());
+        if from_pane != to_pane {
+            dest.active = Some(tab);
+            self.project.focused = to_pane;
+        }
+        self.prune_empty_panes();
         cx.notify();
     }
 
@@ -2470,7 +2810,9 @@ impl Folio {
     /// keeps the order it already had.
     fn reorder_tabs(&mut self) {
         let pinned = self.project.pinned.clone();
-        self.project.tabs.sort_by_key(|tab| !pinned.contains(tab));
+        for pane in &mut self.project.panes {
+            pane.tabs.sort_by_key(|tab| !pinned.contains(tab));
+        }
     }
 
     /// Put a string on the system clipboard and say so, because the clipboard
@@ -2513,7 +2855,28 @@ impl Folio {
             MenuTarget::Tree { path, .. } => self.run_tree_item(item, path, window, cx),
             MenuTarget::Changes { .. } => self.run_changes_item(item, window, cx),
             MenuTarget::Tab { path, .. } => self.run_tab_item(item, path, window, cx),
+            MenuTarget::Split { pane } => self.run_split_item(item, pane, window, cx),
         }
+    }
+
+    fn run_split_item(
+        &mut self,
+        item: MenuItem,
+        pane: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if pane < self.project.panes.len() {
+            self.project.focused = pane;
+        }
+        let direction = match item {
+            MenuItem::SplitRight => SplitDirection::Right,
+            MenuItem::SplitLeft => SplitDirection::Left,
+            MenuItem::SplitUp => SplitDirection::Up,
+            MenuItem::SplitDown => SplitDirection::Down,
+            _ => return,
+        };
+        self.split_in(direction, window, cx);
     }
 
     /// The entries a tab offers.
@@ -2916,8 +3279,7 @@ impl Folio {
     fn focus_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(doc) = self
             .project
-            .active
-            .as_ref()
+            .active()
             .and_then(|path| self.project.documents.get(path))
         {
             doc.editor.focus_handle(cx).focus(window, cx);
@@ -2958,7 +3320,7 @@ impl Folio {
 
     /// The buffer being edited, if one is. An image preview has none.
     fn active_editor(&self) -> Option<Entity<EditorState>> {
-        let path = self.project.active.as_ref()?;
+        let path = self.project.active()?;
         self.project
             .documents
             .get(path)
@@ -3127,7 +3489,7 @@ impl Folio {
     /// range, so it is done by selecting the lines and replacing the selection
     /// — which is also what puts it on the undo stack as one step.
     fn toggle_comment(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(path) = self.project.active.clone() else {
+        let Some(path) = self.project.active().cloned() else {
             return;
         };
         let Some(marker) = buffer::line_comment(buffer::language(&path)) else {
@@ -3171,7 +3533,7 @@ impl Folio {
     }
 
     fn toggle_block_comment(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(path) = self.project.active.clone() else {
+        let Some(path) = self.project.active().cloned() else {
             return;
         };
         let Some((open, close)) = buffer::block_comment(buffer::language(&path)) else {
@@ -3201,7 +3563,7 @@ impl Folio {
         cx: &mut Context<Self>,
         change: impl FnOnce(&str) -> String,
     ) {
-        let Some(path) = self.project.active.clone() else {
+        let Some(path) = self.project.active().cloned() else {
             return;
         };
         let Some(editor) = self
@@ -3238,7 +3600,7 @@ impl Folio {
         cx: &mut Context<Self>,
         change: impl FnOnce(&str, std::ops::Range<usize>) -> Option<(String, std::ops::Range<usize>)>,
     ) {
-        let Some(path) = self.project.active.clone() else {
+        let Some(path) = self.project.active().cloned() else {
             return;
         };
         let Some(editor) = self
@@ -3282,7 +3644,7 @@ impl Folio {
     /// the lines are the buffer's: a file with an edit in it would otherwise
     /// have everything below that edit attributed to the wrong commit.
     fn read_blame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(path) = self.project.active.clone() else {
+        let Some(path) = self.project.active().cloned() else {
             return;
         };
         let Some(document) = self.project.documents.get(&path) else {
@@ -3321,7 +3683,7 @@ impl Folio {
     /// there is anything to say.
     fn blame_text(&self, cx: &App) -> Option<String> {
         let view = self.blame.as_ref()?;
-        let path = self.project.active.as_ref()?;
+        let path = self.project.active()?;
         if view.path != *path {
             return None;
         }
@@ -3365,7 +3727,7 @@ impl Folio {
     /// rather than having to be reopened per file.
     fn load_diff(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let (Some(path), Some(workspace)) =
-            (self.project.active.clone(), self.project.workspace.clone())
+            (self.project.active().cloned(), self.project.workspace.clone())
         else {
             self.project.diff = None;
             cx.notify();
@@ -3418,33 +3780,108 @@ impl Folio {
         .detach();
     }
 
-    /// The open files, as a strip above the editor. Hidden while only one
-    /// file is open, which is the single-file mode the requirements ask to
-    /// keep: one file looks exactly as it did before tabs existed.
-    fn render_tabs(&self, cx: &Context<Self>) -> AnyElement {
-        let end = self.project.tabs.len();
+    /// The open files, as a strip above the editor. Always drawn so the
+    /// split button on the right — Zed's entry — is reachable with one file.
+    fn render_tabs(&self, pane: usize, cx: &Context<Self>) -> AnyElement {
+        let tabs = self
+            .project
+            .panes
+            .get(pane)
+            .map(|pane| pane.tabs.as_slice())
+            .unwrap_or(&[]);
+        let end = tabs.len();
         div()
-            .id("tabs")
+            .id(("tabs", pane))
             .flex_shrink_0()
             .w_full()
             .h(px(TAB_HEIGHT))
             .flex()
             .items_center()
+            .border_b_1()
+            .border_color(cx.theme().border)
             .children(
-                self.project
-                    .tabs
-                    .iter()
+                tabs.iter()
                     .enumerate()
                     .flat_map(|(index, path)| {
                         // A caret sits where the dragged tab would land, so the
                         // drop is not a guess.
-                        let caret = (self.tab_drop == Some(index)).then(|| Self::tab_caret(cx));
+                        let caret = (self.tab_drop == Some((pane, index)))
+                            .then(|| Self::tab_caret(cx));
                         caret
                             .into_iter()
-                            .chain(std::iter::once(self.render_tab(index, path, cx)))
+                            .chain(std::iter::once(self.render_tab(pane, index, path, cx)))
                     })
-                    .chain((self.tab_drop == Some(end)).then(|| Self::tab_caret(cx))),
+                    .chain((self.tab_drop == Some((pane, end))).then(|| Self::tab_caret(cx))),
             )
+            .child(
+                div()
+                    .id(("tab-rest", pane))
+                    .flex_1()
+                    .h_full()
+                    .on_drop(cx.listener(move |this, drag: &TabDrag, window, cx| {
+                        this.move_tab_to(&drag.path, pane, end, cx);
+                        this.focus_pane(this.project.focused, window, cx);
+                    }))
+                    .on_drag_move(cx.listener(move |this, _: &DragMoveEvent<TabDrag>, _, cx| {
+                        if this.tab_drop != Some((pane, end)) {
+                            this.tab_drop = Some((pane, end));
+                            cx.notify();
+                        }
+                    })),
+            )
+            .child(self.render_split_button(pane, cx))
+            .into_any_element()
+    }
+
+    /// Zed puts New / Split / Zoom on the tab bar's right. Folio only
+    /// needs Split: the button opens the four-direction menu.
+    fn render_split_button(&self, pane: usize, cx: &Context<Self>) -> AnyElement {
+        div()
+            .id(("pane-split", pane))
+            .role(Role::Button)
+            .aria_label("Split Pane")
+            .focusable()
+            .tab_index(0)
+            .size(px(24.))
+            .mr_1()
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .text_color(cx.theme().muted_foreground)
+            .hover(|el| el.text_color(cx.theme().foreground))
+            .focus_visible(|el| el.text_color(cx.theme().accent_foreground))
+            .tooltip(|window, cx| {
+                gpui_component::tooltip::Tooltip::new("Split Pane").build(window, cx)
+            })
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    this.project.focused = pane;
+                    this.open_menu(
+                        MenuTarget::Split { pane },
+                        event.position,
+                        window,
+                        cx,
+                    );
+                    cx.stop_propagation();
+                }),
+            )
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                    this.project.focused = pane;
+                    let size = window.viewport_size();
+                    this.open_menu(
+                        MenuTarget::Split { pane },
+                        point(size.width - px(16.), px(72.)),
+                        window,
+                        cx,
+                    );
+                    cx.stop_propagation();
+                }
+            }))
+            .child(Icon::new(FolioIcon::GapHorizontal).small())
             .into_any_element()
     }
 
@@ -3460,8 +3897,18 @@ impl Folio {
 
     /// One tab: the file's name, a mark when it has edits on disk to match,
     /// and the way to close it.
-    fn render_tab(&self, index: usize, path: &PathBuf, cx: &Context<Self>) -> AnyElement {
-        let selected = self.project.active.as_ref() == Some(path);
+    fn render_tab(
+        &self,
+        pane: usize,
+        index: usize,
+        path: &PathBuf,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let selected = self
+            .project
+            .panes
+            .get(pane)
+            .is_some_and(|pane| pane.active.as_ref() == Some(path));
         let dirty = self
             .project
             .documents
@@ -3471,7 +3918,7 @@ impl Folio {
         let close = path.clone();
         let menu_path = path.clone();
         div()
-            .id(("tab", index))
+            .id(format!("tab-{pane}-{index}"))
             .role(Role::Button)
             .aria_label(name(path))
             .aria_selected(selected)
@@ -3503,8 +3950,8 @@ impl Folio {
             // from the drop itself, so a move event that never arrives costs a
             // caret and nothing else.
             .on_drag_move(cx.listener(move |this, _: &DragMoveEvent<TabDrag>, _, cx| {
-                if this.tab_drop != Some(index) {
-                    this.tab_drop = Some(index);
+                if this.tab_drop != Some((pane, index)) {
+                    this.tab_drop = Some((pane, index));
                     cx.notify();
                 }
             }))
@@ -3519,8 +3966,9 @@ impl Folio {
                     })
                 },
             )
-            .on_drop(cx.listener(move |this, drag: &TabDrag, _, cx| {
-                this.move_tab(&drag.path, index, cx);
+            .on_drop(cx.listener(move |this, drag: &TabDrag, window, cx| {
+                this.move_tab_to(&drag.path, pane, index, cx);
+                this.focus_pane(this.project.focused, window, cx);
             }))
             // The menu acts on the tab that was clicked, which is not
             // necessarily the one showing.
@@ -3549,7 +3997,7 @@ impl Folio {
             })
             .child(
                 div()
-                    .id(("tab-close", index))
+                    .id(format!("tab-close-{pane}-{index}"))
                     .role(Role::Button)
                     .aria_label("Close")
                     .size(px(14.))
@@ -3616,7 +4064,7 @@ impl Folio {
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                    let Some(path) = this.project.active.clone() else {
+                    let Some(path) = this.project.active().cloned() else {
                         return;
                     };
                     this.open_menu(MenuTarget::Changes { path }, event.position, window, cx);
@@ -4151,16 +4599,14 @@ impl Folio {
         self.open_request += 1;
         // Opening is also what gives a file its tab, so a path reached from
         // the tree, quick open or a search hit all land in the same place.
-        if !self.project.tabs.contains(&path) {
-            self.project.tabs.push(path.clone());
-        }
+        // A file already in the other column moves the focus there.
+        self.project.show_path(path.clone());
         if self
             .project
             .image
             .as_ref()
             .is_some_and(|(image_path, _)| image_path == &path)
         {
-            self.project.active = Some(path);
             self.loading = false;
             self.tree_focus.focus(window, cx);
             self.update_title(window);
@@ -4174,7 +4620,6 @@ impl Folio {
         }
         if let Some(doc) = self.project.documents.get(&path) {
             let editor = doc.editor.clone();
-            self.project.active = Some(path.clone());
             self.loading = false;
             editor.focus_handle(cx).focus(window, cx);
             self.apply_goto(&path, window, cx);
@@ -4226,7 +4671,7 @@ impl Folio {
                             );
                         }
                         this.project.image = Some((path.clone(), image));
-                        this.project.active = Some(path);
+                        this.project.show_path(path);
                         this.message = None;
                         this.tree_focus.focus(window, cx);
                         this.update_title(window);
@@ -4286,7 +4731,7 @@ impl Folio {
                             },
                         );
                         this.apply_goto(&path, window, cx);
-                        this.project.active = Some(path.clone());
+                        this.project.show_path(path.clone());
                         this.message = None;
                         this.apply_recovered(&path, window, cx);
                         this.update_title(window);
@@ -4348,7 +4793,7 @@ impl Folio {
             .as_ref()
             .map(|w| name(&w.root))
             .unwrap_or("Folio".into());
-        let title = if let Some(path) = &self.project.active {
+        let title = if let Some(path) = self.project.active() {
             let dirty = self.project.documents.get(path).is_some_and(|d| d.dirty);
             format!(
                 "{}{} / {}",
@@ -4386,7 +4831,7 @@ impl Folio {
                             && only
                                 .as_ref()
                                 .is_none_or(|only| only.iter().any(|kept| kept == *path))
-                            && (next.is_some() || project.active.as_ref() == Some(path))
+                            && (next.is_some() || project.active() == Some(path))
                     })
                     .map(|(path, doc)| {
                         (
@@ -4508,19 +4953,30 @@ impl Folio {
                 .push_back(Restore::Project(project.root.clone()));
             self.restore
                 .extend(project.tabs.iter().cloned().map(Restore::File));
+            if !project.right_tabs.is_empty() {
+                self.restore.push_back(Restore::Split {
+                    vertical: project.split_vertical,
+                });
+                self.restore
+                    .extend(project.right_tabs.iter().cloned().map(Restore::File));
+            }
             // Recovered buffers belong to this project, and are opened while it
-            // is the one being shown: a file of a parked project has nowhere to
-            // appear, and would be read into whichever project happened to be
-            // current. Before the file the project was showing, so that
-            // recovering one cannot change which file is on screen.
+            // is the one being shown. After both columns' tabs, so a right-pane
+            // file is already where it belongs and `show_path` does not move it.
             for (path, text) in &unsaved {
                 if path.starts_with(&project.root) {
                     self.restore
                         .push_back(Restore::Unsaved(path.clone(), text.clone()));
                 }
             }
+            if let Some(active) = &project.right_active {
+                self.restore.push_back(Restore::Activate(active.clone()));
+            }
             if let Some(active) = &project.active {
                 self.restore.push_back(Restore::Activate(active.clone()));
+            }
+            if !project.right_tabs.is_empty() {
+                self.restore.push_back(Restore::FocusPane(0));
             }
         }
 
@@ -4553,7 +5009,7 @@ impl Folio {
                 // which the last file opened would otherwise have taken.
                 if let Some(document) = self.project.documents.get(&path) {
                     document.editor.read(cx).focus_handle(cx).focus(window, cx);
-                    self.project.active = Some(path.clone());
+                    self.project.show_path(path.clone());
                     self.apply_goto(&path, window, cx);
                     self.update_title(window);
                     cx.notify();
@@ -4563,6 +5019,22 @@ impl Folio {
             Restore::Unsaved(path, text) => {
                 self.restoring = Some((path.clone(), text));
                 self.open_file(path, window, cx);
+            }
+            Restore::Split { vertical } => {
+                if self.project.panes.len() < 2 {
+                    self.project.panes.push(Pane::default());
+                }
+                self.project.split_axis = if vertical {
+                    SplitAxis::Vertical
+                } else {
+                    SplitAxis::Horizontal
+                };
+                self.project.focused = 1;
+                self.next_restore(window, cx);
+            }
+            Restore::FocusPane(index) => {
+                self.focus_pane(index, window, cx);
+                self.next_restore(window, cx);
             }
         }
     }
@@ -4578,10 +5050,15 @@ impl Folio {
             let Some(workspace) = project.workspace.as_ref() else {
                 continue;
             };
+            let left = project.panes.first();
+            let right = project.panes.get(1);
             projects.push(session::SessionProject {
                 root: workspace.root.clone(),
-                tabs: project.tabs.clone(),
-                active: project.active.clone(),
+                tabs: left.map(|pane| pane.tabs.clone()).unwrap_or_default(),
+                active: left.and_then(|pane| pane.active.clone()),
+                right_tabs: right.map(|pane| pane.tabs.clone()).unwrap_or_default(),
+                right_active: right.and_then(|pane| pane.active.clone()),
+                split_vertical: project.split_axis == SplitAxis::Vertical,
             });
         }
         session::Session { projects }
@@ -5018,8 +5495,7 @@ impl Folio {
         self.panel = None;
         if let Some(doc) = self
             .project
-            .active
-            .as_ref()
+            .active()
             .and_then(|p| self.project.documents.get(p))
         {
             doc.editor.focus_handle(cx).focus(window, cx);
@@ -5099,8 +5575,7 @@ impl Folio {
             self.terminal_open = false;
             if let Some(doc) = self
                 .project
-                .active
-                .as_ref()
+                .active()
                 .and_then(|p| self.project.documents.get(p))
             {
                 doc.editor.focus_handle(cx).focus(window, cx);
@@ -5120,8 +5595,7 @@ impl Folio {
             self.terminal_open = false;
             if let Some(doc) = self
                 .project
-                .active
-                .as_ref()
+                .active()
                 .and_then(|p| self.project.documents.get(p))
             {
                 doc.editor.focus_handle(cx).focus(window, cx);
@@ -5759,8 +6233,7 @@ impl Folio {
                 && line > 0
                 && let Some(doc) = self
                     .project
-                    .active
-                    .as_ref()
+                    .active()
                     .and_then(|p| self.project.documents.get(p))
             {
                 doc.editor
@@ -6477,7 +6950,7 @@ impl Folio {
                         let drag_path = path.clone();
                         let drop_path = path.clone();
                         let menu_path = path.clone();
-                        let selected = this.project.active.as_ref() == Some(&path)
+                        let selected = this.project.showing(&path)
                             || i == this.project.selected_row;
                         let status = this
                             .project
@@ -7256,8 +7729,7 @@ impl Folio {
             .unwrap_or_default();
         let relative = self
             .project
-            .active
-            .as_ref()
+            .active()
             .and_then(|p| {
                 self.project
                     .workspace
@@ -7267,8 +7739,7 @@ impl Folio {
             .map(|p| p.to_string_lossy().into_owned());
         let doc = self
             .project
-            .active
-            .as_ref()
+            .active()
             .and_then(|p| self.project.documents.get(p));
         TitleBar::new()
             .bg(if self.project.workspace.is_some() {
@@ -7334,8 +7805,7 @@ impl Folio {
             .into_any_element()
     }
 
-    fn render_disk_notice(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let path = self.project.active.clone().unwrap_or_default();
+    fn render_disk_notice(&self, path: PathBuf, cx: &mut Context<Self>) -> impl IntoElement {
         let removed = self.project.disk_notice.get(&path) == Some(&DiskNotice::Removed);
         div()
             .px_4()
@@ -7386,33 +7856,7 @@ impl Folio {
     }
 
     fn render_workspace(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
-        // Read here rather than stored: what it says is about the line the
-        // caret is on, which moves without anything else changing.
-        let blame = self.blame_text(cx);
-        // The changes view takes the whole area, so whatever the editor would
-        // have shown steps out of the way rather than being covered up.
-        let showing_diff = self.project.diff.is_some();
-        // A tab can be locked from its own menu. The buffer stays open and
-        // readable; only the edits are refused.
-        let locked = self
-            .project
-            .active
-            .as_ref()
-            .is_some_and(|path| self.project.read_only.contains(path));
-        let doc = (!showing_diff).then(|| {
-            self.project
-                .active
-                .as_ref()
-                .and_then(|p| self.project.documents.get(p))
-        });
-        let doc = doc.flatten();
-        let image = (!showing_diff).then(|| {
-            self.project
-                .image
-                .as_ref()
-                .filter(|(path, _)| self.project.active.as_ref() == Some(path))
-        });
-        let image = image.flatten();
+        let split = self.project.panes.len() > 1;
         div()
             .id("workspace")
             .size_full()
@@ -7455,153 +7899,273 @@ impl Folio {
                         el.rounded_tl(px(WORKSPACE_RADIUS))
                             .rounded_bl(px(WORKSPACE_RADIUS))
                     })
-                    .when(self.project.tabs.len() > 1, |el| {
-                        el.child(self.render_tabs(cx))
-                    })
-                    // Everything under the strip keeps the padding
-                    // full-screen mode gives it; the strip itself runs
-                    // the full width.
-                    .child(
+                    .child(if split {
+                        let vertical = self.project.split_axis == SplitAxis::Vertical;
                         div()
+                            .id("editor-panes")
                             .flex_1()
                             .min_h_0()
+                            .min_w_0()
                             .w_full()
                             .flex()
-                            .flex_col()
-                            .when(!self.sidebar && !showing_diff, |el| el.px_6())
-                            .when(showing_diff, |el| el.child(self.render_diff(cx)))
-                            .when_some(doc, |el, doc| {
-                                el.when(
-                                    self.project.active.as_ref().is_some_and(|path| {
-                                        self.project.disk_notice.contains_key(path)
+                            .when(vertical, |el| el.flex_col())
+                            .child(
+                                div()
+                                    .when(vertical, |el| {
+                                        el.h(relative(self.pane_ratio)).w_full().min_h_0()
+                                    })
+                                    .when(!vertical, |el| {
+                                        el.w(relative(self.pane_ratio)).h_full().min_w_0()
+                                    })
+                                    .child(self.render_pane(0, window, cx)),
+                            )
+                            .child(
+                                div()
+                                    .id("pane-resize")
+                                    .when(vertical, |el| {
+                                        el.h(px(5.))
+                                            .w_full()
+                                            .flex()
+                                            .items_center()
+                                            .cursor_row_resize()
+                                    })
+                                    .when(!vertical, |el| {
+                                        el.w(px(5.))
+                                            .h_full()
+                                            .flex()
+                                            .justify_center()
+                                            .cursor_col_resize()
+                                    })
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(|this, _, _, _| this.resizing_pane = true),
+                                    )
+                                    .child(if vertical {
+                                        div()
+                                            .h(px(1.))
+                                            .w_full()
+                                            .bg(sidebar_rule(cx))
+                                            .into_any_element()
+                                    } else {
+                                        div()
+                                            .w(px(1.))
+                                            .h_full()
+                                            .bg(sidebar_rule(cx))
+                                            .into_any_element()
                                     }),
-                                    |el| el.child(self.render_disk_notice(cx)),
-                                )
-                                .when(doc.large, |el| {
-                                    el.child(
-                                        div()
-                                            .px_4()
-                                            .py_1()
-                                            .text_size(ui(11.))
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child("Large file · syntax highlighting off"),
-                                    )
-                                })
-                                .child({
-                                    // Rendered through `Input` rather than the
-                                    // `Editor` wrapper: the wrapper hides the
-                                    // context-menu hook, and the wrapper is
-                                    // otherwise doing exactly this.
-                                    let base = doc.editor.read(cx).base_state().clone();
-                                    let editor = {
-                                        let capabilities =
-                                            base.read(cx).context_menu_capabilities();
-                                        let enabled = !capabilities.is_disabled();
-                                        EditorMenuState {
-                                            enabled,
-                                            editable: enabled && !capabilities.is_readonly(),
-                                            code_editor: capabilities.is_code_editor(),
-                                            has_selection: capabilities.has_selection(),
-                                            can_go_to_definition: capabilities
-                                                .can_go_to_definition(),
-                                            has_code_actions: capabilities.has_code_actions(),
-                                        }
-                                    };
-                                    // The wrapper gives the code editor a
-                                    // key context of its own, which is what
-                                    // scopes the bracket bindings to it and
-                                    // keeps them off every other text field.
-                                    div().key_context("FolioEditor").size_full().child(
-                                        Input::from_base(&base)
-                                            .appearance(false)
-                                            .bordered(false)
-                                            .focus_bordered(false)
-                                            .readonly(
-                                                self.saving
-                                                    || self.loading
-                                                    || self.prompting
-                                                    || locked,
-                                            )
-                                            .context_menu(move |menu, window, cx| {
-                                                editor_context_menu(editor, menu, window, cx)
-                                            })
-                                            // The code size is its own setting, so it
-                                            // is absolute rather than in the
-                                            // interface's scale.
-                                            .text_size(px(self.settings.code_font_size))
-                                            .font_family(self.code_font())
-                                            .line_height(gpui::relative(1.6))
-                                            .rounded_none()
-                                            .h_full(),
-                                    )
-                                })
-                                // The line the caret is on, and who last
-                                // wrote it. One line rather than a
-                                // column in the gutter: the same
-                                // reading, without narrowing every line
-                                // of code for it.
-                                .when_some(blame, |el, text| {
-                                    el.child(
-                                        div()
-                                            .px_4()
-                                            .py_1()
-                                            .text_size(ui(11.))
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child(text),
-                                    )
-                                })
-                            })
-                            .when_some(image, |el, (path, image)| {
-                                el.child(
-                                    div().flex_1().min_h_0().w_full().p_6().child(
-                                        img(image.clone())
-                                            .size_full()
-                                            .object_fit(ObjectFit::Contain),
-                                    ),
-                                )
-                                .child(
-                                    div()
-                                        .px_4()
-                                        .py_2()
-                                        .text_size(ui(11.))
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(format!(
-                                            "{} · {} × {} · static preview",
-                                            name(path),
-                                            u32::from(image.size(0).width),
-                                            u32::from(image.size(0).height)
-                                        )),
-                                )
-                            })
-                            .when(!showing_diff && doc.is_none() && image.is_none(), |el| {
-                                el.child(
-                                    div()
-                                        .size_full()
-                                        .flex()
-                                        .flex_col()
-                                        .gap_3()
-                                        .justify_center()
-                                        .items_center()
-                                        .child(
-                                            div()
-                                                .text_size(ui(24.))
-                                                .text_color(cx.theme().accent_foreground)
-                                                .child("Some room to read a little code."),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_size(ui(12.))
-                                                .text_color(cx.theme().muted_foreground)
-                                                .child("Pick a file on the left, or press ⌘ P"),
-                                        ),
-                                )
-                            }),
-                    )
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .min_h_0()
+                                    .when(vertical, |el| el.w_full())
+                                    .when(!vertical, |el| el.h_full())
+                                    .child(self.render_pane(1, window, cx)),
+                            )
+                            .into_any_element()
+                    } else {
+                        self.render_pane(0, window, cx)
+                    })
                     // The terminal drawer hangs under the content
                     // column alone; the sidebar keeps its full
                     // height, and the editor above shrinks.
                     .when(self.terminal_open, |el| {
                         el.child(self.render_terminal_dock(window, cx))
+                    }),
+            )
+            .into_any_element()
+    }
+
+    fn render_pane(&self, index: usize, _: &Window, cx: &mut Context<Self>) -> AnyElement {
+        let pane = self
+            .project
+            .panes
+            .get(index)
+            .cloned()
+            .unwrap_or_default();
+        let focused = self.project.focused == index;
+        let showing_diff = self.project.diff.as_ref().is_some_and(|diff| {
+            pane.active.as_ref() == Some(&diff.path)
+        });
+        let locked = pane
+            .active
+            .as_ref()
+            .is_some_and(|path| self.project.read_only.contains(path));
+        let doc = (!showing_diff)
+            .then(|| pane.active.as_ref().and_then(|path| self.project.documents.get(path)))
+            .flatten();
+        let image = (!showing_diff)
+            .then(|| {
+                self.project
+                    .image
+                    .as_ref()
+                    .filter(|(path, _)| pane.active.as_ref() == Some(path))
+            })
+            .flatten();
+        let blame = focused.then(|| self.blame_text(cx)).flatten();
+        let split = self.project.panes.len() > 1;
+        let empty_solo = !split;
+        div()
+            .id(("pane", index))
+            .size_full()
+            .flex()
+            .flex_col()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, window, cx| {
+                    if this.project.focused != index {
+                        this.focus_pane(index, window, cx);
+                    }
+                }),
+            )
+            .on_drag_move(cx.listener(move |this, _: &DragMoveEvent<TabDrag>, _, cx| {
+                let end = this
+                    .project
+                    .panes
+                    .get(index)
+                    .map(|pane| pane.tabs.len())
+                    .unwrap_or(0);
+                if this.tab_drop != Some((index, end)) {
+                    this.tab_drop = Some((index, end));
+                    cx.notify();
+                }
+            }))
+            .on_drop(cx.listener(move |this, drag: &TabDrag, window, cx| {
+                let end = this
+                    .project
+                    .panes
+                    .get(index)
+                    .map(|pane| pane.tabs.len())
+                    .unwrap_or(0);
+                this.move_tab_to(&drag.path, index, end, cx);
+                this.focus_pane(this.project.focused, window, cx);
+            }))
+            .child(self.render_tabs(index, cx))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .when(!self.sidebar && !showing_diff && !split, |el| el.px_6())
+                    .when(showing_diff, |el| el.child(self.render_diff(cx)))
+                    .when_some(doc, |el, doc| {
+                        el.when(
+                            pane.active
+                                .as_ref()
+                                .is_some_and(|path| self.project.disk_notice.contains_key(path)),
+                            |el| {
+                                el.child(self.render_disk_notice(
+                                    pane.active.clone().unwrap_or_default(),
+                                    cx,
+                                ))
+                            },
+                        )
+                        .when(doc.large, |el| {
+                            el.child(
+                                div()
+                                    .px_4()
+                                    .py_1()
+                                    .text_size(ui(11.))
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("Large file · syntax highlighting off"),
+                            )
+                        })
+                        .child({
+                            let base = doc.editor.read(cx).base_state().clone();
+                            let editor = {
+                                let capabilities = base.read(cx).context_menu_capabilities();
+                                let enabled = !capabilities.is_disabled();
+                                EditorMenuState {
+                                    enabled,
+                                    editable: enabled && !capabilities.is_readonly(),
+                                    code_editor: capabilities.is_code_editor(),
+                                    has_selection: capabilities.has_selection(),
+                                    can_go_to_definition: capabilities.can_go_to_definition(),
+                                    has_code_actions: capabilities.has_code_actions(),
+                                }
+                            };
+                            div().key_context("FolioEditor").size_full().child(
+                                Input::from_base(&base)
+                                    .appearance(false)
+                                    .bordered(false)
+                                    .focus_bordered(false)
+                                    .readonly(
+                                        self.saving || self.loading || self.prompting || locked,
+                                    )
+                                    .context_menu(move |menu, window, cx| {
+                                        editor_context_menu(editor, menu, window, cx)
+                                    })
+                                    .text_size(px(self.settings.code_font_size))
+                                    .font_family(self.code_font())
+                                    .line_height(gpui::relative(1.6))
+                                    .rounded_none()
+                                    .h_full(),
+                            )
+                        })
+                        .when_some(blame, |el, text| {
+                            el.child(
+                                div()
+                                    .px_4()
+                                    .py_1()
+                                    .text_size(ui(11.))
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(text),
+                            )
+                        })
+                    })
+                    .when_some(image, |el, (path, image)| {
+                        el.child(
+                            div().flex_1().min_h_0().w_full().p_6().child(
+                                img(image.clone())
+                                    .size_full()
+                                    .object_fit(ObjectFit::Contain),
+                            ),
+                        )
+                        .child(
+                            div()
+                                .px_4()
+                                .py_2()
+                                .text_size(ui(11.))
+                                .text_color(cx.theme().muted_foreground)
+                                .child(format!(
+                                    "{} · {} × {} · static preview",
+                                    name(path),
+                                    u32::from(image.size(0).width),
+                                    u32::from(image.size(0).height)
+                                )),
+                        )
+                    })
+                    .when(!showing_diff && doc.is_none() && image.is_none(), |el| {
+                        el.child(
+                            div()
+                                .size_full()
+                                .flex()
+                                .flex_col()
+                                .gap_3()
+                                .justify_center()
+                                .items_center()
+                                .child(
+                                    div()
+                                        .text_size(if empty_solo { ui(24.) } else { ui(15.) })
+                                        .text_color(cx.theme().accent_foreground)
+                                        .child(if empty_solo {
+                                            "Some room to read a little code."
+                                        } else {
+                                            "Open a file"
+                                        }),
+                                )
+                                .when(empty_solo, |el| {
+                                    el.child(
+                                        div()
+                                            .text_size(ui(12.))
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child("Pick a file on the left, or press ⌘ P"),
+                                    )
+                                }),
+                        )
                     }),
             )
             .into_any_element()
@@ -8467,6 +9031,27 @@ impl Render for Folio {
             .on_action(cx.listener(|this, _: &OpenSettings, _, cx| this.show_settings(cx)))
             .on_action(cx.listener(|this, _: &ToggleDiff, window, cx| this.toggle_diff(window, cx)))
             .on_action(cx.listener(|this, _: &ToggleChanges, _, cx| this.toggle_changes_list(cx)))
+            .on_action(cx.listener(|this, _: &SplitEditor, window, cx| {
+                this.split_editor(window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &SplitEditorLeft, window, cx| {
+                this.split_in(SplitDirection::Left, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &SplitEditorUp, window, cx| {
+                this.split_in(SplitDirection::Up, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &SplitEditorDown, window, cx| {
+                this.split_in(SplitDirection::Down, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &JoinEditor, window, cx| {
+                this.join_editor(window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &FocusLeftPane, window, cx| {
+                this.focus_pane(0, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &FocusRightPane, window, cx| {
+                this.focus_pane(1, window, cx)
+            }))
             .on_action(cx.listener(|this, _: &NextHunk, _, cx| this.move_hunk(true, cx)))
             .on_action(cx.listener(|this, _: &PrevHunk, _, cx| this.move_hunk(false, cx)))
             .on_action(cx.listener(|this, _: &NextChangeFile, window, cx| {
@@ -8564,6 +9149,7 @@ impl Render for Folio {
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
                 this.resizing &= event.dragging();
                 this.resizing_terminal &= event.dragging();
+                this.resizing_pane &= event.dragging();
                 if this.resizing {
                     this.sidebar_width =
                         (f32::from(event.position.x) - this.workspace_left_inset()).clamp(
@@ -8579,12 +9165,41 @@ impl Render for Folio {
                     .clamp(120., f32::from(viewport.height) * 0.7);
                     cx.notify();
                 }
+                if this.resizing_pane {
+                    if this.project.split_axis == SplitAxis::Vertical {
+                        // Title bar plus the card's top inset; the terminal
+                        // drawer, when open, eats the bottom of this column.
+                        let top = 34. + WORKSPACE_INSET;
+                        let bottom = f32::from(window.viewport_size().height)
+                            - if this.terminal_open {
+                                this.terminal_height
+                            } else {
+                                0.
+                            }
+                            - WORKSPACE_INSET;
+                        let height = (bottom - top).max(1.);
+                        this.pane_ratio =
+                            ((f32::from(event.position.y) - top) / height).clamp(0.25, 0.75);
+                    } else {
+                        let left = this.workspace_left_inset()
+                            + if this.sidebar {
+                                this.sidebar_width + 5.
+                            } else {
+                                0.
+                            };
+                        let width = (f32::from(window.viewport_size().width) - left).max(1.);
+                        this.pane_ratio =
+                            ((f32::from(event.position.x) - left) / width).clamp(0.25, 0.75);
+                    }
+                    cx.notify();
+                }
             }))
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
                     this.resizing = false;
                     this.resizing_terminal = false;
+                    this.resizing_pane = false;
                     // A drag that ended anywhere, dropped or not, takes its
                     // caret with it.
                     if this.tab_drop.take().is_some() {
@@ -8638,6 +9253,41 @@ impl Render for Folio {
                     }
                     cx.stop_propagation();
                     cx.notify();
+                    return;
+                }
+                // Zed: ⌘K then an arrow splits that way. The prefix is not a
+                // GPUI binding, so it is armed here and spent on the next key.
+                if this.split_chord {
+                    this.split_chord = false;
+                    let direction = match event.keystroke.key.as_str() {
+                        "left" => Some(SplitDirection::Left),
+                        "right" => Some(SplitDirection::Right),
+                        "up" => Some(SplitDirection::Up),
+                        "down" => Some(SplitDirection::Down),
+                        _ => None,
+                    };
+                    if let Some(direction) = direction {
+                        this.split_in(direction, window, cx);
+                        cx.stop_propagation();
+                        cx.notify();
+                        return;
+                    }
+                    if event.keystroke.key == "escape" {
+                        cx.stop_propagation();
+                        return;
+                    }
+                }
+                if this.project.workspace.is_some()
+                    && this.panel.is_none()
+                    && this.editing.is_none()
+                    && !this.is_composing(cx)
+                    && !this
+                        .active_terminal()
+                        .is_some_and(|view| view.read(cx).focus_handle().is_focused(window))
+                    && matches_shortcut(&event.keystroke, "⌘K")
+                {
+                    this.split_chord = true;
+                    cx.stop_propagation();
                     return;
                 }
                 // The editor binds ⌘⇧F to its own in-file replace, and a
@@ -9196,7 +9846,7 @@ mod tests {
         });
         cx.run_until_parked();
         view.update_in(cx, |app, window, cx| {
-            assert_eq!(app.project.active.as_ref(), Some(&picture));
+            assert_eq!(app.project.active(), Some(&picture));
             assert!(app.project.image.is_some());
             assert!(!app.project.documents.contains_key(&picture));
             assert!(app.project.documents[&file].dirty);
@@ -9206,7 +9856,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "// first edit\n");
         view.update_in(cx, |app, window, cx| {
             app.open_file(file.clone(), window, cx);
-            assert_eq!(app.project.active.as_ref(), Some(&file));
+            assert_eq!(app.project.active(), Some(&file));
             assert!(app.project.documents[&file].dirty);
             assert_eq!(
                 app.project.documents[&file]
@@ -9498,52 +10148,52 @@ mod tests {
         }
 
         // One slot to the right, onto the tab it should trade with.
-        view.update_in(cx, |app, _, cx| app.move_tab(&first, 1, cx));
+        view.update_in(cx, |app, _, cx| app.move_tab_to(&first, 0, 1, cx));
         view.update_in(cx, |app, _, _| {
             assert_eq!(
-                app.project.tabs,
+                app.project.tabs().to_vec(),
                 vec![second.clone(), first.clone(), third.clone()]
             )
         });
 
         // And one slot back to the left, which is the drag that used to do
         // nothing.
-        view.update_in(cx, |app, _, cx| app.move_tab(&first, 0, cx));
+        view.update_in(cx, |app, _, cx| app.move_tab_to(&first, 0, 0, cx));
         view.update_in(cx, |app, _, _| {
             assert_eq!(
-                app.project.tabs,
+                app.project.tabs().to_vec(),
                 vec![first.clone(), second.clone(), third.clone()]
             )
         });
 
         // Right across the strip, and back to the front.
-        view.update_in(cx, |app, _, cx| app.move_tab(&first, 2, cx));
+        view.update_in(cx, |app, _, cx| app.move_tab_to(&first, 0, 2, cx));
         view.update_in(cx, |app, _, _| {
             assert_eq!(
-                app.project.tabs,
+                app.project.tabs().to_vec(),
                 vec![second.clone(), third.clone(), first.clone()]
             )
         });
-        view.update_in(cx, |app, _, cx| app.move_tab(&first, 0, cx));
+        view.update_in(cx, |app, _, cx| app.move_tab_to(&first, 0, 0, cx));
         view.update_in(cx, |app, _, _| {
             assert_eq!(
-                app.project.tabs,
+                app.project.tabs().to_vec(),
                 vec![first.clone(), second.clone(), third.clone()]
             )
         });
 
         // Past the end lands at the end; dropping on itself changes nothing.
-        view.update_in(cx, |app, _, cx| app.move_tab(&first, 99, cx));
+        view.update_in(cx, |app, _, cx| app.move_tab_to(&first, 0, 99, cx));
         view.update_in(cx, |app, _, _| {
             assert_eq!(
-                app.project.tabs,
+                app.project.tabs().to_vec(),
                 vec![second.clone(), third.clone(), first.clone()]
             )
         });
-        view.update_in(cx, |app, _, cx| app.move_tab(&first, 2, cx));
+        view.update_in(cx, |app, _, cx| app.move_tab_to(&first, 0, 2, cx));
         view.update_in(cx, |app, _, _| {
             assert_eq!(
-                app.project.tabs,
+                app.project.tabs().to_vec(),
                 vec![second.clone(), third.clone(), first.clone()]
             )
         });
@@ -9553,19 +10203,19 @@ mod tests {
         view.update_in(cx, |app, _, cx| {
             app.project.pinned.insert(second.clone());
             app.reorder_tabs();
-            app.move_tab(&second, 2, cx);
+            app.move_tab_to(&second, 0, 2, cx);
         });
         view.update_in(cx, |app, _, _| {
             assert_eq!(
-                app.project.tabs.first(),
+                app.project.tabs().first(),
                 Some(&second),
                 "a pinned tab cannot be dragged out of the front"
             );
         });
-        view.update_in(cx, |app, _, cx| app.move_tab(&first, 0, cx));
+        view.update_in(cx, |app, _, cx| app.move_tab_to(&first, 0, 0, cx));
         view.update_in(cx, |app, _, _| {
             assert_eq!(
-                app.project.tabs,
+                app.project.tabs().to_vec(),
                 vec![second.clone(), first.clone(), third.clone()],
                 "an unpinned tab cannot be dropped in front of a pinned one"
             );
@@ -9573,15 +10223,15 @@ mod tests {
 
         // The caret draws between tabs while a drag is in flight.
         view.update_in(cx, |app, window, cx| {
-            app.tab_drop = Some(1);
+            app.tab_drop = Some((0, 1));
             let _ = app.render(window, cx);
         });
 
         // A path that is not in the strip changes nothing.
-        view.update_in(cx, |app, _, cx| app.move_tab(&root.join("ghost.rs"), 0, cx));
+        view.update_in(cx, |app, _, cx| app.move_tab_to(&root.join("ghost.rs"), 0, 0, cx));
         view.update_in(cx, |app, _, _| {
             assert_eq!(
-                app.project.tabs,
+                app.project.tabs().to_vec(),
                 vec![second.clone(), first.clone(), third.clone()]
             )
         });
@@ -9646,7 +10296,7 @@ mod tests {
         });
         cx.run_until_parked();
         view.update_in(cx, |app, _, _| {
-            assert_eq!(app.project.tabs, vec![first.clone()]);
+            assert_eq!(app.project.tabs().to_vec(), vec![first.clone()]);
         });
 
         // Close Others keeps the tab the menu was opened on, and takes the
@@ -9669,8 +10319,8 @@ mod tests {
         });
         cx.run_until_parked();
         view.update_in(cx, |app, _, _| {
-            assert_eq!(app.project.tabs, vec![first.clone()]);
-            assert_eq!(app.project.active.as_ref(), Some(&first));
+            assert_eq!(app.project.tabs().to_vec(), vec![first.clone()]);
+            assert_eq!(app.project.active(), Some(&first));
         });
 
         // Pinning moves the tab to the front and takes it out of the bulk
@@ -9691,7 +10341,7 @@ mod tests {
             );
             app.run_menu_item(MenuItem::PinTab, window, cx);
             assert!(app.is_pinned(&third));
-            assert_eq!(app.project.tabs.first(), Some(&third));
+            assert_eq!(app.project.tabs().first(), Some(&third));
             // And the entry says what it will do next time.
             assert_eq!(
                 app.menu_label(MenuItem::PinTab, &third, "Pin Tab").as_ref(),
@@ -9713,7 +10363,7 @@ mod tests {
         });
         cx.run_until_parked();
         view.update_in(cx, |app, _, _| {
-            assert_eq!(app.project.tabs, vec![third.clone(), first.clone()]);
+            assert_eq!(app.project.tabs().to_vec(), vec![third.clone(), first.clone()]);
         });
 
         // Locking a tab is view state: it flips the label and refuses edits,
@@ -9823,8 +10473,8 @@ mod tests {
         });
         cx.run_until_parked();
         view.update_in(cx, |app, _, _| {
-            assert_eq!(app.project.tabs, vec![first.clone()]);
-            assert_eq!(app.project.active.as_ref(), Some(&first));
+            assert_eq!(app.project.tabs().to_vec(), vec![first.clone()]);
+            assert_eq!(app.project.active(), Some(&first));
         });
 
         view.update_in(cx, |app, window, cx| {
@@ -9832,8 +10482,8 @@ mod tests {
         });
         cx.run_until_parked();
         view.update_in(cx, |app, window, cx| {
-            assert_eq!(app.project.tabs, vec![first.clone(), second.clone()]);
-            assert_eq!(app.project.active.as_ref(), Some(&second));
+            assert_eq!(app.project.tabs().to_vec(), vec![first.clone(), second.clone()]);
+            assert_eq!(app.project.active(), Some(&second));
             // The strip draws; the harness never draws on its own.
             let _ = app.render(window, cx);
         });
@@ -9845,8 +10495,8 @@ mod tests {
         });
         cx.run_until_parked();
         view.update_in(cx, |app, _, _| {
-            assert_eq!(app.project.tabs.len(), 2);
-            assert_eq!(app.project.active.as_ref(), Some(&first));
+            assert_eq!(app.project.tabs().len(), 2);
+            assert_eq!(app.project.active(), Some(&first));
         });
 
         // Closing the active tab releases its buffer and shows the neighbour.
@@ -9855,9 +10505,9 @@ mod tests {
         });
         cx.run_until_parked();
         view.update_in(cx, |app, _, _| {
-            assert_eq!(app.project.tabs, vec![second.clone()]);
+            assert_eq!(app.project.tabs().to_vec(), vec![second.clone()]);
             assert!(!app.project.documents.contains_key(&first));
-            assert_eq!(app.project.active.as_ref(), Some(&second));
+            assert_eq!(app.project.active(), Some(&second));
         });
 
         // An untouched tab closes without a word.
@@ -9867,8 +10517,8 @@ mod tests {
         cx.run_until_parked();
         assert!(!cx.has_pending_prompt());
         view.update_in(cx, |app, _, _| {
-            assert!(app.project.tabs.is_empty());
-            assert!(app.project.active.is_none());
+            assert!(app.project.tabs().is_empty());
+            assert!(app.project.active().is_none());
             assert!(app.project.documents.is_empty());
         });
 
@@ -9886,7 +10536,7 @@ mod tests {
         cx.simulate_prompt_answer("Cancel");
         cx.run_until_parked();
         view.update_in(cx, |app, _, _| {
-            assert_eq!(app.project.tabs, vec![second.clone()]);
+            assert_eq!(app.project.tabs().to_vec(), vec![second.clone()]);
             assert!(app.project.documents.contains_key(&second));
         });
 
@@ -9898,8 +10548,229 @@ mod tests {
         cx.simulate_prompt_answer("Don't Save");
         cx.run_until_parked();
         view.update_in(cx, |app, _, _| {
-            assert!(app.project.tabs.is_empty());
+            assert!(app.project.tabs().is_empty());
             assert!(app.project.documents.is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn a_split_puts_the_other_tab_on_the_right(cx: &mut TestAppContext) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let first = root.join("first.rs");
+        let second = root.join("second.rs");
+        std::fs::write(&first, "// one\n").unwrap();
+        std::fs::write(&second, "// two\n").unwrap();
+        cx.update(gpui_component::init);
+        let cx = cx.add_empty_window();
+        let view = cx.update(|window, cx| {
+            cx.new(|cx| {
+                let mut app = Folio::new(window, cx);
+                app.recent_task = None;
+                app.recent_file = root.join("recent.json");
+                app.settings_file = root.join("settings.json");
+                app.window_file = root.join("window.json");
+                app.settings = Settings::default();
+                app.applied_ignored = app.settings.ignored.clone();
+                app
+            })
+        });
+        view.update_in(cx, |app, window, cx| {
+            app.request(Next::Open(root.clone()), window, cx)
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |app, window, cx| {
+            app.open_file(first.clone(), window, cx)
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |app, window, cx| {
+            app.open_file(second.clone(), window, cx)
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |app, window, cx| {
+            app.split_editor(window, cx);
+            assert_eq!(app.project.panes.len(), 2);
+            assert_eq!(app.project.panes[0].tabs, vec![second.clone()]);
+            assert_eq!(app.project.panes[1].tabs, vec![first.clone()]);
+            assert_eq!(app.project.focused, 0);
+            assert_eq!(app.project.active(), Some(&second));
+            assert_eq!(app.project.split_axis, SplitAxis::Horizontal);
+            let _ = app.render(window, cx);
+        });
+    }
+
+    #[gpui::test]
+    fn a_split_left_puts_the_other_tab_first(cx: &mut TestAppContext) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let first = root.join("first.rs");
+        let second = root.join("second.rs");
+        std::fs::write(&first, "// one\n").unwrap();
+        std::fs::write(&second, "// two\n").unwrap();
+        cx.update(gpui_component::init);
+        let cx = cx.add_empty_window();
+        let view = cx.update(|window, cx| {
+            cx.new(|cx| {
+                let mut app = Folio::new(window, cx);
+                app.recent_task = None;
+                app.recent_file = root.join("recent.json");
+                app.settings_file = root.join("settings.json");
+                app.window_file = root.join("window.json");
+                app.settings = Settings::default();
+                app.applied_ignored = app.settings.ignored.clone();
+                app
+            })
+        });
+        view.update_in(cx, |app, window, cx| {
+            app.request(Next::Open(root.clone()), window, cx)
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |app, window, cx| {
+            app.open_file(first.clone(), window, cx)
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |app, window, cx| {
+            app.open_file(second.clone(), window, cx)
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |app, window, cx| {
+            app.split_in(SplitDirection::Left, window, cx);
+            assert_eq!(app.project.panes.len(), 2);
+            assert_eq!(app.project.panes[0].tabs, vec![first.clone()]);
+            assert_eq!(app.project.panes[1].tabs, vec![second.clone()]);
+            assert_eq!(app.project.focused, 1);
+            assert_eq!(app.project.split_axis, SplitAxis::Horizontal);
+            app.split_in(SplitDirection::Down, window, cx);
+            assert_eq!(app.project.split_axis, SplitAxis::Vertical);
+            assert_eq!(app.project.panes[0].tabs, vec![second.clone()]);
+            assert_eq!(app.project.panes[1].tabs, vec![first.clone()]);
+            assert_eq!(app.project.focused, 0);
+            let _ = app.render(window, cx);
+        });
+    }
+
+    #[gpui::test]
+    fn a_tab_can_be_dragged_into_the_other_pane(cx: &mut TestAppContext) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let first = root.join("first.rs");
+        let second = root.join("second.rs");
+        let third = root.join("third.rs");
+        for file in [&first, &second, &third] {
+            std::fs::write(file, "// code\n").unwrap();
+        }
+        cx.update(gpui_component::init);
+        let cx = cx.add_empty_window();
+        let view = cx.update(|window, cx| {
+            cx.new(|cx| {
+                let mut app = Folio::new(window, cx);
+                app.recent_task = None;
+                app.recent_file = root.join("recent.json");
+                app.settings_file = root.join("settings.json");
+                app.window_file = root.join("window.json");
+                app.settings = Settings::default();
+                app.applied_ignored = app.settings.ignored.clone();
+                app
+            })
+        });
+        view.update_in(cx, |app, window, cx| {
+            app.request(Next::Open(root.clone()), window, cx)
+        });
+        cx.run_until_parked();
+        for file in [&first, &second, &third] {
+            view.update_in(cx, |app, window, cx| {
+                app.open_file(file.clone(), window, cx)
+            });
+            cx.run_until_parked();
+        }
+        view.update_in(cx, |app, window, cx| {
+            app.split_editor(window, cx);
+            // [third] | [second] after taking the neighbor of the active tab;
+            // first stays with third if the neighbor was second... open order
+            // first, second, third — active third, neighbor second →
+            // left keeps third, right takes second. first is still on the left.
+            assert_eq!(app.project.panes.len(), 2);
+            assert!(app.project.panes[0].tabs.contains(&third));
+            assert!(app.project.panes[1].tabs.contains(&second));
+            app.move_tab_to(&third, 1, 0, cx);
+            assert_eq!(app.project.panes.len(), 2);
+            assert!(
+                app.project.panes[1].tabs.contains(&third),
+                "the tab crossed to the other pane"
+            );
+            assert!(
+                !app.project.panes[0].tabs.contains(&third),
+                "it left the pane it came from"
+            );
+            assert_eq!(app.project.focused, 1);
+            assert_eq!(app.project.panes[1].active.as_ref(), Some(&third));
+            let other = app.project.panes[1]
+                .tabs
+                .iter()
+                .find(|tab| tab.as_path() != third.as_path())
+                .cloned()
+                .expect("the destination still has its own tab");
+            app.move_tab_to(&other, 0, 0, cx);
+            assert_eq!(app.project.panes.len(), 2);
+            assert!(app.project.panes[0].tabs.contains(&other));
+            assert!(app.project.panes[1].tabs.contains(&third));
+            assert!(!app.project.panes[1].tabs.contains(&other));
+        });
+    }
+
+    #[gpui::test]
+    fn opening_a_file_already_in_the_other_pane_moves_focus(cx: &mut TestAppContext) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let first = root.join("first.rs");
+        let second = root.join("second.rs");
+        let third = root.join("third.rs");
+        std::fs::write(&first, "// one\n").unwrap();
+        std::fs::write(&second, "// two\n").unwrap();
+        std::fs::write(&third, "// three\n").unwrap();
+        cx.update(gpui_component::init);
+        let cx = cx.add_empty_window();
+        let view = cx.update(|window, cx| {
+            cx.new(|cx| {
+                let mut app = Folio::new(window, cx);
+                app.recent_task = None;
+                app.recent_file = root.join("recent.json");
+                app.settings_file = root.join("settings.json");
+                app.window_file = root.join("window.json");
+                app.settings = Settings::default();
+                app.applied_ignored = app.settings.ignored.clone();
+                app
+            })
+        });
+        view.update_in(cx, |app, window, cx| {
+            app.request(Next::Open(root.clone()), window, cx)
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |app, window, cx| {
+            app.open_file(first.clone(), window, cx)
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |app, window, cx| {
+            app.open_file(second.clone(), window, cx)
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |app, window, cx| app.split_editor(window, cx));
+        view.update_in(cx, |app, window, cx| {
+            app.open_file(first.clone(), window, cx);
+            assert_eq!(app.project.focused, 1, "the other column already has it");
+            assert_eq!(app.project.active(), Some(&first));
+            assert_eq!(app.project.panes[0].tabs, vec![second.clone()]);
+            assert_eq!(app.project.panes[1].tabs, vec![first.clone()]);
+            app.open_file(third.clone(), window, cx);
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |app, window, cx| {
+            assert_eq!(app.project.focused, 1);
+            assert!(app.project.panes[1].tabs.contains(&third));
+            assert!(!app.project.panes[0].tabs.contains(&third));
+            app.close_tabs(vec![first.clone(), third.clone()], window, cx);
+            assert_eq!(app.project.panes.len(), 1);
+            assert_eq!(app.project.tabs().to_vec(), vec![second.clone()]);
         });
     }
 
@@ -11003,11 +11874,13 @@ mod tests {
                     root: a.clone(),
                     tabs: vec![a_main.clone(), a_notes.clone()],
                     active: Some(a_main.clone()),
+                    ..Default::default()
                 },
                 session::SessionProject {
                     root: b.clone(),
                     tabs: vec![b_lib.clone()],
                     active: Some(b_lib.clone()),
+                    ..Default::default()
                 },
             ],
         }
@@ -11046,8 +11919,8 @@ mod tests {
             // with everything it had.
             assert_eq!(app.parked.len(), 1);
             let first = &app.parked[0];
-            assert_eq!(first.tabs, vec![a_main.clone(), a_notes.clone()]);
-            assert_eq!(first.active.as_ref(), Some(&a_main));
+            assert_eq!(first.tabs(), [a_main.clone(), a_notes.clone()].as_slice());
+            assert_eq!(first.active(), Some(&a_main));
             // The buffer that had unsaved edits came back dirty, with them.
             let notes = &first.documents[&a_notes];
             assert!(notes.dirty);
@@ -11055,8 +11928,63 @@ mod tests {
             // And the one that did not is clean.
             assert!(!first.documents[&a_main].dirty);
 
-            assert_eq!(app.project.tabs, vec![b_lib.clone()]);
-            assert_eq!(app.project.active.as_ref(), Some(&b_lib));
+            assert_eq!(app.project.tabs().to_vec(), vec![b_lib.clone()]);
+            assert_eq!(app.project.active(), Some(&b_lib));
+        });
+    }
+
+    #[gpui::test]
+    fn a_split_session_comes_back_as_two_panes(cx: &mut TestAppContext) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let project = root.join("proj");
+        std::fs::create_dir(&project).unwrap();
+        let left = project.join("left.rs");
+        let right = project.join("right.rs");
+        std::fs::write(&left, "// L\n").unwrap();
+        std::fs::write(&right, "// R\n").unwrap();
+        let config = root.join("config");
+        std::fs::create_dir(&config).unwrap();
+        let session_file = config.join("session.json");
+        session::Session {
+            projects: vec![session::SessionProject {
+                root: project.clone(),
+                tabs: vec![left.clone()],
+                active: Some(left.clone()),
+                right_tabs: vec![right.clone()],
+                right_active: Some(right.clone()),
+                split_vertical: false,
+            }],
+        }
+        .save(&session_file)
+        .unwrap();
+
+        cx.update(gpui_component::init);
+        let cx = cx.add_empty_window();
+        let view = cx.update(|window, cx| {
+            cx.new(|cx| {
+                let mut app = Folio::new(window, cx);
+                app.recent_task = None;
+                app.recent_file = config.join("recent.json");
+                app.settings_file = config.join("settings.json");
+                app.window_file = config.join("window.json");
+                app.session_file = session_file;
+                app.unsaved_file = config.join("unsaved.json");
+                app.settings = Settings::default();
+                app.applied_ignored = app.settings.ignored.clone();
+                app
+            })
+        });
+        view.update_in(cx, |app, window, cx| app.start_session(window, cx));
+        for _ in 0..8 {
+            cx.run_until_parked();
+        }
+        view.update(cx, |app, _| {
+            assert_eq!(app.project.panes.len(), 2);
+            assert_eq!(app.project.panes[0].tabs, vec![left.clone()]);
+            assert_eq!(app.project.panes[1].tabs, vec![right.clone()]);
+            assert_eq!(app.project.focused, 0);
+            assert_eq!(app.project.active(), Some(&left));
         });
     }
 
@@ -11480,7 +12408,7 @@ mod tests {
         assert!(note.is_file(), "the named file must exist on disk");
         view.update_in(cx, |app, _, _| {
             assert!(app.project.rows.iter().any(|row| row.entry.path == note));
-            assert_eq!(app.project.active.as_ref(), Some(&note));
+            assert_eq!(app.project.active(), Some(&note));
         });
 
         // Escape abandons the row without touching the filesystem.
@@ -11584,6 +12512,10 @@ mod tests {
             path: PathBuf::new(),
         });
         assert_eq!(changes, vec!["Hide File Changes"]);
+        assert_eq!(
+            labels(&MenuTarget::Split { pane: 0 }),
+            vec!["Split Right", "Split Left", "Split Up", "Split Down"]
+        );
         assert!(!tree_labels(false).contains(&"Hide File Changes"));
         view.update_in(cx, |app, window, cx| {
             open_tree_menu(app, &root, true, window, cx);
@@ -11630,7 +12562,7 @@ mod tests {
         // were not renamed stayed where they were.
         view.update_in(cx, |app, _, _| {
             assert!(app.project.documents.contains_key(&core));
-            assert_eq!(app.project.active.as_ref(), Some(&core));
+            assert_eq!(app.project.active(), Some(&core));
             assert!(app.project.documents.contains_key(&src.join("笔记.md")));
         });
 
