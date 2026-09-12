@@ -7,6 +7,7 @@ use folio::{
     search, session,
     settings::{self, Settings},
     tree::{self, Entry, EntryKind},
+    watch,
     workspace::Workspace,
 };
 use gpui::{prelude::*, *};
@@ -25,7 +26,7 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 /// Where the versions of this application are listed.
@@ -204,9 +205,8 @@ fn tree_guide_elements(
     let active = focus.and_then(|ix| tree_active_guide(rows, ix));
     (0..depth)
         .map(|level| {
-            let is_active = active.is_some_and(|(start, end, guide)| {
-                guide == level && index >= start && index < end
-            });
+            let is_active = active
+                .is_some_and(|(start, end, guide)| guide == level && index >= start && index < end);
             div()
                 .absolute()
                 .top_0()
@@ -349,6 +349,10 @@ actions!(
         ToggleBlame,
         CheckForUpdates,
         ToggleComment,
+        ToggleBlockComment,
+        DuplicateLines,
+        MoveLinesUp,
+        MoveLinesDown,
         Fold,
         Unfold,
         SelectNextOccurrence,
@@ -679,6 +683,33 @@ impl Render for TabDragPreview {
     }
 }
 
+/// A file-tree row being dragged onto a folder.
+#[derive(Clone)]
+struct TreeDrag {
+    path: PathBuf,
+    name: SharedString,
+}
+
+struct TreeDragPreview {
+    name: SharedString,
+}
+
+impl Render for TreeDragPreview {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px_2()
+            .py_1()
+            .rounded_sm()
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().background)
+            .shadow_md()
+            .text_size(ui(11.))
+            .text_color(cx.theme().foreground)
+            .child(self.name.clone())
+    }
+}
+
 /// The in-app file clipboard behind Cut / Copy / Paste.
 #[derive(Clone)]
 struct FileClipboard {
@@ -784,6 +815,16 @@ struct Project {
     indexing: bool,
     /// Set while the active file is being shown as changes rather than code.
     diff: Option<DiffView>,
+    /// Open buffers whose disk copy no longer matches `saved`. Clean buffers
+    /// reload on their own; these are the dirty ones waiting for Reload / Keep.
+    disk_notice: HashMap<PathBuf, DiskNotice>,
+}
+
+/// What the disk did to a dirty buffer while Folio still holds edits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DiskNotice {
+    Changed,
+    Removed,
 }
 
 /// One project's terminal tabs: the running terminals and which of them
@@ -837,6 +878,9 @@ pub struct Folio {
     search: SearchState,
     /// Loaded once at startup and written back whenever the panel changes it.
     settings: Settings,
+    /// Last wrap mode pushed into open editors, so a settings change can
+    /// catch up on the next frame when we have a window.
+    applied_wrap: bool,
     /// The ignore rules the tree's cached listings were built with. Tracked
     /// separately because callers edit `settings` before applying it, so
     /// comparing against that field would never see a change.
@@ -888,6 +932,9 @@ pub struct Folio {
     /// rewrites it when there is something new to write.
     written_unsaved: session::UnsavedBuffers,
     written_session: session::Session,
+    disk_watch: watch::DiskWatch,
+    /// Paths Folio just wrote, and when their own filesystem events expire.
+    quiet_writes: HashMap<PathBuf, Instant>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -943,6 +990,51 @@ enum Restore {
     /// A file that had edits which never reached the disk: opened, and then
     /// given them back.
     Unsaved(PathBuf, String),
+}
+
+fn remap_project_paths(project: &mut Project, from: &Path, to: &Path) {
+    fn moved(path: &Path, from: &Path, to: &Path) -> Option<PathBuf> {
+        let rest = path.strip_prefix(from).ok()?;
+        Some(if rest.as_os_str().is_empty() {
+            to.to_path_buf()
+        } else {
+            to.join(rest)
+        })
+    }
+    let documents = std::mem::take(&mut project.documents);
+    project.documents = documents
+        .into_iter()
+        .map(|(path, document)| (moved(&path, from, to).unwrap_or(path), document))
+        .collect();
+    if let Some(active) = project.active.take() {
+        project.active = Some(moved(&active, from, to).unwrap_or(active));
+    }
+    if let Some((image, render)) = project.image.take() {
+        project.image = Some((moved(&image, from, to).unwrap_or(image), render));
+    }
+    for tab in &mut project.tabs {
+        if let Some(renamed) = moved(tab, from, to) {
+            *tab = renamed;
+        }
+    }
+    let remap_set = |set: HashSet<PathBuf>| {
+        set.into_iter()
+            .map(|path| moved(&path, from, to).unwrap_or(path))
+            .collect()
+    };
+    project.expanded = remap_set(std::mem::take(&mut project.expanded));
+    project.pinned = remap_set(std::mem::take(&mut project.pinned));
+    project.read_only = remap_set(std::mem::take(&mut project.read_only));
+    let notice = std::mem::take(&mut project.disk_notice);
+    project.disk_notice = notice
+        .into_iter()
+        .map(|(path, notice)| (moved(&path, from, to).unwrap_or(path), notice))
+        .collect();
+    let directories = std::mem::take(&mut project.directories);
+    project.directories = directories
+        .into_iter()
+        .map(|(path, entries)| (moved(&path, from, to).unwrap_or(path), entries))
+        .collect();
 }
 
 impl Folio {
@@ -1049,6 +1141,7 @@ impl Folio {
             replace_query,
             search: SearchState::default(),
             settings,
+            applied_wrap: false,
             applied_ignored: settings_ignored,
             settings_file,
             settings_window: None,
@@ -1074,6 +1167,8 @@ impl Folio {
             recovered: 0,
             written_unsaved: session::UnsavedBuffers::new(),
             written_session: session::Session::default(),
+            disk_watch: watch::DiskWatch::default(),
+            quiet_writes: HashMap::new(),
             _subscriptions: vec![
                 subscription,
                 search_subscription,
@@ -1096,6 +1191,7 @@ impl Folio {
     pub fn start_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.start_restore(window, cx);
         self.watch_unsaved(cx);
+        self.watch_disk(window, cx);
     }
 
     fn request(&mut self, next: Next, window: &mut Window, cx: &mut Context<Self>) {
@@ -1289,6 +1385,7 @@ impl Folio {
                 } else {
                     window.set_window_title("Folio");
                 }
+                self.sync_disk_watch();
                 cx.notify();
             }
             Next::Open(path) => self.open_project(path, window, cx),
@@ -1368,6 +1465,14 @@ impl Folio {
                 base.set_cursor_position(position, window, cx)
             });
         });
+    }
+
+    fn project_ref(&self, id: u64) -> Option<&Project> {
+        if self.project.id == id {
+            Some(&self.project)
+        } else {
+            self.parked.iter().find(|project| project.id == id)
+        }
     }
 
     fn project_mut(&mut self, id: u64) -> Option<&mut Project> {
@@ -1490,6 +1595,7 @@ impl Folio {
                             this.ensure_terminal(cx);
                         }
                         this.tree_focus.focus(window, cx);
+                        this.sync_disk_watch();
                     }
                     Err(e) => this.error(format!("Could not open the project: {e}"), cx),
                 }
@@ -1513,12 +1619,21 @@ impl Folio {
 
     /// Rebuild the flat index that quick-open and project search read.
     fn reindex(&mut self, cx: &mut Context<Self>) {
-        let Some(workspace) = &self.project.workspace else {
+        self.reindex_project(self.project.id, cx);
+    }
+
+    fn reindex_project(&mut self, project_id: u64, cx: &mut Context<Self>) {
+        let Some(root) = self.project_ref(project_id).and_then(|project| {
+            project
+                .workspace
+                .as_ref()
+                .map(|workspace| workspace.root.clone())
+        }) else {
             return;
         };
-        self.project.indexing = true;
-        let project_id = self.project.id;
-        let root = workspace.root.clone();
+        if let Some(project) = self.project_mut(project_id) {
+            project.indexing = true;
+        }
         let ignored = self.settings.ignored.clone();
         let task = cx
             .background_executor()
@@ -1546,11 +1661,18 @@ impl Folio {
     }
 
     fn refresh_git(&mut self, cx: &mut Context<Self>) {
-        let Some(workspace) = &self.project.workspace else {
+        self.refresh_git_project(self.project.id, cx);
+    }
+
+    fn refresh_git_project(&mut self, project_id: u64, cx: &mut Context<Self>) {
+        let Some(root) = self.project_ref(project_id).and_then(|project| {
+            project
+                .workspace
+                .as_ref()
+                .map(|workspace| workspace.root.clone())
+        }) else {
             return;
         };
-        let project_id = self.project.id;
-        let root = workspace.root.clone();
         let task = cx
             .background_executor()
             .spawn(async move { git::status(&root) });
@@ -1712,10 +1834,13 @@ impl Folio {
     /// Re-read one folder into the tree cache. Unlike `toggle_directory` this
     /// forces a fresh read, which is what a filesystem change needs.
     fn reload_directory(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
-        if !self.project.directories.contains_key(&dir) {
+        let Some(project_id) = std::iter::once(&self.project)
+            .chain(self.parked.iter())
+            .find(|project| project.directories.contains_key(&dir))
+            .map(|project| project.id)
+        else {
             return;
-        }
-        let project_id = self.project.id;
+        };
         let read = dir.clone();
         let ignored = self.settings.ignored.clone();
         let task = cx
@@ -1786,6 +1911,7 @@ impl Folio {
             let _ = this.update_in(cx, |this, window, cx| {
                 match result {
                     Ok(created) => {
+                        this.quiet_write(&created);
                         this.rescan(dir, cx);
                         if open_created {
                             this.open_file(created, window, cx);
@@ -1817,6 +1943,7 @@ impl Folio {
             let _ = this.update_in(cx, |this, window, cx| {
                 match result {
                     Ok(renamed) => {
+                        this.quiet_write(&renamed);
                         this.remap_paths(&from, &renamed);
                         this.rebuild_rows();
                         let dir = renamed
@@ -1982,41 +2109,122 @@ impl Folio {
     /// Re-key the state that pointed at `from`, now that it lives at `to`. A
     /// renamed folder takes its whole subtree with it.
     fn remap_paths(&mut self, from: &Path, to: &Path) {
-        fn moved(path: &Path, from: &Path, to: &Path) -> Option<PathBuf> {
-            let rest = path.strip_prefix(from).ok()?;
-            Some(if rest.as_os_str().is_empty() {
-                to.to_path_buf()
-            } else {
-                to.join(rest)
-            })
+        remap_project_paths(&mut self.project, from, to);
+        for project in &mut self.parked {
+            remap_project_paths(project, from, to);
         }
-        let documents = std::mem::take(&mut self.project.documents);
-        self.project.documents = documents
-            .into_iter()
-            .map(|(path, document)| (moved(&path, from, to).unwrap_or(path), document))
-            .collect();
-        if let Some(active) = self.project.active.take() {
-            self.project.active = Some(moved(&active, from, to).unwrap_or(active));
-        }
-        if let Some((image, render)) = self.project.image.take() {
-            self.project.image = Some((moved(&image, from, to).unwrap_or(image), render));
-        }
-        // A renamed file keeps its tab, under its new path, in its old place.
-        for tab in &mut self.project.tabs {
-            if let Some(renamed) = moved(tab, from, to) {
-                *tab = renamed;
+        self.settle_documents();
+    }
+
+    /// After a move, a buffer may now live under another project's root.
+    fn settle_documents(&mut self) {
+        let mut orphans = Vec::new();
+        for project in std::iter::once(&mut self.project).chain(self.parked.iter_mut()) {
+            let Some(root) = project.workspace.as_ref().map(|workspace| workspace.root.clone())
+            else {
+                continue;
+            };
+            let documents = std::mem::take(&mut project.documents);
+            for (path, document) in documents {
+                if path.starts_with(&root) {
+                    project.documents.insert(path, document);
+                } else {
+                    project.tabs.retain(|tab| tab != &path);
+                    project.pinned.remove(&path);
+                    project.read_only.remove(&path);
+                    project.disk_notice.remove(&path);
+                    if project.active.as_ref() == Some(&path) {
+                        project.active = None;
+                    }
+                    orphans.push((path, document));
+                }
             }
         }
-        let expanded = std::mem::take(&mut self.project.expanded);
-        self.project.expanded = expanded
-            .into_iter()
-            .map(|path| moved(&path, from, to).unwrap_or(path))
-            .collect();
-        let directories = std::mem::take(&mut self.project.directories);
-        self.project.directories = directories
-            .into_iter()
-            .map(|(path, entries)| (moved(&path, from, to).unwrap_or(path), entries))
-            .collect();
+        for (path, document) in orphans {
+            let home = std::iter::once(&mut self.project)
+                .chain(self.parked.iter_mut())
+                .find(|project| {
+                    project
+                        .workspace
+                        .as_ref()
+                        .is_some_and(|workspace| path.starts_with(&workspace.root))
+                });
+            if let Some(project) = home {
+                if !project.tabs.contains(&path) {
+                    project.tabs.push(path.clone());
+                }
+                project.documents.insert(path, document);
+            }
+        }
+    }
+
+    fn drop_tree_entry(
+        &mut self,
+        source: PathBuf,
+        onto: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if source == onto {
+            return;
+        }
+        let into = if self.is_tree_directory(&onto) {
+            onto
+        } else {
+            match onto.parent() {
+                Some(parent) => parent.to_path_buf(),
+                None => return,
+            }
+        };
+        if source.parent() == Some(into.as_path()) {
+            return;
+        }
+        if source.is_dir() && into.starts_with(&source) {
+            self.error("Cannot move a folder into itself".into(), cx);
+            return;
+        }
+        let from_parent = source.parent().map(Path::to_path_buf);
+        let dest_dir = into.clone();
+        let moving = source.clone();
+        let task = cx
+            .background_executor()
+            .spawn(async move { fs_op::paste(&moving, &into, true) });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                match result {
+                    Ok(dest) => {
+                        this.quiet_write(&dest);
+                        this.remap_paths(&source, &dest);
+                        this.rebuild_rows();
+                        if let Some(parent) = from_parent {
+                            this.reload_directory(parent, cx);
+                        }
+                        this.rescan(dest_dir, cx);
+                        this.update_title(window);
+                        this.toast(&format!("Moved {}", name(&dest)), cx);
+                    }
+                    Err(error) => this.error(error.to_string(), cx),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn is_tree_directory(&self, path: &Path) -> bool {
+        std::iter::once(&self.project)
+            .chain(self.parked.iter())
+            .any(|project| {
+                project.directories.contains_key(path)
+                    || project.rows.iter().any(|row| {
+                        row.entry.path == path && row.entry.kind == EntryKind::Directory
+                    })
+                    || project
+                        .workspace
+                        .as_ref()
+                        .is_some_and(|workspace| workspace.root == path)
+            })
     }
 
     /// Open the context menu over `target`, flipped when it would overhang the
@@ -2836,6 +3044,102 @@ impl Folio {
         cx.notify();
     }
 
+    fn toggle_block_comment(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(path) = self.project.active.clone() else {
+            return;
+        };
+        let Some((open, close)) = buffer::block_comment(buffer::language(&path)) else {
+            self.toast("This language has no block comments", cx);
+            return;
+        };
+        self.replace_active_lines(window, cx, |block| {
+            buffer::toggle_block_comments(block, open, close)
+        });
+    }
+
+    fn duplicate_lines(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.replace_active_text(window, cx, |text, selection| {
+            Some(buffer::duplicate_lines(text, selection))
+        });
+    }
+
+    fn move_lines(&mut self, down: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.replace_active_text(window, cx, |text, selection| {
+            buffer::move_lines(text, selection, down)
+        });
+    }
+
+    fn replace_active_lines(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        change: impl FnOnce(&str) -> String,
+    ) {
+        let Some(path) = self.project.active.clone() else {
+            return;
+        };
+        let Some(editor) = self
+            .project
+            .documents
+            .get(&path)
+            .map(|document| document.editor.clone())
+        else {
+            return;
+        };
+        let base = editor.read(cx).base_state().clone();
+        let text = base.read(cx).value().to_string();
+        let selections = base.read(cx).selected_ranges();
+        let (Some(first), Some(last)) = (selections.first(), selections.last()) else {
+            return;
+        };
+        let lines = buffer::line_range(&text, first.start..last.end);
+        let Some(block) = text.get(lines.clone()) else {
+            return;
+        };
+        let next = change(block);
+        let reselect = lines.start..lines.start + next.len();
+        base.update(cx, |base, cx| {
+            base.set_selected_range(lines, cx);
+            base.replace(next, window, cx);
+            base.set_selected_range(reselect, cx);
+        });
+        cx.notify();
+    }
+
+    fn replace_active_text(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        change: impl FnOnce(&str, std::ops::Range<usize>) -> Option<(String, std::ops::Range<usize>)>,
+    ) {
+        let Some(path) = self.project.active.clone() else {
+            return;
+        };
+        let Some(editor) = self
+            .project
+            .documents
+            .get(&path)
+            .map(|document| document.editor.clone())
+        else {
+            return;
+        };
+        let base = editor.read(cx).base_state().clone();
+        let text = base.read(cx).value().to_string();
+        let selections = base.read(cx).selected_ranges();
+        let (Some(first), Some(last)) = (selections.first(), selections.last()) else {
+            return;
+        };
+        let Some((next, reselect)) = change(&text, first.start..last.end) else {
+            return;
+        };
+        base.update(cx, |base, cx| {
+            base.set_selected_range(0..text.len(), cx);
+            base.replace(next, window, cx);
+            base.set_selected_range(reselect, cx);
+        });
+        cx.notify();
+    }
+
     /// `⌥⌘B`: show what the caret's line was last written by, or stop showing
     /// it.
     fn toggle_blame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -3430,6 +3734,7 @@ impl Folio {
         // These two settings are the stored state the toggles write back.
         self.sidebar = self.settings.sidebar;
         self.activity_bar = self.settings.activity_bar;
+        // Editors pick the new wrap up on the next frame of the main window.
         if ignored_changed {
             self.reload_tree(cx);
         }
@@ -3456,6 +3761,22 @@ impl Folio {
         .detach();
         cx.refresh_windows();
         cx.notify();
+    }
+
+    fn sync_soft_wrap(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let wrap = self.settings.soft_wrap;
+        let editors: Vec<_> = std::iter::once(&self.project)
+            .chain(self.parked.iter())
+            .flat_map(|project| project.documents.values().map(|document| document.editor.clone()))
+            .collect();
+        for editor in editors {
+            editor.update(cx, |state, cx| {
+                state
+                    .base_state()
+                    .update(cx, |base, cx| base.set_soft_wrap(wrap, window, cx));
+            });
+        }
+        self.applied_wrap = wrap;
     }
 
     /// The ignore rules changed, so every cached listing is suspect. One
@@ -3499,7 +3820,11 @@ impl Folio {
         if self.saving || self.project_loading || self.prompting {
             return;
         }
-        self.panel = None;
+        // Search stays up so the next hit is one key away. File-name
+        // lookup is a jump, and closes.
+        if !matches!(self.panel, Some(Panel::Search)) {
+            self.panel = None;
+        }
         // A pending jump only belongs to the file it was queued for.
         if self
             .goto
@@ -3611,7 +3936,9 @@ impl Folio {
                             state.prepare(window, cx);
                             state
                                 .base_state()
-                                .update(cx, |base, cx| base.set_soft_wrap(false, window, cx));
+                                .update(cx, |base, cx| {
+                                    base.set_soft_wrap(this.settings.soft_wrap, window, cx)
+                                });
                         });
                         let project_id = this.project.id;
                         let subscription =
@@ -3770,6 +4097,7 @@ impl Folio {
                 for (project_id, path, text, result) in results {
                     match result {
                         Ok(()) => {
+                            this.quiet_write(&path);
                             if let Some(doc) = this
                                 .project_mut(project_id)
                                 .and_then(|p| p.documents.get_mut(&path))
@@ -3990,6 +4318,248 @@ impl Folio {
                     }
                 });
             }
+        })
+        .detach();
+    }
+
+    fn sync_disk_watch(&mut self) {
+        self.disk_watch.sync(&self.project_order);
+    }
+
+    /// Drain kernel events and apply them to the tree, git dots, and open
+    /// buffers. Started once with the session so a test window that never
+    /// calls `start_session` does not watch the machine.
+    fn watch_disk(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.sync_disk_watch();
+        cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor().timer(watch::DEBOUNCE).await;
+                let Ok(paths) = this.update(cx, |this, _| this.disk_watch.take()) else {
+                    break;
+                };
+                if paths.is_empty() {
+                    continue;
+                }
+                let _ = this.update_in(cx, |this, window, cx| {
+                    this.apply_watch_paths(paths, window, cx);
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn quiet_write(&mut self, path: &Path) {
+        self.quiet_writes.insert(
+            path.to_path_buf(),
+            Instant::now() + watch::QUIET_AFTER_WRITE,
+        );
+    }
+
+    fn apply_watch_paths(
+        &mut self,
+        paths: Vec<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let now = Instant::now();
+        self.quiet_writes.retain(|_, until| now < *until);
+        let ignored = self.settings.ignored.clone();
+        let cached = std::iter::once(&self.project)
+            .chain(self.parked.iter())
+            .flat_map(|project| project.directories.keys().cloned())
+            .collect::<HashSet<_>>();
+        let open = std::iter::once(&self.project)
+            .chain(self.parked.iter())
+            .flat_map(|project| project.documents.keys().cloned())
+            .collect::<HashSet<_>>();
+        let paths = paths
+            .into_iter()
+            .map(|path| path.canonicalize().unwrap_or(path))
+            .collect::<Vec<_>>();
+        let batch = watch::batch(paths, &ignored, &self.quiet_writes, now, &cached, &open);
+        let git_ids = if batch.git {
+            std::iter::once(&self.project)
+                .chain(self.parked.iter())
+                .filter(|project| project.workspace.is_some())
+                .map(|project| project.id)
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        let needs_index = !batch.files.is_empty() || !batch.directories.is_empty();
+        for dir in batch.directories {
+            self.reload_directory(dir, cx);
+        }
+        if needs_index {
+            for project_id in std::iter::once(&self.project)
+                .chain(self.parked.iter())
+                .map(|project| project.id)
+                .collect::<Vec<_>>()
+            {
+                self.reindex_project(project_id, cx);
+            }
+        }
+        for project_id in git_ids {
+            self.refresh_git_project(project_id, cx);
+        }
+        if batch.files.is_empty() {
+            cx.notify();
+            return;
+        }
+        let files = batch.files;
+        let task = cx.background_executor().spawn(async move {
+            files
+                .into_iter()
+                .map(|path| {
+                    let result = buffer::read(&path);
+                    (path, result)
+                })
+                .collect::<Vec<_>>()
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let results = task.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.apply_disk_reads(results, window, cx);
+            });
+        })
+        .detach();
+    }
+
+    fn apply_disk_reads(
+        &mut self,
+        results: Vec<(PathBuf, io::Result<String>)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut reloaded = 0;
+        let mut removed = Vec::new();
+        for (path, result) in results {
+            match result {
+                Ok(text) => {
+                    if self.apply_disk_text(&path, text, false, window, cx) {
+                        reloaded += 1;
+                    }
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    if self.mark_disk_removed(&path) {
+                        removed.push(name(&path));
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+        if reloaded == 1 {
+            self.toast("Reloaded from disk", cx);
+        } else if reloaded > 1 {
+            self.toast(&format!("Reloaded {reloaded} files from disk"), cx);
+        }
+        for name in removed {
+            self.toast(&format!("{name} was removed on disk"), cx);
+        }
+        if self.blame.is_some() {
+            self.read_blame(window, cx);
+        }
+        self.update_title(window);
+        cx.notify();
+    }
+
+    /// Apply a disk snapshot to an open buffer. Forced reloads come from the
+    /// banner and overwrite local edits; the watch path only overwrites when
+    /// the buffer is clean. Returns whether a clean buffer was replaced.
+    fn apply_disk_text(
+        &mut self,
+        path: &Path,
+        text: String,
+        force: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(project_id) = self.project_id_for_document(path) else {
+            return false;
+        };
+        let Some(document) = self
+            .project_mut(project_id)
+            .and_then(|project| project.documents.get(path))
+        else {
+            return false;
+        };
+        let editor = document.editor.clone();
+        let dirty = document.dirty;
+        let saved = document.saved.to_string();
+        if text == saved {
+            if let Some(project) = self.project_mut(project_id) {
+                project.disk_notice.remove(path);
+            }
+            return false;
+        }
+        if dirty && !force {
+            if let Some(project) = self.project_mut(project_id) {
+                project
+                    .disk_notice
+                    .insert(path.to_path_buf(), DiskNotice::Changed);
+            }
+            return false;
+        }
+        if let Some(document) = self
+            .project_mut(project_id)
+            .and_then(|project| project.documents.get_mut(path))
+        {
+            document.saved = text.clone().into();
+        }
+        editor.update(cx, |editor, cx| editor.set_value(text, window, cx));
+        if let Some(project) = self.project_mut(project_id) {
+            if let Some(document) = project.documents.get_mut(path) {
+                document.dirty = document.editor.read(cx).value() != document.saved;
+            }
+            project.disk_notice.remove(path);
+        }
+        true
+    }
+
+    fn mark_disk_removed(&mut self, path: &Path) -> bool {
+        let Some(project_id) = self.project_id_for_document(path) else {
+            return false;
+        };
+        let Some(project) = self.project_mut(project_id) else {
+            return false;
+        };
+        let Some(document) = project.documents.get(path) else {
+            return false;
+        };
+        if document.dirty {
+            project
+                .disk_notice
+                .insert(path.to_path_buf(), DiskNotice::Removed);
+            false
+        } else {
+            true
+        }
+    }
+
+    fn project_id_for_document(&self, path: &Path) -> Option<u64> {
+        std::iter::once(&self.project)
+            .chain(self.parked.iter())
+            .find(|project| project.documents.contains_key(path))
+            .map(|project| project.id)
+    }
+
+    fn reload_from_disk(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let task = cx
+            .background_executor()
+            .spawn(async move { (path.clone(), buffer::read(&path)) });
+        cx.spawn_in(window, async move |this, cx| {
+            let (path, result) = task.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                match result {
+                    Ok(text) => {
+                        this.apply_disk_text(&path, text, true, window, cx);
+                        this.toast("Reloaded from disk", cx);
+                    }
+                    Err(error) => this.error(error.to_string(), cx),
+                }
+                this.update_title(window);
+                cx.notify();
+            });
         })
         .detach();
     }
@@ -4334,13 +4904,7 @@ impl Folio {
                         cx,
                     )),
             )
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_hidden()
-                    .child(entity),
-            )
+            .child(div().flex_1().min_h_0().overflow_hidden().child(entity))
             .into_any_element()
     }
 
@@ -5188,6 +5752,12 @@ impl Folio {
             .on_click(
                 cx.listener(move |this, _, window, cx| this.select_project(&root, window, cx)),
             )
+            .on_drop(cx.listener({
+                let onto = keyboard_root.clone();
+                move |this, drag: &TreeDrag, window, cx| {
+                    this.drop_tree_entry(drag.path.clone(), onto.clone(), window, cx);
+                }
+            }))
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
@@ -5316,6 +5886,8 @@ impl Folio {
                         }
                         let row = this.project.rows[i].clone();
                         let path = row.entry.path.clone();
+                        let drag_path = path.clone();
+                        let drop_path = path.clone();
                         let menu_path = path.clone();
                         let selected = this.project.active.as_ref() == Some(&path)
                             || i == this.project.selected_row;
@@ -5340,16 +5912,10 @@ impl Folio {
                             .tree_hover_row
                             .filter(|&ix| ix < this.project.rows.len())
                             .or_else(|| {
-                                (!this.project.rows.is_empty())
-                                    .then_some(this.project.selected_row)
+                                (!this.project.rows.is_empty()).then_some(this.project.selected_row)
                             });
-                        let guides = tree_guide_elements(
-                            &this.project.rows,
-                            i,
-                            row.depth,
-                            focus,
-                            cx,
-                        );
+                        let guides =
+                            tree_guide_elements(&this.project.rows, i, row.depth, focus, cx);
                         div()
                             .id(("row", i))
                             .role(Role::TreeItem)
@@ -5366,9 +5932,7 @@ impl Folio {
                             .text_size(ui(12.))
                             .cursor_default()
                             .when(selected, |el| el.bg(cx.theme().list_active))
-                            .when(!selected, |el| {
-                                el.hover(|el| el.bg(cx.theme().list_hover))
-                            })
+                            .when(!selected, |el| el.hover(|el| el.bg(cx.theme().list_hover)))
                             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                                 if *hovered {
                                     if this.tree_hover_row != Some(i) {
@@ -5387,6 +5951,25 @@ impl Folio {
                                     EntryKind::Directory => this.toggle_directory(path.clone(), cx),
                                     EntryKind::File => this.open_file(path.clone(), window, cx),
                                 }
+                            }))
+                            .on_drag(
+                                TreeDrag {
+                                    path: drag_path,
+                                    name: row.entry.name.clone().into(),
+                                },
+                                |drag, _, _, cx| {
+                                    cx.new(|_| TreeDragPreview {
+                                        name: drag.name.clone(),
+                                    })
+                                },
+                            )
+                            .on_drop(cx.listener(move |this, drag: &TreeDrag, window, cx| {
+                                this.drop_tree_entry(
+                                    drag.path.clone(),
+                                    drop_path.clone(),
+                                    window,
+                                    cx,
+                                );
                             }))
                             .on_mouse_down(
                                 MouseButton::Right,
@@ -6163,6 +6746,57 @@ impl Folio {
             .into_any_element()
     }
 
+    fn render_disk_notice(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let path = self.project.active.clone().unwrap_or_default();
+        let removed = self.project.disk_notice.get(&path) == Some(&DiskNotice::Removed);
+        div()
+            .px_4()
+            .py_1()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_3()
+            .child(
+                div()
+                    .text_size(ui(11.))
+                    .text_color(cx.theme().muted_foreground)
+                    .child(if removed {
+                        "This file was removed on disk"
+                    } else {
+                        "This file changed on disk"
+                    }),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .when(!removed, |el| {
+                        let path = path.clone();
+                        el.child(
+                            Button::new("reload-disk")
+                                .text()
+                                .xsmall()
+                                .label("Reload")
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.reload_from_disk(path.clone(), window, cx);
+                                })),
+                        )
+                    })
+                    .child({
+                        let path = path.clone();
+                        Button::new("keep-disk")
+                            .text()
+                            .xsmall()
+                            .label("Keep")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.project.disk_notice.remove(&path);
+                                cx.notify();
+                            }))
+                    }),
+            )
+    }
+
     fn render_workspace(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         // Read here rather than stored: what it says is about the line the
         // caret is on, which moves without anything else changing.
@@ -6217,141 +6851,138 @@ impl Folio {
                 )
             })
             .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .flex()
+                    .flex_col()
+                    .rounded_tr(px(WORKSPACE_RADIUS))
+                    .rounded_br(px(WORKSPACE_RADIUS))
+                    .when(!self.sidebar, |el| {
+                        el.rounded_tl(px(WORKSPACE_RADIUS))
+                            .rounded_bl(px(WORKSPACE_RADIUS))
+                    })
+                    .when(self.project.tabs.len() > 1, |el| {
+                        el.child(self.render_tabs(cx))
+                    })
+                    // Everything under the strip keeps the padding
+                    // full-screen mode gives it; the strip itself runs
+                    // the full width.
+                    .child(
                         div()
                             .flex_1()
-                            .min_w_0()
-                            .h_full()
+                            .min_h_0()
+                            .w_full()
                             .flex()
                             .flex_col()
-                            .rounded_tr(px(WORKSPACE_RADIUS))
-                            .rounded_br(px(WORKSPACE_RADIUS))
-                            .when(!self.sidebar, |el| {
-                                el.rounded_tl(px(WORKSPACE_RADIUS))
-                                    .rounded_bl(px(WORKSPACE_RADIUS))
-                            })
-                            .when(self.project.tabs.len() > 1, |el| {
-                                el.child(self.render_tabs(cx))
-                            })
-                            // Everything under the strip keeps the padding
-                            // full-screen mode gives it; the strip itself runs
-                            // the full width.
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_h_0()
-                                    .w_full()
-                                    .flex()
-                                    .flex_col()
-                                    .when(!self.sidebar && !showing_diff, |el| el.px_6())
-                                    .when(showing_diff, |el| el.child(self.render_diff(cx)))
-                                    .when_some(doc, |el, doc| {
-                                        el.when(doc.large, |el| {
-                                            el.child(
-                                                div()
-                                                    .px_4()
-                                                    .py_1()
-                                                    .text_size(ui(11.))
-                                                    .text_color(cx.theme().muted_foreground)
-                                                    .child("Large file · syntax highlighting off"),
+                            .when(!self.sidebar && !showing_diff, |el| el.px_6())
+                            .when(showing_diff, |el| el.child(self.render_diff(cx)))
+                            .when_some(doc, |el, doc| {
+                                el.when(
+                                    self.project.active.as_ref().is_some_and(|path| {
+                                        self.project.disk_notice.contains_key(path)
+                                    }),
+                                    |el| el.child(self.render_disk_notice(cx)),
+                                )
+                                .when(doc.large, |el| {
+                                    el.child(
+                                        div()
+                                            .px_4()
+                                            .py_1()
+                                            .text_size(ui(11.))
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child("Large file · syntax highlighting off"),
+                                    )
+                                })
+                                .child({
+                                    // Rendered through `Input` rather than the
+                                    // `Editor` wrapper: the wrapper hides the
+                                    // context-menu hook, and the wrapper is
+                                    // otherwise doing exactly this.
+                                    let base = doc.editor.read(cx).base_state().clone();
+                                    let editor = {
+                                        let capabilities =
+                                            base.read(cx).context_menu_capabilities();
+                                        let enabled = !capabilities.is_disabled();
+                                        EditorMenuState {
+                                            enabled,
+                                            editable: enabled && !capabilities.is_readonly(),
+                                            code_editor: capabilities.is_code_editor(),
+                                            has_selection: capabilities.has_selection(),
+                                            can_go_to_definition: capabilities
+                                                .can_go_to_definition(),
+                                            has_code_actions: capabilities.has_code_actions(),
+                                        }
+                                    };
+                                    // The wrapper gives the code editor a
+                                    // key context of its own, which is what
+                                    // scopes the bracket bindings to it and
+                                    // keeps them off every other text field.
+                                    div().key_context("FolioEditor").size_full().child(
+                                        Input::from_base(&base)
+                                            .appearance(false)
+                                            .bordered(false)
+                                            .focus_bordered(false)
+                                            .readonly(
+                                                self.saving
+                                                    || self.loading
+                                                    || self.prompting
+                                                    || locked,
                                             )
-                                        })
-                                        .child({
-                                            // Rendered through `Input` rather than the
-                                            // `Editor` wrapper: the wrapper hides the
-                                            // context-menu hook, and the wrapper is
-                                            // otherwise doing exactly this.
-                                            let base = doc.editor.read(cx).base_state().clone();
-                                            let editor = {
-                                                let capabilities =
-                                                    base.read(cx).context_menu_capabilities();
-                                                let enabled = !capabilities.is_disabled();
-                                                EditorMenuState {
-                                                    enabled,
-                                                    editable: enabled
-                                                        && !capabilities.is_readonly(),
-                                                    code_editor: capabilities.is_code_editor(),
-                                                    has_selection: capabilities.has_selection(),
-                                                    can_go_to_definition: capabilities
-                                                        .can_go_to_definition(),
-                                                    has_code_actions: capabilities
-                                                        .has_code_actions(),
-                                                }
-                                            };
-                                            // The wrapper gives the code editor a
-                                            // key context of its own, which is what
-                                            // scopes the bracket bindings to it and
-                                            // keeps them off every other text field.
-                                            div().key_context("FolioEditor").size_full().child(
-                                                Input::from_base(&base)
-                                                    .appearance(false)
-                                                    .bordered(false)
-                                                    .focus_bordered(false)
-                                                    .readonly(
-                                                        self.saving
-                                                            || self.loading
-                                                            || self.prompting
-                                                            || locked,
-                                                    )
-                                                    .context_menu(move |menu, window, cx| {
-                                                        editor_context_menu(
-                                                            editor, menu, window, cx,
-                                                        )
-                                                    })
-                                                    // The code size is its own setting, so it
-                                                    // is absolute rather than in the
-                                                    // interface's scale.
-                                                    .text_size(px(self.settings.code_font_size))
-                                                    .font_family(self.code_font())
-                                                    .line_height(gpui::relative(1.6))
-                                                    .rounded_none()
-                                                    .h_full(),
-                                            )
-                                        })
-                                        // The line the caret is on, and who last
-                                        // wrote it. One line rather than a
-                                        // column in the gutter: the same
-                                        // reading, without narrowing every line
-                                        // of code for it.
-                                        .when_some(
-                                            blame,
-                                            |el, text| {
-                                                el.child(
-                                                    div()
-                                                        .px_4()
-                                                        .py_1()
-                                                        .text_size(ui(11.))
-                                                        .text_color(cx.theme().muted_foreground)
-                                                        .child(text),
-                                                )
-                                            },
-                                        )
-                                    })
-                                    .when_some(image, |el, (path, image)| {
-                                        el.child(
-                                            div().flex_1().min_h_0().w_full().p_6().child(
-                                                img(image.clone())
-                                                    .size_full()
-                                                    .object_fit(ObjectFit::Contain),
-                                            ),
-                                        )
-                                        .child(
-                                            div()
-                                                .px_4()
-                                                .py_2()
-                                                .text_size(ui(11.))
-                                                .text_color(cx.theme().muted_foreground)
-                                                .child(format!(
-                                                    "{} · {} × {} · static preview",
-                                                    name(path),
-                                                    u32::from(image.size(0).width),
-                                                    u32::from(image.size(0).height)
-                                                )),
-                                        )
-                                    })
-                                    .when(
-                                        !showing_diff && doc.is_none() && image.is_none(),
-                                        |el| {
-                                            el.child(
+                                            .context_menu(move |menu, window, cx| {
+                                                editor_context_menu(editor, menu, window, cx)
+                                            })
+                                            // The code size is its own setting, so it
+                                            // is absolute rather than in the
+                                            // interface's scale.
+                                            .text_size(px(self.settings.code_font_size))
+                                            .font_family(self.code_font())
+                                            .line_height(gpui::relative(1.6))
+                                            .rounded_none()
+                                            .h_full(),
+                                    )
+                                })
+                                // The line the caret is on, and who last
+                                // wrote it. One line rather than a
+                                // column in the gutter: the same
+                                // reading, without narrowing every line
+                                // of code for it.
+                                .when_some(blame, |el, text| {
+                                    el.child(
+                                        div()
+                                            .px_4()
+                                            .py_1()
+                                            .text_size(ui(11.))
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(text),
+                                    )
+                                })
+                            })
+                            .when_some(image, |el, (path, image)| {
+                                el.child(
+                                    div().flex_1().min_h_0().w_full().p_6().child(
+                                        img(image.clone())
+                                            .size_full()
+                                            .object_fit(ObjectFit::Contain),
+                                    ),
+                                )
+                                .child(
+                                    div()
+                                        .px_4()
+                                        .py_2()
+                                        .text_size(ui(11.))
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(format!(
+                                            "{} · {} × {} · static preview",
+                                            name(path),
+                                            u32::from(image.size(0).width),
+                                            u32::from(image.size(0).height)
+                                        )),
+                                )
+                            })
+                            .when(!showing_diff && doc.is_none() && image.is_none(), |el| {
+                                el.child(
                                     div()
                                         .size_full()
                                         .flex()
@@ -6372,15 +7003,14 @@ impl Folio {
                                                 .child("Pick a file on the left, or press ⌘ P"),
                                         ),
                                 )
-                                        },
-                                    ),
-                            )
-                            // The terminal drawer hangs under the content
-                            // column alone; the sidebar keeps its full
-                            // height, and the editor above shrinks.
-                            .when(self.terminal_open, |el| {
-                                el.child(self.render_terminal_dock(window, cx))
                             }),
+                    )
+                    // The terminal drawer hangs under the content
+                    // column alone; the sidebar keeps its full
+                    // height, and the editor above shrinks.
+                    .when(self.terminal_open, |el| {
+                        el.child(self.render_terminal_dock(window, cx))
+                    }),
             )
             .into_any_element()
     }
@@ -7006,6 +7636,19 @@ impl SettingsView {
                         cx,
                     ),
                     Self::row(
+                        "Soft wrap",
+                        "Break long lines to the editor width. Off keeps a character grid.",
+                        self.choice(
+                            "soft-wrap",
+                            ("On", settings.soft_wrap, |settings| settings.soft_wrap = true),
+                            ("Off", !settings.soft_wrap, |settings| {
+                                settings.soft_wrap = false
+                            }),
+                            cx,
+                        ),
+                        cx,
+                    ),
+                    Self::row(
                         "Size",
                         "How large code is drawn.",
                         self.stepper(
@@ -7140,6 +7783,9 @@ impl Render for SettingsView {
 
 impl Render for Folio {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.applied_wrap != self.settings.soft_wrap {
+            self.sync_soft_wrap(window, cx);
+        }
         div()
             .id("folio")
             .key_context("Folio")
@@ -7214,6 +7860,18 @@ impl Render for Folio {
             .on_action(
                 cx.listener(|this, _: &ToggleComment, window, cx| this.toggle_comment(window, cx)),
             )
+            .on_action(cx.listener(|this, _: &ToggleBlockComment, window, cx| {
+                this.toggle_block_comment(window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &DuplicateLines, window, cx| {
+                this.duplicate_lines(window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &MoveLinesUp, window, cx| {
+                this.move_lines(false, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &MoveLinesDown, window, cx| {
+                this.move_lines(true, window, cx)
+            }))
             // The editor's own commands, bound only where the code editor has
             // the keyboard.
             .on_action(cx.listener(|this, _: &Fold, _, cx| {
@@ -7284,12 +7942,11 @@ impl Render for Folio {
                 this.resizing &= event.dragging();
                 this.resizing_terminal &= event.dragging();
                 if this.resizing {
-                    this.sidebar_width = (f32::from(event.position.x)
-                        - this.workspace_left_inset())
-                    .clamp(
-                        160.,
-                        (f32::from(window.viewport_size().width) * 0.4).max(160.),
-                    );
+                    this.sidebar_width =
+                        (f32::from(event.position.x) - this.workspace_left_inset()).clamp(
+                            160.,
+                            (f32::from(window.viewport_size().width) * 0.4).max(160.),
+                        );
                     cx.notify();
                 }
                 if this.resizing_terminal {
@@ -8022,7 +8679,7 @@ mod tests {
             assert_eq!(app.search.results.len(), 3);
         });
 
-        // Opening a hit closes the panel and leaves the cursor on the match.
+        // Opening a hit leaves the panel up so the next match is one key away.
         view.update_in(cx, |app, window, cx| {
             let file = app
                 .search
@@ -8044,7 +8701,7 @@ mod tests {
         cx.run_until_parked();
         view.update_in(cx, |app, _, cx| {
             assert!(app.goto.is_none(), "the pending jump must be consumed");
-            assert!(app.panel.is_none(), "opening a hit closes the panel");
+            assert_eq!(app.panel, Some(Panel::Search));
             let cursor = app.project.documents[&open]
                 .editor
                 .read(cx)
@@ -9324,6 +9981,22 @@ mod tests {
             app.on_active_buffer(cx, |base, cx| base.add_cursor_below(cx));
             app.toggle_comment(window, cx);
             assert_eq!(value(cx), "// x = 1;\n// y = 2;\n");
+
+            start("x = 1;\n", 0..0, window, cx);
+            app.toggle_block_comment(window, cx);
+            assert_eq!(value(cx), "/* x = 1; */\n");
+            app.toggle_block_comment(window, cx);
+            assert_eq!(value(cx), "x = 1;\n");
+
+            start("one\ntwo\n", 0..0, window, cx);
+            app.duplicate_lines(window, cx);
+            assert_eq!(value(cx), "one\none\ntwo\n");
+
+            start("one\ntwo\nthree\n", 0..0, window, cx);
+            app.move_lines(true, window, cx);
+            assert_eq!(value(cx), "two\none\nthree\n");
+            app.move_lines(false, window, cx);
+            assert_eq!(value(cx), "one\ntwo\nthree\n");
         });
     }
 
@@ -10268,6 +10941,132 @@ mod tests {
                     .is_some_and(|message| message.contains("Deleted")),
                 "a successful delete reports back instead of erroring"
             );
+        });
+    }
+
+    #[gpui::test]
+    fn external_edits_reload_clean_buffers_and_prompt_dirty_ones(cx: &mut TestAppContext) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let file = root.join("main.rs");
+        std::fs::write(&file, "fn first() {}\n").unwrap();
+        cx.update(gpui_component::init);
+        let cx = cx.add_empty_window();
+        let view = cx.update(|window, cx| {
+            cx.new(|cx| {
+                let mut app = Folio::new(window, cx);
+                app.recent_task = None;
+                app.recent_file = root.join("recent.json");
+                app.settings_file = root.join("settings.json");
+                app.window_file = root.join("window.json");
+                app.settings = Settings::default();
+                app.applied_ignored = app.settings.ignored.clone();
+                app
+            })
+        });
+        view.update_in(cx, |app, window, cx| {
+            app.request(Next::Open(root.clone()), window, cx)
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |app, window, cx| {
+            app.open_file(file.clone(), window, cx)
+        });
+        cx.run_until_parked();
+
+        std::fs::write(&file, "fn second() {}\n").unwrap();
+        view.update_in(cx, |app, window, cx| {
+            app.apply_watch_paths(vec![file.clone()], window, cx)
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |app, _, cx| {
+            let document = &app.project.documents[&file];
+            assert_eq!(document.editor.read(cx).value(), "fn second() {}\n");
+            assert!(!document.dirty);
+            assert!(app.project.disk_notice.is_empty());
+        });
+
+        view.update_in(cx, |app, window, cx| {
+            let editor = app.project.documents[&file].editor.clone();
+            editor.read(cx).base_state().clone().update(cx, |base, cx| {
+                base.replace_all("fn local() {}\n", window, cx)
+            });
+            app.project.documents.get_mut(&file).unwrap().dirty = true;
+        });
+        std::fs::write(&file, "fn third() {}\n").unwrap();
+        view.update_in(cx, |app, window, cx| {
+            app.apply_watch_paths(vec![file.clone()], window, cx)
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |app, window, cx| {
+            let document = &app.project.documents[&file];
+            assert_eq!(document.editor.read(cx).value(), "fn local() {}\n");
+            assert_eq!(
+                app.project.disk_notice.get(&file),
+                Some(&DiskNotice::Changed)
+            );
+            app.project.disk_notice.remove(&file);
+            app.reload_from_disk(file.clone(), window, cx);
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |app, _, cx| {
+            let document = &app.project.documents[&file];
+            assert_eq!(document.editor.read(cx).value(), "fn third() {}\n");
+            assert!(!document.dirty);
+            assert!(app.project.disk_notice.is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn dropping_a_tree_row_moves_the_file_and_its_buffer(cx: &mut TestAppContext) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let src = root.join("src");
+        std::fs::create_dir(&src).unwrap();
+        let file = root.join("main.rs");
+        std::fs::write(&file, "fn main() {}\n").unwrap();
+        cx.update(gpui_component::init);
+        let cx = cx.add_empty_window();
+        let view = cx.update(|window, cx| {
+            cx.new(|cx| {
+                let mut app = Folio::new(window, cx);
+                app.recent_task = None;
+                app.recent_file = root.join("recent.json");
+                app.settings_file = root.join("settings.json");
+                app.window_file = root.join("window.json");
+                app.settings = Settings::default();
+                app.applied_ignored = app.settings.ignored.clone();
+                app
+            })
+        });
+        view.update_in(cx, |app, window, cx| {
+            app.request(Next::Open(root.clone()), window, cx)
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |app, window, cx| app.open_file(file.clone(), window, cx));
+        cx.run_until_parked();
+        view.update_in(cx, |app, window, cx| {
+            app.project.documents[&file]
+                .editor
+                .read(cx)
+                .base_state()
+                .clone()
+                .update(cx, |base, cx| base.replace_all("fn moved() {}\n", window, cx));
+            app.project.documents.get_mut(&file).unwrap().dirty = true;
+            app.drop_tree_entry(file.clone(), src.clone(), window, cx);
+        });
+        cx.run_until_parked();
+        let dest = src.join("main.rs");
+        assert!(dest.is_file());
+        assert!(!file.exists());
+        view.update_in(cx, |app, _, cx| {
+            let document = app
+                .project
+                .documents
+                .get(&dest)
+                .expect("the open buffer follows the file");
+            assert_eq!(document.editor.read(cx).value(), "fn moved() {}\n");
+            assert!(document.dirty);
+            assert!(!app.project.documents.contains_key(&file));
         });
     }
 }

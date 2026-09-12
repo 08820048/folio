@@ -65,6 +65,20 @@ fn main() {
                 // only the key it answers to changes.
                 KeyBinding::new(&format!("{modifier}-alt-f"), input::Replace, Some("Folio")),
                 KeyBinding::new(&format!("{modifier}-/"), ToggleComment, Some("Folio")),
+                KeyBinding::new(
+                    &format!("{modifier}-shift-/"),
+                    ToggleBlockComment,
+                    Some("FolioEditor"),
+                ),
+                // `⇧⌘D` is already the changes view, so line copy takes the
+                // empty chord the v0.3 note reserved for that collision.
+                KeyBinding::new(
+                    &format!("{modifier}-shift-enter"),
+                    DuplicateLines,
+                    Some("FolioEditor"),
+                ),
+                KeyBinding::new("alt-up", MoveLinesUp, Some("FolioEditor")),
+                KeyBinding::new("alt-down", MoveLinesDown, Some("FolioEditor")),
                 // Folding, beside the indent keys the editor binds itself:
                 // `⌘[` and `⌘]` are indentation, so folding takes the option
                 // key as well, which is where VS Code puts it.
@@ -157,6 +171,10 @@ fn main() {
                     MenuItem::action("Select All", input::SelectAll),
                     MenuItem::separator(),
                     MenuItem::action("Toggle Comment", ToggleComment),
+                    MenuItem::action("Toggle Block Comment", ToggleBlockComment),
+                    MenuItem::action("Duplicate Lines", DuplicateLines),
+                    MenuItem::action("Move Lines Up", MoveLinesUp),
+                    MenuItem::action("Move Lines Down", MoveLinesDown),
                     MenuItem::action("Fold", Fold),
                     MenuItem::action("Unfold", Unfold),
                     MenuItem::separator(),

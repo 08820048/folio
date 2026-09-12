@@ -663,7 +663,9 @@ mod tests {
             scrollback: 100,
         })
         .unwrap();
-        wait_for(&mut terminal, |_, snapshot| snapshot.text().contains("READY"));
+        wait_for(&mut terminal, |_, snapshot| {
+            snapshot.text().contains("READY")
+        });
         terminal.write(b"abc");
         let snapshot = wait_for(&mut terminal, |_, snapshot| snapshot.text().contains("abc"));
         assert!(

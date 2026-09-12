@@ -17,4 +17,5 @@ pub mod terminal_keys;
 #[cfg(feature = "terminal")]
 pub mod terminal_mouse;
 pub mod tree;
+pub mod watch;
 pub mod workspace;

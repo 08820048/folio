@@ -510,7 +510,9 @@ fn cell_metrics(cx: &App) -> (Pixels, Pixels, Pixels) {
         .map(|advance| advance.width)
         .unwrap_or(px(8.))
         .max(px(1.));
-    let line_height = px((f32::from(font_size) * LINE_HEIGHT).ceil().max(f32::from(font_size)));
+    let line_height = px((f32::from(font_size) * LINE_HEIGHT)
+        .ceil()
+        .max(f32::from(font_size)));
     (cell_width, line_height, font_size)
 }
 
@@ -722,12 +724,8 @@ fn paint_grid(
     window: &mut Window,
     cx: &mut App,
 ) {
-    let (rects, batches) = layout_cells(
-        snapshot,
-        colors,
-        &font,
-        cursor_visible && marked.is_none(),
-    );
+    let (rects, batches) =
+        layout_cells(snapshot, colors, &font, cursor_visible && marked.is_none());
     for rect in &rects {
         let origin = cell_origin(layout, rect.row, rect.column);
         window.paint_quad(fill(

@@ -85,3 +85,43 @@ pub fn fuzzy_match(query: &str, candidate: &str) -> bool {
         .chars()
         .all(|wanted| chars.any(|c| c == wanted))
 }
+
+#[cfg(test)]
+mod perf_tests {
+    use super::*;
+    use std::{fs, time::Instant};
+
+    /// Run with `cargo test --release --features desktop-tests --lib records_index -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn records_index_and_read_times() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for i in 0..25 {
+            let folder = root.join(format!("src{i}"));
+            fs::create_dir(&folder).unwrap();
+            for j in 0..100 {
+                fs::write(folder.join(format!("f{j}.rs")), "fn x() {}\n").unwrap();
+            }
+        }
+        fs::write(root.join("big.rs"), format!("// {}\n", "a".repeat(1024 * 1024))).unwrap();
+        let ignored: Vec<String> = DEFAULT_IGNORED.iter().map(|name| (*name).to_string()).collect();
+        let started = Instant::now();
+        let files = index(root, &ignored).unwrap();
+        let index_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let big = files
+            .iter()
+            .find(|path| path.file_name().is_some_and(|name| name == "big.rs"))
+            .unwrap();
+        let started = Instant::now();
+        let text = crate::buffer::read(big).unwrap();
+        let read_ms = started.elapsed().as_secs_f64() * 1000.0;
+        println!(
+            "index_files={} index_ms={index_ms:.1} read_bytes={} read_ms={read_ms:.1}",
+            files.len(),
+            text.len()
+        );
+        assert!(files.len() >= 2500);
+        assert!(text.len() > 1024 * 1024);
+    }
+}

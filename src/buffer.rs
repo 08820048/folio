@@ -284,6 +284,105 @@ pub fn toggle_comments(block: &str, marker: &str) -> String {
     }
 }
 
+/// Pair that wraps a selection as a block comment, when the language has one.
+pub fn block_comment(language: &str) -> Option<(&'static str, &'static str)> {
+    Some(match language {
+        "rust" | "c" | "cpp" | "csharp" | "go" | "zig" | "swift" | "java" | "kotlin" | "scala"
+        | "dart" | "typescript" | "tsx" | "javascript" | "php" | "solidity" | "less" | "scss"
+        | "sass" | "css" | "protobuf" => ("/*", "*/"),
+        "html" | "xml" | "markdown" => ("<!--", "-->"),
+        _ => return None,
+    })
+}
+
+/// Wrap `block` in the language's block markers, or unwrap it if it already is.
+pub fn toggle_block_comments(block: &str, open: &str, close: &str) -> String {
+    let (body, newline) = split_newline(block);
+    let trimmed = body.trim();
+    if let Some(inner) = trimmed
+        .strip_prefix(open)
+        .and_then(|rest| rest.strip_suffix(close))
+    {
+        format!("{}{newline}", inner.trim())
+    } else {
+        format!("{open} {body} {close}{newline}")
+    }
+}
+
+/// `line_range` stops before the line's newline. Line moves copy that
+/// newline with the line, or the file would lose it when the block is last.
+fn line_span(text: &str, selection: Range<usize>) -> Range<usize> {
+    let end = selection.end.min(text.len());
+    let start = selection.start.min(end);
+    // `line_range` treats an end that sits on the next line's first
+    // character as reaching that line. A span that already includes its
+    // own newline must not be read that way.
+    let trimmed = if end > start && text.as_bytes()[end - 1] == b'\n' {
+        start..end - 1
+    } else {
+        start..end
+    };
+    let range = line_range(text, trimmed);
+    if range.end < text.len() && text.as_bytes()[range.end] == b'\n' {
+        range.start..range.end + 1
+    } else {
+        range
+    }
+}
+
+/// Duplicate the lines a selection touches, placing the copy immediately after.
+/// The returned range covers the copy, so a second press stacks another.
+pub fn duplicate_lines(text: &str, selection: Range<usize>) -> (String, Range<usize>) {
+    let span = line_span(text, selection);
+    let block = &text[span.clone()];
+    let mut out = String::with_capacity(text.len() + block.len());
+    out.push_str(&text[..span.end]);
+    if !block.ends_with('\n') {
+        out.push('\n');
+    }
+    let start = out.len();
+    out.push_str(block);
+    let end = out.len();
+    out.push_str(&text[span.end..]);
+    (out, start..end)
+}
+
+/// Move the lines a selection touches one line down or up. `None` when the
+/// block is already against that edge of the file.
+pub fn move_lines(text: &str, selection: Range<usize>, down: bool) -> Option<(String, Range<usize>)> {
+    let span = line_span(text, selection);
+    if down {
+        if span.end >= text.len() {
+            return None;
+        }
+        let next = line_span(text, span.end..span.end);
+        if next.end == span.end {
+            return None;
+        }
+        let mut out = String::new();
+        out.push_str(&text[..span.start]);
+        out.push_str(&text[next.clone()]);
+        let start = out.len();
+        out.push_str(&text[span.clone()]);
+        let end = out.len();
+        out.push_str(&text[next.end..]);
+        Some((out, start..end))
+    } else {
+        if span.start == 0 {
+            return None;
+        }
+        let prev = line_span(text, span.start - 1..span.start - 1);
+        let mut out = String::new();
+        out.push_str(&text[..prev.start]);
+        let start = out.len();
+        out.push_str(&text[span.clone()]);
+        let end = out.len();
+        out.push_str(&text[prev.clone()]);
+        out.push_str(&text[span.end..]);
+        Some((out, start..end))
+    }
+}
+
 #[cfg(test)]
 mod comment_tests {
     use super::*;
@@ -355,5 +454,33 @@ mod comment_tests {
         let block = "中文 = 1\n  中文 = 2\n";
         assert_eq!(toggle_comments(block, "#"), "# 中文 = 1\n  # 中文 = 2\n");
         assert_eq!(toggle_comments("# 中文 = 1\n", "#"), "中文 = 1\n");
+    }
+
+    #[test]
+    fn block_markers_follow_the_language() {
+        assert_eq!(block_comment("rust"), Some(("/*", "*/")));
+        assert_eq!(block_comment("html"), Some(("<!--", "-->")));
+        assert_eq!(block_comment("python"), None);
+        assert_eq!(toggle_block_comments("fn x() {}", "/*", "*/"), "/* fn x() {} */");
+        assert_eq!(toggle_block_comments("/* fn x() {} */", "/*", "*/"), "fn x() {}");
+    }
+
+    #[test]
+    fn duplicating_a_line_places_the_copy_below() {
+        let (text, range) = duplicate_lines("one\ntwo\n", 0..0);
+        assert_eq!(text, "one\none\ntwo\n");
+        assert_eq!(&text[range], "one\n");
+    }
+
+    #[test]
+    fn moving_lines_swaps_with_the_neighbour() {
+        let (text, range) = move_lines("one\ntwo\nthree\n", 0..0, true).unwrap();
+        assert_eq!(text, "two\none\nthree\n");
+        assert_eq!(&text[range.clone()], "one\n");
+        let (text, range) = move_lines(&text, range, false).unwrap();
+        assert_eq!(text, "one\ntwo\nthree\n");
+        assert_eq!(&text[range], "one\n");
+        assert!(move_lines("one\n", 0..0, false).is_none());
+        assert!(move_lines("one\n", 0..0, true).is_none());
     }
 }
