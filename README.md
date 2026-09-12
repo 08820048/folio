@@ -1,7 +1,8 @@
 # Folio
 
 A local code reading editor built with Rust and GPUI. Light and dark follow the
-system; one window, several projects; no WebView, no terminal, no AI service.
+system; one window, several projects; no WebView, no AI service. A project's
+shell sits in a drawer under the workspace.
 
 ## Running
 
@@ -15,9 +16,9 @@ cargo run --locked
 first build downloads dependencies; the app itself never needs the network. The
 code font, JetBrains Mono, is embedded in the binary — its license is
 `assets/OFL.txt`. Interface icons come from the Lucide set bundled with
-gpui-component, except two that the component library does not ship
-(`panel-left-dashed` / `panel-right-dashed`), which are vendored in
-`assets/icons/` under the `LICENSE.txt` in that directory.
+gpui-component, except three that the component library does not ship
+(`panel-left-dashed` / `panel-right-dashed` / `square-terminal`), which are
+vendored in `assets/icons/` under the `LICENSE.txt` in that directory.
 
 To build a local `.app`:
 
@@ -50,6 +51,7 @@ next launch, with each project's tabs in order and the file that was on screen
 | Replace in file | ⌥⌘F | Ctrl+Alt+F |
 | Go to line | ⌘G | Ctrl+G |
 | Toggle sidebar | ⌘B | Ctrl+B |
+| Toggle terminal | ⌘J | Ctrl+J |
 | Toggle comment | ⌘/ | Ctrl+/ |
 | Fold | ⌥⌘[ | Ctrl+Alt+[ |
 | Unfold | ⌥⌘] | Ctrl+Alt+] |
@@ -71,18 +73,23 @@ right of the macOS traffic lights; the old centred title and second-line path
 bar are gone. The sidebar is drag-resizable. Its top row shows the project
 folder's name and collapses or expands the whole tree on click, keeping
 subdirectory state, and it also answers to Enter, Space and the left and right
-arrows. The file tree takes the arrow keys and Enter. Editing uses
-gpui-component's Rope editor and a Tree-sitter allowlist; type sizes, font and
-indentation come from the settings, and soft wrap is off.
+arrows. The file tree takes the arrow keys and Enter. `⌘J` opens a terminal
+drawer under the workspace, one set of tabs per project. Hiding it keeps the
+children running; closing the last tab, or the project, takes them with it.
+While the terminal holds the keyboard, `⌘C` / `⌘V` copy and paste its
+selection and `⌘W` closes the tab — elsewhere those keys stay the editor's.
+Editing uses gpui-component's Rope editor and a Tree-sitter allowlist; type
+sizes, font and indentation come from the settings, and soft wrap is off.
 
 Images preview in place, scaled to fit: PNG, JPEG, GIF, WebP, BMP, TIFF, ICO
 and SVG. GIF and WebP show their first frame, and an image never enters the
 text editing or saving path. Every in-app icon is Lucide and icon buttons draw
 no background box. The sidebar toggle in the title bar's top-left uses
-`panel-left-dashed` / `panel-right-dashed`; gpui-component does not ship those
-two, so `src/assets.rs` wraps the bundled asset source and serves them from
-`assets/icons/` — the other 99 still come from the component library, both
-under the same `icons/<name>.svg` namespace.
+`panel-left-dashed` / `panel-right-dashed`; the terminal tab uses
+`square-terminal`. gpui-component does not ship those three, so `src/assets.rs`
+wraps the bundled asset source and serves them from `assets/icons/` — the
+other icons still come from the component library, all under the same
+`icons/<name>.svg` namespace.
 
 Saving first checks that the file on disk still matches what was read, then
 writes a temporary file alongside it and replaces it atomically. A failure

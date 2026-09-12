@@ -36,7 +36,11 @@ syntax = [
     "dep:tree-sitter-vue-updated",
     "dep:tree-sitter-xml",
 ]
-desktop = ["dep:gpui", "dep:gpui_platform", "dep:gpui-component", "dep:gpui-component-assets", "dep:image", "syntax"]
+# The terminal backend (src/terminal.rs): PTY + VT emulation via
+# alacritty_terminal, the same crate Zed embeds. Gated like `syntax` so a
+# library-only build (`cargo test --locked`) does not compile it.
+terminal = ["dep:alacritty_terminal"]
+desktop = ["dep:gpui", "dep:gpui_platform", "dep:gpui-component", "dep:gpui-component-assets", "dep:image", "syntax", "terminal"]
 
 [dependencies]
 anyhow = "1"
@@ -72,6 +76,10 @@ tree-sitter-solidity = { version = "1.2", optional = true }
 tree-sitter-vim = { version = "0.4", optional = true }
 tree-sitter-vue-updated = { version = "0.1", optional = true }
 tree-sitter-xml = { version = "0.7", optional = true }
+# Terminal backend (`terminal` feature), driven by src/terminal.rs. The crate
+# speaks the VT language and owns the PTY (unix pty / Windows ConPTY); the
+# project only draws what its grid holds.
+alacritty_terminal = { version = "0.26", optional = true }
 # The official GPUI crates MUST stay on the same commit (see Cargo.lock).
 # Build with --locked. Dependency upgrades are a separate, tested change.
 gpui = { git = "https://github.com/zed-industries/zed", optional = true }

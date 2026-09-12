@@ -2,6 +2,7 @@ mod app;
 mod assets;
 mod preview;
 mod syntax;
+mod terminal_view;
 use app::*;
 use gpui::*;
 use gpui_component::{Root, TitleBar, input};
@@ -36,6 +37,27 @@ fn main() {
                 ),
                 KeyBinding::new(&format!("{modifier}-g"), GoToLine, Some("Folio")),
                 KeyBinding::new(&format!("{modifier}-b"), ToggleSidebar, Some("Folio")),
+                // The dock, like the sidebar a toggle: hiding it keeps the
+                // child running.
+                KeyBinding::new(&format!("{modifier}-j"), ToggleTerminal, Some("Folio")),
+                // These three answer only while the terminal holds the
+                // keyboard; elsewhere ⌘C and ⌘V stay the editor's, and ⌘W
+                // keeps closing the project.
+                KeyBinding::new(
+                    &format!("{modifier}-c"),
+                    TerminalCopy,
+                    Some("FolioTerminal"),
+                ),
+                KeyBinding::new(
+                    &format!("{modifier}-v"),
+                    TerminalPaste,
+                    Some("FolioTerminal"),
+                ),
+                KeyBinding::new(
+                    &format!("{modifier}-w"),
+                    CloseTerminal,
+                    Some("FolioTerminal"),
+                ),
                 KeyBinding::new(&format!("{modifier}-shift-d"), ToggleDiff, Some("Folio")),
                 KeyBinding::new(&format!("{modifier}-alt-b"), ToggleBlame, Some("Folio")),
                 // The editor's own ⌘⇧F, moved off it so `⇧⌘F` can be the
@@ -151,6 +173,7 @@ fn main() {
                 ]),
                 Menu::new("View").items([
                     MenuItem::action("Toggle Sidebar", ToggleSidebar),
+                    MenuItem::action("Terminal", ToggleTerminal),
                     MenuItem::action("Go to Line…", GoToLine),
                     MenuItem::separator(),
                     MenuItem::action("Blame", ToggleBlame),

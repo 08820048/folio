@@ -1,5 +1,6 @@
 use crate::assets::FolioIcon;
 use crate::preview::{self, Content};
+use crate::terminal_view::{self, TerminalView};
 use folio::{
     blame, buffer, diff, editorconfig, fs_op, git,
     recent::{self, RecentProject},
@@ -198,6 +199,10 @@ actions!(
         ProjectReplace,
         GoToLine,
         ToggleSidebar,
+        ToggleTerminal,
+        TerminalCopy,
+        TerminalPaste,
+        CloseTerminal,
         OpenSettings,
         CloseWindow,
         OpenAbout,
@@ -642,6 +647,13 @@ struct Project {
     diff: Option<DiffView>,
 }
 
+/// One project's terminal tabs: the running terminals and which of them
+/// the drawer shows.
+struct TerminalTabs {
+    views: Vec<Entity<TerminalView>>,
+    active: usize,
+}
+
 pub struct Folio {
     project: Project,
     parked: Vec<Project>,
@@ -654,6 +666,12 @@ pub struct Folio {
     sidebar: bool,
     sidebar_width: f32,
     resizing: bool,
+    /// The terminal drawer: whether it shows, how tall, whether its top
+    /// edge is being dragged, and each project's terminal tabs.
+    terminals: HashMap<PathBuf, TerminalTabs>,
+    terminal_open: bool,
+    terminal_height: f32,
+    resizing_terminal: bool,
     generation: u64,
     open_request: u64,
     query: Entity<InputState>,
@@ -866,6 +884,10 @@ impl Folio {
             sidebar: settings.sidebar,
             sidebar_width: 240.,
             resizing: false,
+            terminals: HashMap::new(),
+            terminal_open: false,
+            terminal_height: 260.,
+            resizing_terminal: false,
             generation: 0,
             open_request: 0,
             query,
@@ -1105,6 +1127,11 @@ impl Folio {
                 cx.quit();
             }
             Next::Close => {
+                // The closing project takes its terminal with it; dropping
+                // the view shuts the child down.
+                if let Some(workspace) = &self.project.workspace {
+                    self.terminals.remove(&workspace.root);
+                }
                 self.reset();
                 if let Some(workspace) = &self.project.workspace {
                     self.project_order.retain(|root| root != &workspace.root);
@@ -1231,6 +1258,10 @@ impl Folio {
         }
         self.rebuild_rows();
         self.update_title(window);
+        // The dock follows the project it is open on.
+        if self.terminal_open {
+            self.ensure_terminal(cx);
+        }
         if let Some(doc) = self
             .project
             .active
@@ -1308,6 +1339,9 @@ impl Folio {
                         this.project.workspace = Some(workspace);
                         this.rebuild_rows();
                         this.refresh_project(cx);
+                        if this.terminal_open {
+                            this.ensure_terminal(cx);
+                        }
                         this.tree_focus.focus(window, cx);
                     }
                     Err(e) => this.error(format!("Could not open the project: {e}"), cx),
@@ -3947,6 +3981,318 @@ impl Folio {
         cx.notify();
     }
 
+    /// The active project's terminal tabs, creating its first the first
+    /// time the drawer asks. A terminal lives until its tab closes or its
+    /// project does; hiding the drawer keeps the children running.
+    fn ensure_terminal(&mut self, cx: &mut Context<Self>) {
+        let Some(root) = self.project.workspace.as_ref().map(|w| w.root.clone()) else {
+            return;
+        };
+        self.terminals
+            .entry(root.clone())
+            .or_insert_with(|| TerminalTabs {
+                views: vec![cx.new(|cx| TerminalView::new(&root, 80, 24, cx))],
+                active: 0,
+            });
+    }
+
+    /// A fresh terminal tab, focused and showing.
+    fn new_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(root) = self.project.workspace.as_ref().map(|w| w.root.clone()) else {
+            return;
+        };
+        self.terminal_open = true;
+        let view = cx.new(|cx| TerminalView::new(&root, 80, 24, cx));
+        view.update(cx, |view, cx| view.focus_handle().focus(window, cx));
+        let tabs = self.terminals.entry(root).or_insert(TerminalTabs {
+            views: vec![],
+            active: 0,
+        });
+        tabs.views.push(view);
+        tabs.active = tabs.views.len() - 1;
+        cx.notify();
+    }
+
+    fn active_terminal(&self) -> Option<&Entity<TerminalView>> {
+        let root = self.project.workspace.as_ref()?.root.clone();
+        let tabs = self.terminals.get(&root)?;
+        tabs.views.get(tabs.active)
+    }
+
+    /// Close one terminal tab. The drawer goes away with the last one, and
+    /// the tab that slid into the closed one's place takes the keyboard.
+    fn close_terminal_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(root) = self.project.workspace.as_ref().map(|w| w.root.clone()) else {
+            return;
+        };
+        let empty = {
+            let Some(tabs) = self.terminals.get_mut(&root) else {
+                return;
+            };
+            if index >= tabs.views.len() {
+                return;
+            }
+            tabs.views.remove(index);
+            if tabs.views.is_empty() {
+                true
+            } else {
+                if index < tabs.active {
+                    tabs.active -= 1;
+                }
+                tabs.active = tabs.active.min(tabs.views.len() - 1);
+                if let Some(view) = tabs.views.get(tabs.active) {
+                    view.update(cx, |view, cx| view.focus_handle().focus(window, cx));
+                }
+                false
+            }
+        };
+        if empty {
+            self.terminals.remove(&root);
+            self.terminal_open = false;
+            if let Some(doc) = self
+                .project
+                .active
+                .as_ref()
+                .and_then(|p| self.project.documents.get(p))
+            {
+                doc.editor.focus_handle(cx).focus(window, cx);
+            } else {
+                self.tree_focus.focus(window, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    /// `⌘J`: show or hide the terminal dock.
+    fn toggle_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.project.workspace.is_none() || self.project_loading || self.prompting {
+            return;
+        }
+        if self.terminal_open {
+            self.terminal_open = false;
+            if let Some(doc) = self
+                .project
+                .active
+                .as_ref()
+                .and_then(|p| self.project.documents.get(p))
+            {
+                doc.editor.focus_handle(cx).focus(window, cx);
+            } else {
+                self.tree_focus.focus(window, cx);
+            }
+        } else {
+            self.terminal_open = true;
+            self.ensure_terminal(cx);
+            if let Some(view) = self.active_terminal() {
+                view.update(cx, |view, cx| view.focus_handle().focus(window, cx));
+            }
+        }
+        cx.notify();
+    }
+
+    /// The drawer: a drag handle on top, a tab strip with one entry per
+    /// terminal — each closing itself, the last closing the drawer — a
+    /// `+` for another one, and the active terminal filling the rest. The
+    /// grid is sized after layout, so the pixels the body gets are
+    /// deferred to the view.
+    fn render_terminal_dock(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        let Some((root, active)) = self
+            .project
+            .workspace
+            .as_ref()
+            .map(|w| w.root.clone())
+            .and_then(|root| {
+                self.terminals
+                    .get(&root)
+                    .map(|tabs| (root, tabs.active.min(tabs.views.len().saturating_sub(1))))
+            })
+        else {
+            return div().into_any_element();
+        };
+        let entity = self.terminals[&root].views[active].clone();
+        let tab_count = self.terminals[&root].views.len();
+        let labels: Vec<String> = self.terminals[&root]
+            .views
+            .iter()
+            .map(|view| {
+                let view = view.read(cx);
+                match (view.title().map(str::to_string), view.exit()) {
+                    (Some(title), _) => title,
+                    (None, Some(Some(code))) => format!("Terminal · exited ({code})"),
+                    (None, Some(None)) => "Terminal · exited".to_string(),
+                    (None, None) => "Terminal".to_string(),
+                }
+            })
+            .collect();
+        let font_size = self.settings.code_font_size;
+        // The drawer spans the content column — the window beside the
+        // sidebar and its drag edge — and the body is what is left after
+        // the drag handle and the header take theirs.
+        let viewport = window.viewport_size();
+        let width = f32::from(viewport.width)
+            - if self.sidebar {
+                self.sidebar_width + 3.
+            } else {
+                0.
+            };
+        let height = self.terminal_height - 4. - 26.;
+        let (cell_width, line_height) = terminal_view::measure(font_size, window);
+        let columns = ((width / f32::from(cell_width)).floor() as usize).clamp(2, 500);
+        let rows = ((height / f32::from(line_height)).floor() as usize).clamp(2, 200);
+        window.defer(cx, {
+            let entity = entity.clone();
+            move |_, cx| {
+                entity.update(cx, |view, cx| {
+                    view.sync(
+                        columns,
+                        rows,
+                        f32::from(cell_width) as u16,
+                        f32::from(line_height) as u16,
+                        cx,
+                    )
+                })
+            }
+        });
+        div()
+            .flex_shrink_0()
+            .h(px(self.terminal_height))
+            .flex()
+            .flex_col()
+            .border_t_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().background)
+            // The top edge drags the height, the way the sidebar's edge
+            // drags the width.
+            .child(
+                div()
+                    .id("terminal-resize")
+                    .h(px(4.))
+                    .cursor_row_resize()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, _| this.resizing_terminal = true),
+                    ),
+            )
+            // The tab strip reads like the one above the code: a tab per
+            // terminal, each with its own close, and a `+` for another.
+            .child(
+                div()
+                    .h(px(26.))
+                    .flex()
+                    .items_center()
+                    .pr_2()
+                    .children((0..tab_count).map(|index| {
+                        self.render_terminal_tab(index, &labels[index], index == active, cx)
+                    }))
+                    .child(div().flex_1())
+                    .child(Self::icon_button(
+                        "terminal-new",
+                        IconName::Plus,
+                        "New Terminal",
+                        |this, window, cx| this.new_terminal(window, cx),
+                        cx,
+                    )),
+            )
+            .child(div().flex_1().min_h_0().child(entity))
+            .into_any_element()
+    }
+
+    /// One terminal tab: the terminal's mark and title, and the close that
+    /// takes the tab — and, if it was the last, the drawer — with it.
+    fn render_terminal_tab(
+        &self,
+        index: usize,
+        label: &str,
+        active: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        div()
+            .id(("terminal-tab", index))
+            .role(Role::Button)
+            .aria_label(label.to_string())
+            .aria_selected(active)
+            .h_full()
+            .min_w_0()
+            .max_w(px(220.))
+            .px_2()
+            .flex()
+            .items_center()
+            .gap_1p5()
+            .flex_shrink_0()
+            .border_r_1()
+            .border_color(cx.theme().border)
+            .cursor_pointer()
+            .text_size(ui(11.))
+            .text_color(if active {
+                cx.theme().foreground
+            } else {
+                cx.theme().muted_foreground
+            })
+            .when(active, |el| el.bg(cx.theme().list_active))
+            .hover(|el| el.bg(cx.theme().list_hover))
+            .on_click(
+                cx.listener(move |this, _, window, cx| {
+                    this.activate_terminal_tab(index, window, cx)
+                }),
+            )
+            .child(
+                Icon::new(FolioIcon::SquareTerminal)
+                    .size_4()
+                    .text_color(if active {
+                        cx.theme().accent_foreground
+                    } else {
+                        cx.theme().muted_foreground
+                    }),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .child(label.to_string()),
+            )
+            .child(
+                div()
+                    .id(("terminal-tab-close", index))
+                    .role(Role::Button)
+                    .aria_label("Close Terminal")
+                    .size(px(14.))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .text_color(cx.theme().muted_foreground)
+                    .hover(|el| el.text_color(cx.theme().foreground))
+                    // Without this the tab underneath would take the same
+                    // click and merely activate itself.
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.close_terminal_tab(index, window, cx)
+                    }))
+                    .child(Icon::new(IconName::Close).xsmall()),
+            )
+            .into_any_element()
+    }
+
+    fn activate_terminal_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(root) = self.project.workspace.as_ref().map(|w| w.root.clone()) else {
+            return;
+        };
+        let Some(tabs) = self.terminals.get_mut(&root) else {
+            return;
+        };
+        if index >= tabs.views.len() {
+            return;
+        }
+        tabs.active = index;
+        if let Some(view) = tabs.views.get(index) {
+            view.update(cx, |view, cx| view.focus_handle().focus(window, cx));
+        }
+        cx.notify();
+    }
+
     /// Flip one of the `Aa` / `ab` / `.*` toggles and rescan.
     fn toggle_search_option(
         &mut self,
@@ -5550,7 +5896,7 @@ impl Folio {
             .into_any_element()
     }
 
-    fn render_workspace(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_workspace(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         // Read here rather than stored: what it says is about the line the
         // caret is on, which moves without anything else changing.
         let blame = self.blame_text(cx);
@@ -5753,7 +6099,13 @@ impl Folio {
                                 )
                                         },
                                     ),
-                            ),
+                            )
+                            // The terminal drawer hangs under the content
+                            // column alone; the sidebar keeps its full
+                            // height, and the editor above shrinks.
+                            .when(self.terminal_open, |el| {
+                                el.child(self.render_terminal_dock(window, cx))
+                            }),
                     ),
             )
             .into_any_element()
@@ -6492,7 +6844,7 @@ impl Render for SettingsView {
 }
 
 impl Render for Folio {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .id("folio")
             .key_context("Folio")
@@ -6546,6 +6898,11 @@ impl Render for Folio {
                 this.settings.sidebar = !this.sidebar;
                 this.apply_settings(cx);
             }))
+            .on_action(
+                cx.listener(|this, _: &ToggleTerminal, window, cx| {
+                    this.toggle_terminal(window, cx)
+                }),
+            )
             .on_action(cx.listener(|this, _: &OpenSettings, _, cx| this.show_settings(cx)))
             .on_action(cx.listener(|this, _: &ToggleDiff, window, cx| this.toggle_diff(window, cx)))
             .on_action(
@@ -6624,6 +6981,7 @@ impl Render for Folio {
             )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
                 this.resizing &= event.dragging();
+                this.resizing_terminal &= event.dragging();
                 if this.resizing {
                     this.sidebar_width = f32::from(event.position.x).clamp(
                         160.,
@@ -6631,11 +6989,19 @@ impl Render for Folio {
                     );
                     cx.notify();
                 }
+                if this.resizing_terminal {
+                    let viewport = window.viewport_size();
+                    this.terminal_height = (f32::from(viewport.height)
+                        - f32::from(event.position.y))
+                    .clamp(120., f32::from(viewport.height) * 0.7);
+                    cx.notify();
+                }
             }))
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
                     this.resizing = false;
+                    this.resizing_terminal = false;
                     // A drag that ended anywhere, dropped or not, takes its
                     // caret with it.
                     if this.tab_drop.take().is_some() {
@@ -6756,7 +7122,7 @@ impl Render for Folio {
                     .min_h_0()
                     .w_full()
                     .child(if self.project.workspace.is_some() {
-                        self.render_workspace(cx)
+                        self.render_workspace(window, cx)
                     } else {
                         self.render_launcher(cx)
                     }),
@@ -8041,6 +8407,96 @@ mod tests {
             assert_eq!(app.panel, Some(Panel::Files));
         });
         cx.run_until_parked();
+    }
+
+    /// The terminal drawer: tabs come and go per project, the children run
+    /// while the drawer is hidden, the last close takes the drawer, and
+    /// closing the project takes everything.
+    #[gpui::test]
+    fn the_terminal_dock_follows_the_project(cx: &mut TestAppContext) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        std::fs::write(root.join("main.rs"), "// original\n").unwrap();
+        cx.update(gpui_component::init);
+        let cx = cx.add_empty_window();
+        let view = cx.update(|window, cx| {
+            cx.new(|cx| {
+                let mut app = Folio::new(window, cx);
+                app.recent_task = None;
+                app.recent_file = root.join("recent.json");
+                app.settings_file = root.join("settings.json");
+                app.window_file = root.join("window.json");
+                app.settings = Settings::default();
+                app.applied_ignored = app.settings.ignored.clone();
+                app
+            })
+        });
+        view.update_in(cx, |app, window, cx| {
+            app.request(Next::Open(root.clone()), window, cx)
+        });
+        cx.run_until_parked();
+
+        // Opening the drawer spawns the project's terminal and focuses it.
+        view.update_in(cx, |app, window, cx| {
+            app.toggle_terminal(window, cx);
+            assert!(app.terminal_open);
+            let tabs = app.terminals.get(&root).expect("a terminal was spawned");
+            assert_eq!(tabs.views.len(), 1);
+            assert_eq!(tabs.active, 0);
+        });
+        cx.run_until_parked();
+
+        // Hiding the drawer keeps the children running.
+        view.update_in(cx, |app, window, cx| {
+            app.toggle_terminal(window, cx);
+            assert!(!app.terminal_open);
+            assert_eq!(app.terminals[&root].views.len(), 1);
+        });
+
+        // Reopening reuses it rather than spawning a second one.
+        view.update_in(cx, |app, window, cx| {
+            app.toggle_terminal(window, cx);
+            assert_eq!(app.terminals[&root].views.len(), 1);
+        });
+        cx.run_until_parked();
+
+        // A new tab goes to the front of the drawer and takes the focus.
+        view.update_in(cx, |app, window, cx| {
+            app.new_terminal(window, cx);
+            let tabs = app.terminals.get(&root).unwrap();
+            assert_eq!(tabs.views.len(), 2);
+            assert_eq!(tabs.active, 1);
+        });
+        cx.run_until_parked();
+
+        // Closing the active tab hands the drawer back to the first one.
+        view.update_in(cx, |app, window, cx| {
+            app.close_terminal_tab(1, window, cx);
+            let tabs = app.terminals.get(&root).unwrap();
+            assert_eq!(tabs.views.len(), 1);
+            assert_eq!(tabs.active, 0);
+            assert!(app.terminal_open);
+        });
+        cx.run_until_parked();
+
+        // Closing the last tab closes the drawer with it.
+        view.update_in(cx, |app, window, cx| {
+            app.close_terminal_tab(0, window, cx);
+            assert!(!app.terminals.contains_key(&root));
+            assert!(!app.terminal_open);
+        });
+        cx.run_until_parked();
+
+        // Closing the project releases any terminal it still had.
+        view.update_in(cx, |app, window, cx| {
+            app.toggle_terminal(window, cx);
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |app, window, cx| app.request(Next::Close, window, cx));
+        cx.run_until_parked();
+        view.update_in(cx, |app, _, _| {
+            assert!(app.terminals.is_empty());
+        });
     }
 
     /// The changes view: `⇧⌘D` shows the active file's diff against HEAD,

@@ -21,6 +21,7 @@ use std::borrow::Cow;
 pub enum FolioIcon {
     PanelLeftDashed,
     PanelRightDashed,
+    SquareTerminal,
 }
 
 impl IconNamed for FolioIcon {
@@ -28,6 +29,7 @@ impl IconNamed for FolioIcon {
         match self {
             Self::PanelLeftDashed => "icons/panel-left-dashed.svg".into(),
             Self::PanelRightDashed => "icons/panel-right-dashed.svg".into(),
+            Self::SquareTerminal => "icons/square-terminal.svg".into(),
         }
     }
 }
@@ -41,6 +43,10 @@ const ICONS: &[(&str, &[u8])] = &[
     (
         "icons/panel-right-dashed.svg",
         include_bytes!("../assets/icons/panel-right-dashed.svg"),
+    ),
+    (
+        "icons/square-terminal.svg",
+        include_bytes!("../assets/icons/square-terminal.svg"),
     ),
 ];
 
@@ -78,7 +84,11 @@ mod tests {
             let loaded = assets.load(path).unwrap();
             assert!(loaded.is_some(), "`{path}` is declared but did not load");
         }
-        for icon in [FolioIcon::PanelLeftDashed, FolioIcon::PanelRightDashed] {
+        for icon in [
+            FolioIcon::PanelLeftDashed,
+            FolioIcon::PanelRightDashed,
+            FolioIcon::SquareTerminal,
+        ] {
             let path = icon.path();
             assert!(
                 assets.load(&path).unwrap().is_some(),
