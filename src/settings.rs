@@ -27,8 +27,11 @@ pub struct Settings {
     pub code_font_size: f32,
     pub tab_size: usize,
     pub hard_tabs: bool,
-    /// Whether the sidebar starts open. The `⌘B` toggle writes this back.
+    /// Whether the file tree starts open. The `⌘B` toggle writes this back.
     pub sidebar: bool,
+    /// Whether the icon rail on the far left starts open. The title-bar
+    /// toggle writes this back.
+    pub activity_bar: bool,
     /// Folder names the tree never descends into and the index never walks.
     pub ignored: Vec<String>,
 }
@@ -43,6 +46,7 @@ impl Default for Settings {
             tab_size: 4,
             hard_tabs: false,
             sidebar: true,
+            activity_bar: true,
             ignored: crate::tree::DEFAULT_IGNORED
                 .iter()
                 .map(|name| (*name).to_string())

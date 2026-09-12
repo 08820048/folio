@@ -172,6 +172,7 @@ fn main() {
                     MenuItem::action("Replace in File", input::Replace),
                 ]),
                 Menu::new("View").items([
+                    MenuItem::action("Toggle Activity Bar", ToggleActivityBar),
                     MenuItem::action("Toggle Sidebar", ToggleSidebar),
                     MenuItem::action("Terminal", ToggleTerminal),
                     MenuItem::action("Go to Line…", GoToLine),

@@ -125,6 +125,22 @@ fn editor_context_menu(
     .menu("Show File Changes", Box::new(ToggleDiff))
 }
 
+/// The far-left icon rail. Narrow on purpose: icons only, no labels.
+const ACTIVITY_BAR_WIDTH: f32 = 36.;
+/// Space between the window chrome and the rounded workspace card.
+const WORKSPACE_INSET: f32 = 8.;
+
+/// The frame the rounded workspace sits on, so the white card reads as a
+/// surface rather than disappearing into the window.
+fn workspace_chrome(cx: &App) -> Hsla {
+    rgb(if cx.theme().is_dark() {
+        0x141516
+    } else {
+        0xF4F4F4
+    })
+    .into()
+}
+
 /// A type size in the interface scale. The design is drawn at 13px, so
 /// `ui(11.)` is the 11px label from the spec, and it grows with the interface
 /// size setting instead of staying pinned.
@@ -199,6 +215,7 @@ actions!(
         ProjectReplace,
         GoToLine,
         ToggleSidebar,
+        ToggleActivityBar,
         ToggleTerminal,
         TerminalCopy,
         TerminalPaste,
@@ -664,6 +681,9 @@ pub struct Folio {
     tree_focus: FocusHandle,
     quick_scroll: UniformListScrollHandle,
     sidebar: bool,
+    /// The far-left icon rail. Independent of the file tree: hiding the
+    /// rail does not close the tree, and `⌘B` does not hide the rail.
+    activity_bar: bool,
     sidebar_width: f32,
     resizing: bool,
     /// The terminal drawer: whether it shows, how tall, whether its top
@@ -882,6 +902,7 @@ impl Folio {
             tree_focus: cx.focus_handle(),
             quick_scroll: UniformListScrollHandle::new(),
             sidebar: settings.sidebar,
+            activity_bar: settings.activity_bar,
             sidebar_width: 240.,
             resizing: false,
             terminals: HashMap::new(),
@@ -3281,8 +3302,9 @@ impl Folio {
         // either of them, so apply it without borrowing a window and repaint
         // them all.
         sync_appearance(self.appearance, &self.settings, None, cx);
-        // The sidebar setting is the stored state the `⌘B` toggle writes back.
+        // These two settings are the stored state the toggles write back.
         self.sidebar = self.settings.sidebar;
+        self.activity_bar = self.settings.activity_bar;
         if ignored_changed {
             self.reload_tree(cx);
         }
@@ -4090,6 +4112,30 @@ impl Folio {
         cx.notify();
     }
 
+    /// `⌘B` and the first rail icon: show or hide the file tree.
+    fn toggle_file_tree(&mut self, cx: &mut Context<Self>) {
+        self.settings.sidebar = !self.sidebar;
+        self.apply_settings(cx);
+    }
+
+    /// The title-bar button: show or hide the icon rail. The file tree
+    /// stays as it is.
+    fn toggle_activity_bar(&mut self, cx: &mut Context<Self>) {
+        self.settings.activity_bar = !self.activity_bar;
+        self.apply_settings(cx);
+    }
+
+    /// How far the rounded card starts from the window's left edge: the
+    /// rail, when it is showing, plus the inset that keeps the card off
+    /// the chrome.
+    fn workspace_left_inset(&self) -> f32 {
+        if self.activity_bar {
+            ACTIVITY_BAR_WIDTH + WORKSPACE_INSET
+        } else {
+            WORKSPACE_INSET
+        }
+    }
+
     /// The drawer: a drag handle on top, a tab strip with one entry per
     /// terminal — each closing itself, the last closing the drawer — a
     /// `+` for another one, and the active terminal filling the rest. The
@@ -4130,6 +4176,8 @@ impl Folio {
         // the drag handle and the header take theirs.
         let viewport = window.viewport_size();
         let width = f32::from(viewport.width)
+            - self.workspace_left_inset()
+            - WORKSPACE_INSET
             - if self.sidebar {
                 self.sidebar_width + 3.
             } else {
@@ -4725,6 +4773,102 @@ impl Folio {
                 }
             }))
             .child(Icon::new(icon).small())
+            .into_any_element()
+    }
+
+    /// A rail icon: the same hit target as [`Self::icon_button`], painted
+    /// in the accent when the surface it opens is showing.
+    fn rail_icon(
+        id: impl Into<ElementId>,
+        icon: impl Into<Icon>,
+        label: &'static str,
+        active: bool,
+        activate: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let activate = std::rc::Rc::new(activate);
+        let keyboard = activate.clone();
+        div()
+            .id(id)
+            .role(Role::Button)
+            .aria_label(label)
+            .focusable()
+            .tab_index(0)
+            .size(px(24.))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .text_color(if active {
+                cx.theme().accent_foreground
+            } else {
+                cx.theme().muted_foreground
+            })
+            .hover(|el| el.text_color(cx.theme().foreground))
+            .focus_visible(|el| el.text_color(cx.theme().accent_foreground))
+            .tooltip(move |window, cx| {
+                gpui_component::tooltip::Tooltip::new(label).build(window, cx)
+            })
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(move |this, _, window, cx| activate(this, window, cx)))
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                    keyboard(this, window, cx);
+                    cx.stop_propagation();
+                }
+            }))
+            .child(Icon::new(icon).small())
+            .into_any_element()
+    }
+
+    /// The far-left rail: small icons, no names. The first one is the
+    /// file tree; the rest open the surfaces Folio already has.
+    fn render_activity_bar(&self, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .id("activity-bar")
+            .w(px(ACTIVITY_BAR_WIDTH))
+            .h_full()
+            .flex_shrink_0()
+            .flex()
+            .flex_col()
+            .items_center()
+            .pt_2()
+            .pb_2()
+            .gap_1()
+            .child(Self::rail_icon(
+                "rail-files",
+                IconName::Folder,
+                "File Tree",
+                self.sidebar,
+                |this, _, cx| this.toggle_file_tree(cx),
+                cx,
+            ))
+            .child(Self::rail_icon(
+                "rail-search",
+                IconName::Search,
+                "Search",
+                self.panel == Some(Panel::Search),
+                |this, window, cx| this.show_search(false, window, cx),
+                cx,
+            ))
+            .child(Self::rail_icon(
+                "rail-terminal",
+                FolioIcon::SquareTerminal,
+                "Terminal",
+                self.terminal_open,
+                |this, window, cx| this.toggle_terminal(window, cx),
+                cx,
+            ))
+            .child(div().flex_1())
+            .child(Self::rail_icon(
+                "rail-settings",
+                IconName::Settings,
+                "Settings",
+                false,
+                |this, _, cx| this.show_settings(cx),
+                cx,
+            ))
             .into_any_element()
     }
 
@@ -5797,7 +5941,11 @@ impl Folio {
             .as_ref()
             .and_then(|p| self.project.documents.get(p));
         TitleBar::new()
-            .bg(cx.theme().background)
+            .bg(if self.project.workspace.is_some() {
+                workspace_chrome(cx)
+            } else {
+                cx.theme().background
+            })
             .border_color(cx.theme().border)
             .on_close_window(cx.listener(|this, _, window, cx| this.close_window(window, cx)))
             .child(
@@ -5812,17 +5960,14 @@ impl Folio {
                     .pr_3()
                     .when(self.project.workspace.is_some(), |el| {
                         el.child(Self::icon_button(
-                            "sidebar-toggle",
-                            if self.sidebar {
+                            "activity-bar-toggle",
+                            if self.activity_bar {
                                 FolioIcon::PanelLeftDashed
                             } else {
                                 FolioIcon::PanelRightDashed
                             },
-                            "Toggle sidebar",
-                            |this, _, cx| {
-                                this.sidebar = !this.sidebar;
-                                cx.notify();
-                            },
+                            "Toggle activity bar",
+                            |this, _, cx| this.toggle_activity_bar(cx),
                             cx,
                         ))
                     })
@@ -5925,30 +6070,29 @@ impl Folio {
         });
         let image = image.flatten();
         div()
+            .id("workspace")
             .size_full()
             .flex()
-            .flex_col()
+            .rounded_xl()
+            .overflow_hidden()
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().background)
+            .when(self.sidebar, |el| {
+                el.child(self.render_tree(cx)).child(
+                    div()
+                        .id("sidebar-resize")
+                        .w(px(3.))
+                        .h_full()
+                        .bg(cx.theme().border)
+                        .cursor_col_resize()
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, _| this.resizing = true),
+                        ),
+                )
+            })
             .child(
-                div()
-                    .flex()
-                    .flex_1()
-                    .min_h_0()
-                    .w_full()
-                    .when(self.sidebar, |el| {
-                        el.child(self.render_tree(cx)).child(
-                            div()
-                                .id("sidebar-resize")
-                                .w(px(3.))
-                                .h_full()
-                                .bg(cx.theme().border)
-                                .cursor_col_resize()
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(|this, _, _, _| this.resizing = true),
-                                ),
-                        )
-                    })
-                    .child(
                         div()
                             .flex_1()
                             .min_w_0()
@@ -6106,7 +6250,6 @@ impl Folio {
                             .when(self.terminal_open, |el| {
                                 el.child(self.render_terminal_dock(window, cx))
                             }),
-                    ),
             )
             .into_any_element()
     }
@@ -6772,17 +6915,38 @@ impl SettingsView {
                         cx,
                     ),
                 ],
-                Page::Sidebar => vec![Self::row(
-                    "Show the sidebar",
-                    "Whether the project tree is shown when Folio opens.",
-                    self.choice(
-                        "sidebar",
-                        ("Shown", settings.sidebar, |settings| settings.sidebar = true),
-                        ("Hidden", !settings.sidebar, |settings| settings.sidebar = false),
+                Page::Sidebar => vec![
+                    Self::row(
+                        "Show the file tree",
+                        "Whether the project tree is shown when Folio opens.",
+                        self.choice(
+                            "sidebar",
+                            ("Shown", settings.sidebar, |settings| settings.sidebar = true),
+                            ("Hidden", !settings.sidebar, |settings| settings.sidebar = false),
+                            cx,
+                        ),
                         cx,
                     ),
-                    cx,
-                )],
+                    Self::row(
+                        "Show the activity bar",
+                        "The icon rail on the far left. The title-bar button writes this back.",
+                        self.choice(
+                            "activity-bar",
+                            (
+                                "Shown",
+                                settings.activity_bar,
+                                |settings| settings.activity_bar = true,
+                            ),
+                            (
+                                "Hidden",
+                                !settings.activity_bar,
+                                |settings| settings.activity_bar = false,
+                            ),
+                            cx,
+                        ),
+                        cx,
+                    ),
+                ],
                 Page::Ignored => vec![Self::row(
                     "Folders",
                     "Comma-separated folder names, hidden from the tree and skipped by search.",
@@ -6865,7 +7029,11 @@ impl Render for Folio {
             .flex()
             .flex_col()
             .relative()
-            .bg(cx.theme().background)
+            .bg(if self.project.workspace.is_some() {
+                workspace_chrome(cx)
+            } else {
+                cx.theme().background
+            })
             .text_color(cx.theme().foreground)
             .text_size(ui(13.))
             .on_action(cx.listener(|this, _: &OpenProject, window, cx| {
@@ -6895,8 +7063,10 @@ impl Render for Folio {
                 }),
             )
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| {
-                this.settings.sidebar = !this.sidebar;
-                this.apply_settings(cx);
+                this.toggle_file_tree(cx);
+            }))
+            .on_action(cx.listener(|this, _: &ToggleActivityBar, _, cx| {
+                this.toggle_activity_bar(cx);
             }))
             .on_action(
                 cx.listener(|this, _: &ToggleTerminal, window, cx| {
@@ -6983,7 +7153,9 @@ impl Render for Folio {
                 this.resizing &= event.dragging();
                 this.resizing_terminal &= event.dragging();
                 if this.resizing {
-                    this.sidebar_width = f32::from(event.position.x).clamp(
+                    this.sidebar_width = (f32::from(event.position.x)
+                        - this.workspace_left_inset())
+                    .clamp(
                         160.,
                         (f32::from(window.viewport_size().width) * 0.4).max(160.),
                     );
@@ -7122,7 +7294,21 @@ impl Render for Folio {
                     .min_h_0()
                     .w_full()
                     .child(if self.project.workspace.is_some() {
-                        self.render_workspace(window, cx)
+                        div()
+                            .size_full()
+                            .flex()
+                            .when(self.activity_bar, |el| {
+                                el.child(self.render_activity_bar(cx))
+                            })
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .h_full()
+                                    .p(px(WORKSPACE_INSET))
+                                    .child(self.render_workspace(window, cx)),
+                            )
+                            .into_any_element()
                     } else {
                         self.render_launcher(cx)
                     }),
@@ -8496,6 +8682,57 @@ mod tests {
         cx.run_until_parked();
         view.update_in(cx, |app, _, _| {
             assert!(app.terminals.is_empty());
+        });
+    }
+
+    /// The icon rail and the file tree are two toggles. The title-bar
+    /// button owns the rail; `⌘B` and the first rail icon own the tree.
+    #[gpui::test]
+    fn the_activity_bar_and_the_file_tree_are_separate(cx: &mut TestAppContext) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        std::fs::write(root.join("main.rs"), "// original\n").unwrap();
+        cx.update(gpui_component::init);
+        let cx = cx.add_empty_window();
+        let view = cx.update(|window, cx| {
+            cx.new(|cx| {
+                let mut app = Folio::new(window, cx);
+                app.recent_task = None;
+                app.recent_file = root.join("recent.json");
+                app.settings_file = root.join("settings.json");
+                app.window_file = root.join("window.json");
+                app.settings = Settings::default();
+                app.applied_ignored = app.settings.ignored.clone();
+                app
+            })
+        });
+        view.update_in(cx, |app, window, cx| {
+            app.request(Next::Open(root.clone()), window, cx)
+        });
+        cx.run_until_parked();
+
+        view.update(cx, |app, _| {
+            assert!(app.activity_bar);
+            assert!(app.sidebar);
+        });
+
+        view.update(cx, |app, cx| {
+            app.toggle_activity_bar(cx);
+            assert!(!app.activity_bar);
+            assert!(app.sidebar, "hiding the rail leaves the tree");
+        });
+
+        view.update(cx, |app, cx| {
+            app.toggle_file_tree(cx);
+            assert!(!app.sidebar);
+            assert!(!app.activity_bar, "hiding the tree leaves the rail");
+        });
+
+        view.update(cx, |app, cx| {
+            app.toggle_activity_bar(cx);
+            app.toggle_file_tree(cx);
+            assert!(app.activity_bar);
+            assert!(app.sidebar);
         });
     }
 

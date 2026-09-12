@@ -339,6 +339,7 @@ fn settings_round_trip_defaults_and_clamping() {
     assert_eq!(defaults.tab_size, 4);
     assert!(!defaults.hard_tabs);
     assert!(defaults.sidebar);
+    assert!(defaults.activity_bar);
     assert!(defaults.ignored.contains(&"node_modules".to_string()));
 
     let mut edited = defaults.clone();

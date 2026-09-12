@@ -50,6 +50,7 @@ next launch, with each project's tabs in order and the file that was on screen
 | Find in file | ⌘F | Ctrl+F |
 | Replace in file | ⌥⌘F | Ctrl+Alt+F |
 | Go to line | ⌘G | Ctrl+G |
+| Toggle activity bar | title-bar button | title-bar button |
 | Toggle sidebar | ⌘B | Ctrl+B |
 | Toggle terminal | ⌘J | Ctrl+J |
 | Toggle comment | ⌘/ | Ctrl+/ |
@@ -67,10 +68,13 @@ next launch, with each project's tabs in order and the file that was on screen
 | Close project | ⌘W | Ctrl+W |
 | Quit | ⌘Q | Ctrl+Q |
 
-The title bar and content area follow the system appearance. The sidebar
+The title bar and content area follow the system appearance. The activity-bar
 toggle, the project name and the file's relative path sit in that order to the
 right of the macOS traffic lights; the old centred title and second-line path
-bar are gone. The sidebar is drag-resizable. Its top row shows the project
+bar are gone. A project opens as a rounded card on a quieter frame: the file
+tree and the editor share that card. The far-left rail is icons only — the
+first one is the file tree — and the title-bar button shows or hides the rail
+itself. The file tree is drag-resizable. Its top row shows the project
 folder's name and collapses or expands the whole tree on click, keeping
 subdirectory state, and it also answers to Enter, Space and the left and right
 arrows. The file tree takes the arrow keys and Enter. `⌘J` opens a terminal
@@ -84,7 +88,7 @@ sizes, font and indentation come from the settings, and soft wrap is off.
 Images preview in place, scaled to fit: PNG, JPEG, GIF, WebP, BMP, TIFF, ICO
 and SVG. GIF and WebP show their first frame, and an image never enters the
 text editing or saving path. Every in-app icon is Lucide and icon buttons draw
-no background box. The sidebar toggle in the title bar's top-left uses
+no background box. The activity-bar toggle in the title bar's top-left uses
 `panel-left-dashed` / `panel-right-dashed`; the terminal tab uses
 `square-terminal`. gpui-component does not ship those three, so `src/assets.rs`
 wraps the bundled asset source and serves them from `assets/icons/` — the
