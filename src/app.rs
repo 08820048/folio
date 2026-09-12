@@ -129,6 +129,10 @@ fn editor_context_menu(
 const ACTIVITY_BAR_WIDTH: f32 = 36.;
 /// Space between the window chrome and the rounded workspace card.
 const WORKSPACE_INSET: f32 = 8.;
+/// Corner radius of the workspace card. Children that paint their own
+/// background have to use the same number, or GPUI leaves the parent's
+/// cut-out as a grey triangle — overflow clip is a rectangle, not an arc.
+const WORKSPACE_RADIUS: f32 = 12.;
 
 /// The frame the rounded workspace sits on, so the white card reads as a
 /// surface rather than disappearing into the window.
@@ -2867,8 +2871,6 @@ impl Folio {
             .h(px(TAB_HEIGHT))
             .flex()
             .items_center()
-            .border_b_1()
-            .border_color(cx.theme().border)
             .children(
                 self.project
                     .tabs
@@ -4208,7 +4210,8 @@ impl Folio {
             .flex_col()
             .border_t_1()
             .border_color(cx.theme().border)
-            .bg(cx.theme().background)
+            .rounded_br(px(WORKSPACE_RADIUS))
+            .when(!self.sidebar, |el| el.rounded_bl(px(WORKSPACE_RADIUS)))
             // The top edge drags the height, the way the sidebar's edge
             // drags the width.
             .child(
@@ -5164,7 +5167,8 @@ impl Folio {
             .w(px(self.sidebar_width))
             .h_full()
             .flex_shrink_0()
-            .bg(cx.theme().sidebar)
+            .rounded_tl(px(WORKSPACE_RADIUS))
+            .rounded_bl(px(WORKSPACE_RADIUS))
             .flex()
             .flex_col()
             .on_key_down(cx.listener(Self::tree_key))
@@ -5946,7 +5950,9 @@ impl Folio {
             } else {
                 cx.theme().background
             })
-            .border_color(cx.theme().border)
+            // The workspace card already draws its own top edge. A second
+            // line here would sit on top of that one.
+            .border_color(gpui::transparent_black())
             .on_close_window(cx.listener(|this, _, window, cx| this.close_window(window, cx)))
             .child(
                 div()
@@ -5997,45 +6003,6 @@ impl Folio {
                                 .text_color(cx.theme().muted_foreground)
                                 .child("Loading…"),
                         )
-                    })
-                    .when(self.project.workspace.is_some(), |el| {
-                        // One button for the whole panel: it opens on the content
-                        // tab, and the panel's own tabs reach the file finder
-                        // (also `⌘P`).
-                        //
-                        // These are `text` buttons: they draw no background in any
-                        // state and carry no padding of their own. At the 13px rem
-                        // this theme uses, the row's own gap was only ~10px, so the
-                        // labels ran together; `px_2` per button plus this gap gives
-                        // ~23px between them.
-                        el.child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_3()
-                                .child(
-                                    Button::new("project-search")
-                                        .text()
-                                        .icon(IconName::Search)
-                                        .label("Search")
-                                        .xsmall()
-                                        .px_2()
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.show_search(false, window, cx)
-                                        })),
-                                )
-                                .child(
-                                    Button::new("close-project")
-                                        .text()
-                                        .icon(IconName::Close)
-                                        .label("Close Project")
-                                        .xsmall()
-                                        .px_2()
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.request(Next::Close, window, cx)
-                                        })),
-                                ),
-                        )
                     }),
             )
             .into_any_element()
@@ -6073,7 +6040,7 @@ impl Folio {
             .id("workspace")
             .size_full()
             .flex()
-            .rounded_xl()
+            .rounded(px(WORKSPACE_RADIUS))
             .overflow_hidden()
             .border_1()
             .border_color(cx.theme().border)
@@ -6099,6 +6066,12 @@ impl Folio {
                             .h_full()
                             .flex()
                             .flex_col()
+                            .rounded_tr(px(WORKSPACE_RADIUS))
+                            .rounded_br(px(WORKSPACE_RADIUS))
+                            .when(!self.sidebar, |el| {
+                                el.rounded_tl(px(WORKSPACE_RADIUS))
+                                    .rounded_bl(px(WORKSPACE_RADIUS))
+                            })
                             .when(self.project.tabs.len() > 1, |el| {
                                 el.child(self.render_tabs(cx))
                             })
@@ -6153,6 +6126,7 @@ impl Folio {
                                             // keeps them off every other text field.
                                             div().key_context("FolioEditor").size_full().child(
                                                 Input::from_base(&base)
+                                                    .appearance(false)
                                                     .bordered(false)
                                                     .focus_bordered(false)
                                                     .readonly(

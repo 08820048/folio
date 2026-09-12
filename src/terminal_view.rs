@@ -676,7 +676,6 @@ impl Render for TerminalView {
         div()
             .id("terminal-view")
             .size_full()
-            .bg(cx.theme().background)
             .key_context("FolioTerminal")
             .track_focus(&self.focus)
             .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))

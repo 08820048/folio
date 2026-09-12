@@ -392,9 +392,9 @@ holding a bare rectangle, still loads as the main window.
 
 The `⌘P` panel's "Files" and "Contents" tabs switch between the two lookups in
 one place. `⇧⌘F` opens the content side directly and `⇧⌘H` also reveals the
-replace row. Because both lookups share one panel, the title bar keeps a single
-"Search" button as the entry point rather than a separate quick-open button;
-`⌘P` and the menu items still open it on the file-name side.
+replace row. Because both lookups share one panel, the activity-bar search
+icon is the on-screen entry; `⌘P` and the menu items still open it on the
+file-name side.
 
 Search is live: 140ms after typing stops, a background scan of the whole
 project starts. Results are grouped per file with line numbers and a context
