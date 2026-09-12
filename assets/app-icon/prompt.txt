@@ -1,0 +1,12 @@
+Generated using the built-in image_gen tool.
+Final PNG normalized to 1024 x 1024 using macOS sips; opaque square, no corner mask.
+
+Use case: logo-brand
+Asset type: final macOS application icon source artwork for Folio, exactly 1024 x 1024 pixels.
+Product context: Folio is a small, local-first native code reading and light editing app built with Rust and GPUI. Its guiding experience is "open a project, feel like reading one sheet of paper": quiet, light, precise. File browsing, reading source, reviewing changes and small edits. Its actual UI uses warm white, graphite and muted moss green accents.
+Primary request: Design a beautiful, distinctive, professional Mac app icon: a sculptural folded-paper uppercase F monogram that embodies a folio of pages. One single confident silhouette, instantly recognizable at small Dock sizes.
+Scene/backdrop: fully opaque deep muted forest/moss green field, subtle broad tonal lighting, covering the ENTIRE square canvas edge to edge including all four extreme corners. Four perfectly sharp 90 degree outer corners. NO rounded-square tile inside the image.
+Subject: centered large ivory paper F, crafted as a single thick folded strip with broad vertical spine and two horizontal page-like arms, top arm longer than middle, with a subtle moss-toned folded return on the right side of the top arm giving the feeling of turning a page. Precise geometric folds, generous negative space, strong readable uppercase F outline. The paper form occupies approximately 64% width and 70% height of the square, optically centered. Refined shallow dimensionality, warm off-white front faces, cool pale sage folded edges, soft close contact shading behind the paper only. No extra symbols.
+Style/medium: premium restrained contemporary macOS icon illustration, crisp sculpted paper geometry and clean smooth surfaces, almost orthographic frontal view, gentle tactile depth, no busy texture. Sophisticated and understated.
+Lighting: soft upper-left light, luminous ivory face, gentle darker folds, controlled contrast. No dramatic cast shadow.
+Constraints: exact 1024x1024 square image, opaque full-bleed background, no rounded corners on the outer artwork, no transparent margins, no border, no outer frame, no inset app tile. Only the folded F mark and the green background. No wordmark, no letters other than the F-shaped object, no captions, no watermark, no mockup, no grid, no code text, no angle brackets, no terminal symbol, no pencil, no AI sparkles, no circuit patterns. Produce ONE finished icon, not a presentation sheet.
