@@ -40,6 +40,24 @@ pub fn note_launch() {
     let _ = LAUNCH.get_or_init(Instant::now);
 }
 
+fn perf_on() -> bool {
+    std::env::var_os("FOLIO_PERF").is_some()
+}
+
+fn perf_ms(started: Instant) -> f64 {
+    started.elapsed().as_secs_f64() * 1000.0
+}
+
+/// Resident set in megabytes. `ps` is good enough for a FOLIO_PERF line.
+fn rss_mb() -> Option<f64> {
+    let out = std::process::Command::new("ps")
+        .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+        .output()
+        .ok()?;
+    let kb: f64 = String::from_utf8_lossy(&out.stdout).trim().parse().ok()?;
+    Some(kb / 1024.0)
+}
+
 /// Fonts tried for the glyphs the code font has no coverage for. GPUI's own
 /// fallback stack names no CJK family at all, so without this a Chinese
 /// character in a file is drawn in whatever the platform happens to pick —
@@ -1550,6 +1568,7 @@ impl Folio {
         cx.notify();
         let generation = self.generation;
         let ignored = self.settings.ignored.clone();
+        let started = Instant::now();
         let task = cx.background_executor().spawn(async move {
             let workspace = Workspace::open(&path)?;
             let children = tree::children(&workspace.root, &ignored)?;
@@ -1566,6 +1585,14 @@ impl Folio {
                 cx.notify();
                 match result {
                     Ok((workspace, children)) => {
+                        if perf_on() {
+                            eprintln!(
+                                "folio_open_tree_ms={:.1} children={} rss_mb={:.1}",
+                                perf_ms(started),
+                                children.len(),
+                                rss_mb().unwrap_or(f64::NAN)
+                            );
+                        }
                         if this
                             .project
                             .workspace
@@ -1646,6 +1673,7 @@ impl Folio {
             project.indexing = true;
         }
         let ignored = self.settings.ignored.clone();
+        let started = Instant::now();
         let task = cx
             .background_executor()
             .spawn(async move { tree::index(&root, &ignored) });
@@ -1658,6 +1686,14 @@ impl Folio {
                 project.indexing = false;
                 match result {
                     Ok(files) => {
+                        if perf_on() {
+                            eprintln!(
+                                "folio_index_ms={:.1} files={} rss_mb={:.1}",
+                                perf_ms(started),
+                                files.len(),
+                                rss_mb().unwrap_or(f64::NAN)
+                            );
+                        }
                         project.files = files;
                         if this.project.id == project_id {
                             this.filter(cx);
@@ -3922,6 +3958,7 @@ impl Folio {
             columns: self.settings.tab_size,
             hard_tabs: self.settings.hard_tabs,
         };
+        let started = Instant::now();
         let task = cx.background_executor().spawn(async move {
             let path = workspace.resolve(&path)?;
             let content = preview::read(&path)?;
@@ -3943,6 +3980,13 @@ impl Folio {
                 this.loading = false;
                 match result {
                     Ok((path, Content::Image(image), _)) => {
+                        if perf_on() {
+                            eprintln!(
+                                "folio_open_file_ms={:.1} kind=image rss_mb={:.1}",
+                                perf_ms(started),
+                                rss_mb().unwrap_or(f64::NAN)
+                            );
+                        }
                         this.project.image = Some((path.clone(), image));
                         this.project.active = Some(path);
                         this.message = None;
@@ -3951,6 +3995,14 @@ impl Folio {
                         this.follow_diff(window, cx);
                     }
                     Ok((path, Content::Text(text), indent)) => {
+                        if perf_on() {
+                            eprintln!(
+                                "folio_open_file_ms={:.1} bytes={} rss_mb={:.1}",
+                                perf_ms(started),
+                                text.len(),
+                                rss_mb().unwrap_or(f64::NAN)
+                            );
+                        }
                         let large = text.len() > buffer::HIGHLIGHT_LIMIT;
                         let language = if large {
                             // "text" is gpui-component's grammardless language.
@@ -7826,13 +7878,24 @@ impl Render for Folio {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if !self.logged_ready {
             self.logged_ready = true;
-            if std::env::var_os("FOLIO_PERF").is_some()
+            if perf_on()
                 && let Some(start) = LAUNCH.get()
             {
                 eprintln!(
-                    "folio_first_frame_ms={:.1}",
-                    start.elapsed().as_secs_f64() * 1000.0
+                    "folio_first_frame_ms={:.1} rss_mb={:.1}",
+                    perf_ms(*start),
+                    rss_mb().unwrap_or(f64::NAN)
                 );
+                if std::env::var_os("FOLIO_PERF_QUIT").is_some() {
+                    // A short wait lets session restore log open-tree / open-file.
+                    cx.spawn(async move |this, cx| {
+                        cx.background_executor()
+                            .timer(Duration::from_secs(2))
+                            .await;
+                        let _ = this.update(cx, |_, cx| cx.quit());
+                    })
+                    .detach();
+                }
             }
         }
         if self.applied_wrap != self.settings.soft_wrap {
