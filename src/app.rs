@@ -126,7 +126,12 @@ fn editor_context_menu(
 }
 
 /// The far-left icon rail. Narrow on purpose: icons only, no labels.
+/// The rail plus the gap before the card must stay at or under 40px.
 const ACTIVITY_BAR_WIDTH: f32 = 36.;
+/// Space between the rail and the rounded card. `ACTIVITY_BAR_WIDTH` +
+/// this is the whole left chrome strip.
+const WORKSPACE_RAIL_GAP: f32 = 4.;
+const _: () = assert!((ACTIVITY_BAR_WIDTH + WORKSPACE_RAIL_GAP) as i32 <= 40);
 /// Space between the window chrome and the rounded workspace card.
 const WORKSPACE_INSET: f32 = 8.;
 /// Corner radius of the workspace card. Children that paint their own
@@ -145,7 +150,18 @@ fn workspace_chrome(cx: &App) -> Hsla {
     rgb(if cx.theme().is_dark() {
         0x141516
     } else {
-        0xF4F4F4
+        0xFDFDFD
+    })
+    .into()
+}
+
+/// The rule between the file tree and the editor. One pixel, and paler
+/// than the card's own border, so it does not read as a second frame.
+fn sidebar_rule(cx: &App) -> Hsla {
+    rgb(if cx.theme().is_dark() {
+        0x222426
+    } else {
+        0xF0F0F0
     })
     .into()
 }
@@ -4235,11 +4251,10 @@ impl Folio {
     }
 
     /// How far the rounded card starts from the window's left edge: the
-    /// rail, when it is showing, plus the inset that keeps the card off
-    /// the chrome.
+    /// rail, when it is showing, plus the gap that keeps the card off it.
     fn workspace_left_inset(&self) -> f32 {
         if self.activity_bar {
-            ACTIVITY_BAR_WIDTH + WORKSPACE_INSET
+            ACTIVITY_BAR_WIDTH + WORKSPACE_RAIL_GAP
         } else {
             WORKSPACE_INSET
         }
@@ -6189,14 +6204,16 @@ impl Folio {
                 el.child(self.render_tree(cx)).child(
                     div()
                         .id("sidebar-resize")
-                        .w(px(3.))
+                        .w(px(5.))
                         .h_full()
-                        .bg(cx.theme().border)
+                        .flex()
+                        .justify_center()
                         .cursor_col_resize()
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(|this, _, _, _| this.resizing = true),
-                        ),
+                        )
+                        .child(div().w(px(1.)).h_full().bg(sidebar_rule(cx))),
                 )
             })
             .child(
@@ -7419,7 +7436,14 @@ impl Render for Folio {
                                     .flex_1()
                                     .min_w_0()
                                     .h_full()
-                                    .p(px(WORKSPACE_INSET))
+                                    .pt(px(WORKSPACE_INSET))
+                                    .pr(px(WORKSPACE_INSET))
+                                    .pb(px(WORKSPACE_INSET))
+                                    .pl(px(if self.activity_bar {
+                                        WORKSPACE_RAIL_GAP
+                                    } else {
+                                        WORKSPACE_INSET
+                                    }))
                                     .child(self.render_workspace(window, cx)),
                             )
                             .into_any_element()
