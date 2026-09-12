@@ -133,6 +133,11 @@ const WORKSPACE_INSET: f32 = 8.;
 /// background have to use the same number, or GPUI leaves the parent's
 /// cut-out as a grey triangle — overflow clip is a rectangle, not an arc.
 const WORKSPACE_RADIUS: f32 = 12.;
+/// File-tree row height. `uniform_list` needs a fixed size.
+const TREE_ROW_HEIGHT: f32 = 27.;
+/// Indent of a tree row, matching gpui-component's Tree: `16 * depth + 12`.
+const TREE_ROW_INDENT: f32 = 16.;
+const TREE_ROW_PAD: f32 = 12.;
 
 /// The frame the rounded workspace sits on, so the white card reads as a
 /// surface rather than disappearing into the window.
@@ -143,6 +148,102 @@ fn workspace_chrome(cx: &App) -> Hsla {
         0xF4F4F4
     })
     .into()
+}
+
+/// Left padding of a file-tree row. Same formula as gpui-component's Tree.
+fn tree_row_indent(depth: usize) -> Pixels {
+    px(TREE_ROW_PAD + depth as f32 * TREE_ROW_INDENT)
+}
+
+/// Horizontal position of the indent guide for nesting `level`.
+/// Centered in that level's gutter so the line sits under the parent's icon.
+fn tree_guide_x(level: usize) -> Pixels {
+    px(TREE_ROW_PAD + TREE_ROW_INDENT / 2. + level as f32 * TREE_ROW_INDENT)
+}
+
+/// The guide that marks the folder containing `index`: first child row,
+/// end (exclusive), and indent level. The parent row itself does not
+/// carry this line — same as Zed.
+fn tree_active_guide(rows: &[Row], index: usize) -> Option<(usize, usize, usize)> {
+    let depth = rows.get(index)?.depth;
+    if depth == 0 {
+        return None;
+    }
+    let level = depth - 1;
+    let parent = (0..=index).rev().find(|&i| rows[i].depth == level)?;
+    let mut end = parent + 1;
+    while end < rows.len() && rows[end].depth > level {
+        end += 1;
+    }
+    Some((parent + 1, end, level))
+}
+
+fn tree_guide_elements(
+    rows: &[Row],
+    index: usize,
+    depth: usize,
+    focus: Option<usize>,
+    cx: &App,
+) -> Vec<AnyElement> {
+    let active = focus.and_then(|ix| tree_active_guide(rows, ix));
+    (0..depth)
+        .map(|level| {
+            let is_active = active.is_some_and(|(start, end, guide)| {
+                guide == level && index >= start && index < end
+            });
+            div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .left(tree_guide_x(level))
+                .w(px(1.))
+                .bg(cx
+                    .theme()
+                    .muted_foreground
+                    .opacity(if is_active { 0.5 } else { 0.22 }))
+                .into_any_element()
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tree_guide_tests {
+    use super::*;
+
+    fn row_at(depth: usize) -> Row {
+        Row {
+            entry: Entry {
+                path: PathBuf::from(format!("/{depth}")),
+                name: depth.to_string(),
+                kind: EntryKind::File,
+            },
+            depth,
+        }
+    }
+
+    #[core::prelude::v1::test]
+    fn tree_active_guide_follows_the_containing_folder() {
+        // src/          0
+        //   app.rs      1
+        //   tree/       1
+        //     mod.rs    2
+        //     walk.rs   2
+        //   lib.rs      1
+        // README        0
+        let rows: Vec<Row> = [0, 1, 1, 2, 2, 1, 0].into_iter().map(row_at).collect();
+        assert_eq!(tree_active_guide(&rows, 0), None);
+        assert_eq!(tree_active_guide(&rows, 6), None);
+        assert_eq!(tree_active_guide(&rows, 1), Some((1, 6, 0)));
+        assert_eq!(tree_active_guide(&rows, 2), Some((1, 6, 0)));
+        assert_eq!(tree_active_guide(&rows, 3), Some((3, 5, 1)));
+        assert_eq!(tree_active_guide(&rows, 4), Some((3, 5, 1)));
+        assert_eq!(tree_active_guide(&rows, 5), Some((1, 6, 0)));
+        assert_eq!(tree_guide_x(0), px(TREE_ROW_PAD + TREE_ROW_INDENT / 2.));
+        assert_eq!(
+            tree_guide_x(1),
+            px(TREE_ROW_PAD + TREE_ROW_INDENT / 2. + TREE_ROW_INDENT)
+        );
+    }
 }
 
 /// A type size in the interface scale. The design is drawn at 13px, so
@@ -191,6 +292,7 @@ fn sync_appearance(
     theme.border = rgb(if dark { 0x2B2E30 } else { 0xE8E8E8 }).into();
     theme.accent_foreground = rgb(if dark { 0xBECBAD } else { 0x4C6341 }).into();
     theme.list_active = rgb(if dark { 0x2B3031 } else { 0xEFEFEF }).into();
+    theme.list_active_border = rgb(if dark { 0x3A4042 } else { 0xE0E0E0 }).into();
     theme.list_hover = rgb(if dark { 0x25292B } else { 0xF5F5F5 }).into();
     theme.title_bar = theme.background;
     theme.title_bar_border = theme.border;
@@ -683,6 +785,9 @@ pub struct Folio {
     recent_file: PathBuf,
     recent_task: Option<Task<()>>,
     tree_focus: FocusHandle,
+    /// Row the pointer is over, so the indent guide for that folder can
+    /// brighten the way Zed's does. Cleared when the tree is rebuilt.
+    tree_hover_row: Option<usize>,
     quick_scroll: UniformListScrollHandle,
     sidebar: bool,
     /// The far-left icon rail. Independent of the file tree: hiding the
@@ -904,6 +1009,7 @@ impl Folio {
             recent_file,
             recent_task: None,
             tree_focus: cx.focus_handle(),
+            tree_hover_row: None,
             quick_scroll: UniformListScrollHandle::new(),
             sidebar: settings.sidebar,
             activity_bar: settings.activity_bar,
@@ -1449,6 +1555,7 @@ impl Folio {
     }
 
     fn rebuild_rows(&mut self) {
+        self.tree_hover_row = None;
         fn flatten(
             dir: &Path,
             depth: usize,
@@ -5072,7 +5179,9 @@ impl Folio {
             .tab_index(0)
             .h(px(42.))
             .flex_shrink_0()
+            .mx_1()
             .px_3()
+            .rounded(cx.theme().radius)
             .flex()
             .items_center()
             .gap_2()
@@ -5083,7 +5192,10 @@ impl Folio {
                 cx.theme().muted_foreground
             })
             .cursor_default()
-            .hover(|el| el.text_color(cx.theme().accent_foreground))
+            .hover(|el| {
+                el.bg(cx.theme().list_hover)
+                    .text_color(cx.theme().accent_foreground)
+            })
             .on_click(
                 cx.listener(move |this, _, window, cx| this.select_project(&root, window, cx)),
             )
@@ -5216,7 +5328,8 @@ impl Folio {
                         let row = this.project.rows[i].clone();
                         let path = row.entry.path.clone();
                         let menu_path = path.clone();
-                        let selected = this.project.active.as_ref() == Some(&path);
+                        let selected = this.project.active.as_ref() == Some(&path)
+                            || i == this.project.selected_row;
                         let status = this
                             .project
                             .workspace
@@ -5226,30 +5339,58 @@ impl Folio {
                             .copied();
                         let icon = if row.entry.kind == EntryKind::Directory {
                             if this.project.expanded.contains(&path) {
-                                IconName::ChevronDown
+                                IconName::FolderOpen
                             } else {
-                                IconName::ChevronRight
+                                IconName::Folder
                             }
                         } else {
                             IconName::File
                         };
+                        let radius = cx.theme().radius;
+                        let focus = this
+                            .tree_hover_row
+                            .filter(|&ix| ix < this.project.rows.len())
+                            .or_else(|| {
+                                (!this.project.rows.is_empty())
+                                    .then_some(this.project.selected_row)
+                            });
+                        let guides = tree_guide_elements(
+                            &this.project.rows,
+                            i,
+                            row.depth,
+                            focus,
+                            cx,
+                        );
                         div()
                             .id(("row", i))
                             .role(Role::TreeItem)
                             .aria_label(row.entry.name.clone())
+                            .relative()
                             .w_full()
-                            .h(px(27.))
-                            .pl(px(14. + row.depth as f32 * 14.))
+                            .h(px(TREE_ROW_HEIGHT))
+                            .rounded(radius)
+                            .pl(tree_row_indent(row.depth))
                             .pr_3()
                             .flex()
                             .items_center()
                             .gap_2()
                             .text_size(ui(12.))
                             .cursor_default()
-                            .when(selected || i == this.project.selected_row, |el| {
-                                el.bg(cx.theme().list_active)
+                            .when(selected, |el| el.bg(cx.theme().list_active))
+                            .when(!selected, |el| {
+                                el.hover(|el| el.bg(cx.theme().list_hover))
                             })
-                            .hover(|el| el.bg(cx.theme().list_hover))
+                            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                                if *hovered {
+                                    if this.tree_hover_row != Some(i) {
+                                        this.tree_hover_row = Some(i);
+                                        cx.notify();
+                                    }
+                                } else if this.tree_hover_row == Some(i) {
+                                    this.tree_hover_row = None;
+                                    cx.notify();
+                                }
+                            }))
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.project.selected_row = i;
                                 this.tree_focus.focus(window, cx);
@@ -5287,9 +5428,10 @@ impl Folio {
                                     cx.stop_propagation();
                                 }),
                             )
+                            .children(guides)
                             .child(
                                 Icon::new(icon)
-                                    .xsmall()
+                                    .small()
                                     .text_color(cx.theme().muted_foreground),
                             )
                             .child(div().flex_1().min_w_0().truncate().child(row.entry.name))
@@ -5302,12 +5444,23 @@ impl Folio {
                                     },
                                 ))
                             })
+                            .when(selected && cx.theme().list.active_highlight, |el| {
+                                el.child(
+                                    div()
+                                        .absolute()
+                                        .inset_0()
+                                        .rounded(radius)
+                                        .border_1()
+                                        .border_color(cx.theme().list_active_border),
+                                )
+                            })
                             .into_any_element()
                     })
                     .collect()
             }),
         )
         .track_scroll(&self.project.tree_scroll)
+        .p_1()
         .flex_1()
         .into_any_element()
     }
@@ -5323,22 +5476,35 @@ impl Folio {
             .get(edit.row)
             .map(|row| row.depth)
             .unwrap_or(0);
+        let focus = self
+            .tree_hover_row
+            .filter(|&ix| ix < self.project.rows.len())
+            .or_else(|| (!self.project.rows.is_empty()).then_some(self.project.selected_row));
         div()
             .id("inline-edit")
+            .relative()
             .w_full()
-            .h(px(27.))
-            .pl(px(14. + depth as f32 * 14.))
+            .h(px(TREE_ROW_HEIGHT))
+            .rounded(cx.theme().radius)
+            .pl(tree_row_indent(depth))
             .pr_3()
             .flex()
             .items_center()
             .gap_2()
+            .children(tree_guide_elements(
+                &self.project.rows,
+                edit.row,
+                depth,
+                focus,
+                cx,
+            ))
             .child(
                 Icon::new(if edit.kind == EntryKind::Directory {
                     IconName::Folder
                 } else {
                     IconName::File
                 })
-                .xsmall()
+                .small()
                 .text_color(cx.theme().muted_foreground),
             )
             .child(div().flex_1().min_w_0().child(
