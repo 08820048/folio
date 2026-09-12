@@ -163,15 +163,15 @@ fn sync_appearance(
     if let Some(family) = settings.font_family.clone() {
         theme.font_family = family.into();
     }
-    theme.background = rgb(if dark { 0x181A1C } else { 0xFAFAF8 }).into();
+    theme.background = rgb(if dark { 0x181A1C } else { 0xFFFFFF }).into();
     theme.foreground = rgb(if dark { 0xDCDDD8 } else { 0x282D2B }).into();
-    theme.sidebar = rgb(if dark { 0x1D1F21 } else { 0xF0F1ED }).into();
+    theme.sidebar = rgb(if dark { 0x1D1F21 } else { 0xFFFFFF }).into();
     theme.popover = theme.sidebar;
     theme.muted_foreground = rgb(if dark { 0x929792 } else { 0x626A64 }).into();
-    theme.border = rgb(if dark { 0x2B2E30 } else { 0xDADDD6 }).into();
+    theme.border = rgb(if dark { 0x2B2E30 } else { 0xE8E8E8 }).into();
     theme.accent_foreground = rgb(if dark { 0xBECBAD } else { 0x4C6341 }).into();
-    theme.list_active = rgb(if dark { 0x2B3031 } else { 0xDDE5D8 }).into();
-    theme.list_hover = rgb(if dark { 0x25292B } else { 0xE6EAE2 }).into();
+    theme.list_active = rgb(if dark { 0x2B3031 } else { 0xEFEFEF }).into();
+    theme.list_hover = rgb(if dark { 0x25292B } else { 0xF5F5F5 }).into();
     theme.title_bar = theme.background;
     theme.title_bar_border = theme.border;
     let background = theme.background;
@@ -181,7 +181,7 @@ fn sync_appearance(
     highlight.style.editor_background = Some(background);
     highlight.style.editor_foreground = Some(foreground);
     highlight.style.editor_gutter_background = Some(background);
-    highlight.style.editor_active_line = Some(rgb(if dark { 0x212628 } else { 0xEFF2EB }).into());
+    highlight.style.editor_active_line = Some(rgb(if dark { 0x212628 } else { 0xF5F5F5 }).into());
     highlight.style.editor_line_number = Some(muted);
     if let Some(window) = window {
         window.refresh();
