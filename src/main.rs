@@ -8,6 +8,7 @@ use gpui::*;
 use gpui_component::{Root, TitleBar, input};
 
 fn main() {
+    app::note_launch();
     gpui_platform::application()
         .with_assets(assets::Assets)
         .run(|cx| {

@@ -410,7 +410,7 @@ impl TerminalView {
     /// Whether the IME is composing. An empty mark is not composing —
     /// leaving it set would keep macOS sending every later key, so
     /// nothing reaches the child and the caret has nowhere to sit.
-    fn composing(&self) -> bool {
+    pub(crate) fn composing(&self) -> bool {
         marked_is_composing(self.marked_text.as_deref())
     }
 
@@ -714,6 +714,7 @@ struct BgRect {
     color: Hsla,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn paint_grid(
     layout: &GridPaint,
     snapshot: &terminal::Snapshot,
@@ -1066,11 +1067,14 @@ impl InputHandler for TerminalInputHandler {
     }
 
     fn prefers_ime_for_printable_keys(&mut self, _: &mut Window, _: &mut App) -> bool {
-        // Zed's terminal keeps the default: printable keys reach the
-        // child so the shell echoes them. Composition still arrives
-        // through `replace_and_mark_text_in_range` when an IME is
-        // actually composing.
-        false
+        // macOS only starts a CJK composition when printable keys go
+        // to the IME *before* KeyDown. Zed's terminal leaves this
+        // false so raw keys hit the PTY (vim `jj` and the like); the
+        // cost is that `n`/`i` land in the shell and pinyin never
+        // starts. Folio has no such bindings on the terminal, so the
+        // IME wins. ABC / US still bypasses this — the platform only
+        // asks when a non-ASCII input source is active.
+        routes_printable_keys_to_ime()
     }
 
     fn bounds_for_range(
@@ -1102,6 +1106,14 @@ fn mods_of(mods: gpui::Modifiers) -> Modifiers {
         ctrl: mods.control,
         alt: mods.alt,
     }
+}
+
+fn marked_is_composing(marked: Option<&str>) -> bool {
+    marked.is_some_and(|text| !text.is_empty())
+}
+
+fn routes_printable_keys_to_ime() -> bool {
+    true
 }
 
 fn button_of(button: MouseButton) -> Option<Button> {
@@ -1171,13 +1183,14 @@ mod tests {
     }
 
     #[test]
+    fn printable_keys_go_to_the_ime_so_pinyin_can_compose() {
+        assert!(routes_printable_keys_to_ime());
+    }
+
+    #[test]
     fn grid_cells_never_overrun_the_span() {
         assert_eq!(grid_cells(px(100.), px(16.)), 6);
         assert_eq!(grid_cells(px(16.), px(16.)), 2);
         assert_eq!(grid_cells(px(15.), px(16.)), 2);
     }
-}
-
-fn marked_is_composing(marked: Option<&str>) -> bool {
-    marked.is_some_and(|text| !text.is_empty())
 }

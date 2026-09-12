@@ -58,7 +58,8 @@ rather than a read of the whole crate.
 - `input/base/state.rs` — where the set is read and written: a keystroke, a
   backspace, an Enter, an escape, a paste and a cut, and the hooks that reach
   `multi_cursor.rs`, an option-drag among them — plus the two folding commands
-  and what they do with a caret the fold has hidden.
+  and what they do with a caret the fold has hidden. Escape during an IME
+  composition deletes the marked run instead of only dropping the underline.
 - `input/base/element.rs` — drawing every selection as a path of its own and
   every caret as a quad, in the coordinates the primary's already used.
 - `input/editor/indent.rs` — `line_break_at`: what Enter inserts and where the

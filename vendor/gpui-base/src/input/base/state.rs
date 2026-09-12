@@ -1986,7 +1986,12 @@ impl InputBaseState {
         self.scroll_to(0, None, cx);
     }
 
-    pub(super) fn escape(&mut self, action: &Escape, window: &mut Window, cx: &mut Context<Self>) {
+    /// True while the IME has a marked run in the buffer (pinyin before commit).
+    pub fn is_composing(&self) -> bool {
+        self.ime_marked_range.is_some()
+    }
+
+    pub fn escape(&mut self, action: &Escape, window: &mut Window, cx: &mut Context<Self>) {
         if self.handle_action_for_context_menu(Box::new(action.clone()), window, cx) {
             return;
         }
@@ -1998,7 +2003,11 @@ impl InputBaseState {
         }
 
         if self.ime_marked_range.is_some() {
-            self.unmark_text(window, cx);
+            // Esc during a composition cancels it: the marked run has to
+            // leave the buffer, not just lose its underline. The IME
+            // path does the same by marking the empty string.
+            self.replace_and_mark_text_in_range(None, "", None, window, cx);
+            return;
         }
 
         // An escape with a set of cursors takes it back to the one cursor,
@@ -2380,7 +2389,7 @@ impl InputBaseState {
             .push(Change::new(range, &old_text, new_range, new_text));
     }
 
-    pub(super) fn undo(&mut self, _: &Undo, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn undo(&mut self, _: &Undo, window: &mut Window, cx: &mut Context<Self>) {
         self.history.set_ignoring(true);
         if let Some(changes) = self.history.undo() {
             for change in changes {

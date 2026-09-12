@@ -32,6 +32,14 @@ use std::{
 /// Where the versions of this application are listed.
 const RELEASES: &str = "https://github.com/08820048/folio/releases";
 
+/// Process start, for `FOLIO_PERF=1` first-frame timing.
+static LAUNCH: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+
+/// Call once at the top of `main` so first-frame time includes window setup.
+pub fn note_launch() {
+    let _ = LAUNCH.get_or_init(Instant::now);
+}
+
 /// Fonts tried for the glyphs the code font has no coverage for. GPUI's own
 /// fallback stack names no CJK family at all, so without this a Chinese
 /// character in a file is drawn in whatever the platform happens to pick —
@@ -881,6 +889,8 @@ pub struct Folio {
     /// Last wrap mode pushed into open editors, so a settings change can
     /// catch up on the next frame when we have a window.
     applied_wrap: bool,
+    /// First frame after launch has been logged, if `FOLIO_PERF` is set.
+    logged_ready: bool,
     /// The ignore rules the tree's cached listings were built with. Tracked
     /// separately because callers edit `settings` before applying it, so
     /// comparing against that field would never see a change.
@@ -1142,6 +1152,7 @@ impl Folio {
             search: SearchState::default(),
             settings,
             applied_wrap: false,
+            logged_ready: false,
             applied_ignored: settings_ignored,
             settings_file,
             settings_window: None,
@@ -2828,6 +2839,36 @@ impl Folio {
         } else {
             self.tree_focus.focus(window, cx);
         }
+    }
+
+    /// True while an IME composition is marked in the editor, a search
+    /// field, or the terminal. Escape has to cancel that first, not
+    /// close a panel or abandon a name.
+    fn is_composing(&self, cx: &App) -> bool {
+        if let Some(editor) = self.active_editor()
+            && editor.read(cx).base_state().read(cx).is_composing()
+        {
+            return true;
+        }
+        if self
+            .active_terminal()
+            .is_some_and(|terminal| terminal.read(cx).composing())
+        {
+            return true;
+        }
+        self.query.read(cx).base_state().read(cx).is_composing()
+            || self
+                .search_query
+                .read(cx)
+                .base_state()
+                .read(cx)
+                .is_composing()
+            || self
+                .replace_query
+                .read(cx)
+                .base_state()
+                .read(cx)
+                .is_composing()
     }
 
     /// The buffer being edited, if one is. An image preview has none.
@@ -7783,6 +7824,17 @@ impl Render for SettingsView {
 
 impl Render for Folio {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if !self.logged_ready {
+            self.logged_ready = true;
+            if std::env::var_os("FOLIO_PERF").is_some()
+                && let Some(start) = LAUNCH.get()
+            {
+                eprintln!(
+                    "folio_first_frame_ms={:.1}",
+                    start.elapsed().as_secs_f64() * 1000.0
+                );
+            }
+        }
         if self.applied_wrap != self.settings.soft_wrap {
             self.sync_soft_wrap(window, cx);
         }
@@ -8029,7 +8081,11 @@ impl Render for Folio {
                     return;
                 }
                 // Escape has to be caught here: the input owns the key context
-                // while a row is being named.
+                // while a row is being named. A composition is the exception —
+                // the marked run has to leave the buffer first.
+                if event.keystroke.key == "escape" && this.is_composing(cx) {
+                    return;
+                }
                 if this.editing.is_some() {
                     if event.keystroke.key == "escape" {
                         this.cancel_create(window, cx);
@@ -11067,6 +11123,109 @@ mod tests {
             assert_eq!(document.editor.read(cx).value(), "fn moved() {}\n");
             assert!(document.dirty);
             assert!(!app.project.documents.contains_key(&file));
+        });
+    }
+
+    #[gpui::test]
+    fn composing_then_undo_or_escape_returns_to_the_buffer_before_pinyin(
+        cx: &mut TestAppContext,
+    ) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let file = root.join("main.rs");
+        std::fs::write(&file, "fn main() {}\n").unwrap();
+        cx.update(gpui_component::init);
+        let cx = cx.add_empty_window();
+        let view = cx.update(|window, cx| {
+            cx.new(|cx| {
+                let mut app = Folio::new(window, cx);
+                app.recent_task = None;
+                app.recent_file = root.join("recent.json");
+                app.settings_file = root.join("settings.json");
+                app.window_file = root.join("window.json");
+                app.settings = Settings::default();
+                app.applied_ignored = app.settings.ignored.clone();
+                app
+            })
+        });
+        view.update_in(cx, |app, window, cx| {
+            app.request(Next::Open(root.clone()), window, cx)
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |app, window, cx| app.open_file(file.clone(), window, cx));
+        cx.run_until_parked();
+
+        view.update_in(cx, |app, window, cx| {
+            let base = app.project.documents[&file]
+                .editor
+                .read(cx)
+                .base_state()
+                .clone();
+            let value = |cx: &App| base.read(cx).value().to_string();
+            // Caret sits before the closer, the way a comment would be typed.
+            base.update(cx, |base, cx| {
+                base.set_selected_range(11..11, cx);
+                EntityInputHandler::replace_and_mark_text_in_range(
+                    base,
+                    None,
+                    "ni",
+                    Some(2..2),
+                    window,
+                    cx,
+                );
+                EntityInputHandler::replace_and_mark_text_in_range(
+                    base,
+                    None,
+                    "你",
+                    Some(1..1),
+                    window,
+                    cx,
+                );
+                EntityInputHandler::replace_text_in_range(base, None, "你", window, cx);
+            });
+            assert_eq!(value(cx), "fn main() {你}\n");
+            base.update(cx, |base, cx| base.undo(&input::Undo, window, cx));
+            assert_eq!(
+                value(cx),
+                "fn main() {}\n",
+                "one undo must drop the whole composition"
+            );
+
+            base.update(cx, |base, cx| {
+                base.set_selected_range(11..11, cx);
+                EntityInputHandler::replace_and_mark_text_in_range(
+                    base,
+                    None,
+                    "hao",
+                    Some(3..3),
+                    window,
+                    cx,
+                );
+                base.escape(&input::Escape, window, cx);
+            });
+            assert_eq!(
+                value(cx),
+                "fn main() {}\n",
+                "escape during a composition must not leave the pinyin"
+            );
+
+            app.panel = Some(Panel::Search);
+            base.update(cx, |base, cx| {
+                base.set_selected_range(11..11, cx);
+                EntityInputHandler::replace_and_mark_text_in_range(
+                    base,
+                    None,
+                    "hao",
+                    Some(3..3),
+                    window,
+                    cx,
+                );
+            });
+            assert!(
+                app.is_composing(cx),
+                "a marked run has to keep Escape for the editor"
+            );
+            assert_eq!(app.panel, Some(Panel::Search));
         });
     }
 }
