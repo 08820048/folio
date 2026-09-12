@@ -60,6 +60,9 @@ fn main() {
                     Some("FolioTerminal"),
                 ),
                 KeyBinding::new(&format!("{modifier}-shift-d"), ToggleDiff, Some("Folio")),
+                KeyBinding::new(&format!("{modifier}-shift-g"), ToggleChanges, Some("Folio")),
+                KeyBinding::new("f7", NextHunk, Some("Folio")),
+                KeyBinding::new("shift-f7", PrevHunk, Some("Folio")),
                 KeyBinding::new(&format!("{modifier}-alt-b"), ToggleBlame, Some("Folio")),
                 // The editor's own ⌘⇧F, moved off it so `⇧⌘F` can be the
                 // project search everywhere. The action is the component's;
@@ -194,6 +197,7 @@ fn main() {
                     MenuItem::action("Toggle Activity Bar", ToggleActivityBar),
                     MenuItem::action("Toggle Sidebar", ToggleSidebar),
                     MenuItem::action("Terminal", ToggleTerminal),
+                    MenuItem::action("Changes", ToggleChanges),
                     MenuItem::action("Go to Line…", GoToLine),
                     MenuItem::separator(),
                     MenuItem::action("Blame", ToggleBlame),

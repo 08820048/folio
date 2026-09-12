@@ -43,6 +43,11 @@ impl Diff {
 
 /// Diff one file against HEAD.
 pub fn for_file(root: &Path, path: &Path) -> io::Result<Diff> {
+    for_file_against(root, path, "HEAD")
+}
+
+/// Diff one file against `base` (`HEAD`, `main`, …).
+pub fn for_file_against(root: &Path, path: &Path, base: &str) -> io::Result<Diff> {
     let Ok(relative) = path.strip_prefix(root) else {
         // Outside the project there is nothing to compare against.
         return Ok(Diff::default());
@@ -58,7 +63,7 @@ pub fn for_file(root: &Path, path: &Path) -> io::Result<Diff> {
     let output = Command::new("git")
         .arg("-C")
         .arg(root)
-        .args(["diff", "--no-color", "--unified=3", "HEAD", "--"])
+        .args(["diff", "--no-color", "--unified=3", base, "--"])
         .arg(relative)
         .env("GIT_OPTIONAL_LOCKS", "0")
         .output();
@@ -177,6 +182,96 @@ pub fn parse(raw: &str) -> Vec<Line> {
     lines
 }
 
+/// One row of a side-by-side view. A hunk header spans both columns;
+/// a replace puts the deleted line on the left and the added one on
+/// the right so they line up.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SplitRow {
+    pub hunk: Option<String>,
+    pub old: Option<SplitCell>,
+    pub new: Option<SplitCell>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SplitCell {
+    pub number: Option<u32>,
+    pub text: String,
+    pub change: Change,
+}
+
+/// Fold a unified diff into split rows. A run of removals followed by
+/// additions is zipped; leftovers keep an empty opposite cell.
+pub fn split_rows(lines: &[Line]) -> Vec<SplitRow> {
+    let mut rows = Vec::new();
+    let mut index = 0;
+    while index < lines.len() {
+        match lines[index].change {
+            Change::Hunk => {
+                rows.push(SplitRow {
+                    hunk: Some(lines[index].text.clone()),
+                    old: None,
+                    new: None,
+                });
+                index += 1;
+            }
+            Change::Context => {
+                rows.push(SplitRow {
+                    hunk: None,
+                    old: Some(SplitCell {
+                        number: lines[index].old,
+                        text: lines[index].text.clone(),
+                        change: Change::Context,
+                    }),
+                    new: Some(SplitCell {
+                        number: lines[index].new,
+                        text: lines[index].text.clone(),
+                        change: Change::Context,
+                    }),
+                });
+                index += 1;
+            }
+            Change::Removed | Change::Added => {
+                let start = index;
+                while index < lines.len() && lines[index].change == Change::Removed {
+                    index += 1;
+                }
+                let removed = &lines[start..index];
+                let added_at = index;
+                while index < lines.len() && lines[index].change == Change::Added {
+                    index += 1;
+                }
+                let added = &lines[added_at..index];
+                for offset in 0..removed.len().max(added.len()) {
+                    rows.push(SplitRow {
+                        hunk: None,
+                        old: removed.get(offset).map(|line| SplitCell {
+                            number: line.old,
+                            text: line.text.clone(),
+                            change: Change::Removed,
+                        }),
+                        new: added.get(offset).map(|line| SplitCell {
+                            number: line.new,
+                            text: line.text.clone(),
+                            change: Change::Added,
+                        }),
+                    });
+                }
+            }
+        }
+    }
+    rows
+}
+
+/// Byte offsets of every hunk header, for next / previous.
+pub fn hunk_indices(lines: &[Line]) -> Vec<usize> {
+    lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.change == Change::Hunk)
+        .map(|(index, _)| index)
+        .collect()
+}
+
 /// The starting line numbers out of `@@ -old,count +new,count @@ title`.
 fn hunk_start(header: &str) -> Option<(u32, u32)> {
     let mut parts = header.strip_prefix("@@ -")?.split(' ');
@@ -270,6 +365,28 @@ index 1111111..2222222 100644
         assert!(parse("diff --git a/x b/x\n--- a/x\n+++ b/x\n").is_empty());
         // A malformed hunk header stops the parse rather than guessing.
         assert_eq!(parse("@@ nonsense\n+a\n").len(), 0);
+    }
+
+    #[test]
+    fn a_replace_lines_up_in_a_split() {
+        let lines = parse("@@ -1,3 +1,3 @@\n one\n-old\n+new\n two\n");
+        let rows = split_rows(&lines);
+        assert_eq!(rows[0].hunk.as_deref(), Some("@@ -1,3 +1,3 @@"));
+        assert_eq!(rows[1].old.as_ref().map(|cell| cell.text.as_str()), Some("one"));
+        assert_eq!(rows[1].new.as_ref().map(|cell| cell.text.as_str()), Some("one"));
+        assert_eq!(rows[2].old.as_ref().unwrap().text, "old");
+        assert_eq!(rows[2].new.as_ref().unwrap().text, "new");
+        assert_eq!(rows[2].old.as_ref().unwrap().change, Change::Removed);
+        assert_eq!(rows[2].new.as_ref().unwrap().change, Change::Added);
+        assert_eq!(hunk_indices(&lines), vec![0]);
+    }
+
+    #[test]
+    fn a_pure_addition_leaves_the_left_empty() {
+        let lines = parse("@@ -1,1 +1,2 @@\n keep\n+add\n");
+        let rows = split_rows(&lines);
+        assert!(rows[2].old.is_none());
+        assert_eq!(rows[2].new.as_ref().unwrap().text, "add");
     }
 
     #[test]

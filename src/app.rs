@@ -372,6 +372,11 @@ actions!(
         CloseWindow,
         OpenAbout,
         ToggleDiff,
+        ToggleChanges,
+        NextHunk,
+        PrevHunk,
+        NextChangeFile,
+        PrevChangeFile,
         ToggleBlame,
         CheckForUpdates,
         ToggleComment,
@@ -427,6 +432,31 @@ struct Document {
 struct Row {
     entry: Entry,
     depth: usize,
+}
+
+/// What the workspace sidebar is showing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+enum SidebarKind {
+    #[default]
+    Tree,
+    Changes,
+}
+
+/// How the changes view lays out a hunk.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+enum DiffLayout {
+    #[default]
+    Unified,
+    Split,
+}
+
+/// What a file's changes are compared to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+enum DiffAgainst {
+    #[default]
+    Head,
+    /// The repo's main branch, resolved when the view asks.
+    Branch,
 }
 
 /// Which lookup the overlay panel is running.
@@ -805,12 +835,15 @@ fn search_rows(results: &[search::FileHits]) -> Vec<SearchRow> {
 struct DiffView {
     path: PathBuf,
     lines: Vec<diff::Line>,
+    split: Vec<diff::SplitRow>,
     untracked: bool,
     /// `None` once git has answered. Loading and failed are different from
     /// "no changes" and have to say so rather than showing an empty list.
     error: Option<String>,
     loading: bool,
     scroll: UniformListScrollHandle,
+    /// Which hunk `F7` is sitting on.
+    hunk: usize,
     /// Bumped per request, so a slow `git` for a file the user has moved on
     /// from does not land on top of the newer one.
     request: u64,
@@ -873,6 +906,13 @@ pub struct Folio {
     tree_hover_row: Option<usize>,
     quick_scroll: UniformListScrollHandle,
     sidebar: bool,
+    sidebar_kind: SidebarKind,
+    /// Highlighted row in the changes list.
+    changes_selected: usize,
+    diff_layout: DiffLayout,
+    diff_against: DiffAgainst,
+    /// Cached name of the branch `DiffAgainst::Branch` uses.
+    diff_branch: Option<String>,
     /// The far-left icon rail. Independent of the file tree: hiding the
     /// rail does not close the tree, and `⌘B` does not hide the rail.
     activity_bar: bool,
@@ -1148,6 +1188,11 @@ impl Folio {
             tree_hover_row: None,
             quick_scroll: UniformListScrollHandle::new(),
             sidebar: settings.sidebar,
+            sidebar_kind: SidebarKind::Tree,
+            changes_selected: 0,
+            diff_layout: DiffLayout::Unified,
+            diff_against: DiffAgainst::Head,
+            diff_branch: None,
             activity_bar: settings.activity_bar,
             sidebar_width: 240.,
             resizing: false,
@@ -2788,6 +2833,10 @@ impl Folio {
     fn follow_diff(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.project.diff.is_some() {
             self.load_diff(window, cx);
+            // The list is how you walk files; keep the keyboard there.
+            if self.sidebar && self.sidebar_kind == SidebarKind::Changes {
+                self.tree_focus.focus(window, cx);
+            }
         }
     }
 
@@ -3322,6 +3371,10 @@ impl Folio {
             cx.notify();
             return;
         };
+        if self.diff_against == DiffAgainst::Branch && self.diff_branch.is_none() {
+            self.diff_branch = git::review_branch(&workspace.root);
+        }
+        let base = self.diff_base().to_string();
         let project_id = self.project.id;
         let request = self.project.diff.as_ref().map_or(0, |view| view.request) + 1;
         self.project.diff = Some(DiffView {
@@ -3331,9 +3384,9 @@ impl Folio {
             ..DiffView::default()
         });
         cx.notify();
-        let task = cx
-            .background_executor()
-            .spawn(async move { diff::for_file(&workspace.root, &path) });
+        let task = cx.background_executor().spawn(async move {
+            diff::for_file_against(&workspace.root, &path, &base)
+        });
         cx.spawn_in(window, async move |this, cx| {
             let result = task.await;
             let _ = this.update_in(cx, |this, _, cx| {
@@ -3351,9 +3404,11 @@ impl Folio {
                 view.loading = false;
                 match result {
                     Ok(diff) => {
+                        view.split = diff::split_rows(&diff.lines);
                         view.lines = diff.lines;
                         view.untracked = diff.untracked;
                         view.error = None;
+                        view.hunk = 0;
                     }
                     Err(error) => view.error = Some(error.to_string()),
                 }
@@ -3537,11 +3592,18 @@ impl Folio {
         } else if let Some(error) = &view.error {
             error.clone()
         } else if view.lines.is_empty() {
-            "No changes against HEAD".to_string()
+            format!("No changes against {}", self.diff_base())
         } else if view.untracked {
             format!("Not tracked by git yet · {added} added")
         } else {
             format!("+{added} −{removed}")
+        };
+        let branch = self.diff_branch.as_deref().unwrap_or("main");
+        let split = self.diff_layout == DiffLayout::Split;
+        let count = if split {
+            view.split.len()
+        } else {
+            view.lines.len()
         };
         div()
             .flex_1()
@@ -3564,11 +3626,11 @@ impl Folio {
             .child(
                 div()
                     .flex_shrink_0()
-                    .px_4()
+                    .px_3()
                     .py_2()
                     .flex()
                     .items_center()
-                    .gap_3()
+                    .gap_2()
                     .border_b_1()
                     .border_color(cx.theme().border)
                     .text_size(ui(11.))
@@ -3581,8 +3643,62 @@ impl Folio {
                             .child(self.relative_path(&view.path)),
                     )
                     .child(summary)
-                    // The way out, in the open. Escape and the shortcut do
-                    // the same thing, but nothing on screen said so.
+                    .child(self.diff_choice(
+                        "diff-head",
+                        "HEAD",
+                        self.diff_against == DiffAgainst::Head,
+                        |this, window, cx| this.set_diff_against(DiffAgainst::Head, window, cx),
+                        cx,
+                    ))
+                    .child(self.diff_choice(
+                        "diff-branch",
+                        branch,
+                        self.diff_against == DiffAgainst::Branch,
+                        |this, window, cx| this.set_diff_against(DiffAgainst::Branch, window, cx),
+                        cx,
+                    ))
+                    .child(self.diff_choice(
+                        "diff-unified",
+                        "Unified",
+                        !split,
+                        |this, _, cx| this.set_diff_layout(DiffLayout::Unified, cx),
+                        cx,
+                    ))
+                    .child(self.diff_choice(
+                        "diff-split",
+                        "Split",
+                        split,
+                        |this, _, cx| this.set_diff_layout(DiffLayout::Split, cx),
+                        cx,
+                    ))
+                    .child(Self::icon_button(
+                        "diff-prev-file",
+                        IconName::ChevronUp,
+                        "Previous changed file",
+                        |this, window, cx| this.move_change_file(false, window, cx),
+                        cx,
+                    ))
+                    .child(Self::icon_button(
+                        "diff-next-file",
+                        IconName::ChevronDown,
+                        "Next changed file",
+                        |this, window, cx| this.move_change_file(true, window, cx),
+                        cx,
+                    ))
+                    .child(Self::icon_button(
+                        "diff-prev-hunk",
+                        IconName::ArrowUp,
+                        "Previous hunk",
+                        |this, _, cx| this.move_hunk(false, cx),
+                        cx,
+                    ))
+                    .child(Self::icon_button(
+                        "diff-next-hunk",
+                        IconName::ArrowDown,
+                        "Next hunk",
+                        |this, _, cx| this.move_hunk(true, cx),
+                        cx,
+                    ))
                     .child(Self::icon_button(
                         "diff-close",
                         IconName::Close,
@@ -3591,19 +3707,141 @@ impl Folio {
                         cx,
                     )),
             )
-            .when(!view.lines.is_empty(), |el| {
+            .when(count > 0, |el| {
                 el.child(
                     uniform_list(
                         "diff",
-                        view.lines.len(),
+                        count,
                         cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
-                            range.map(|index| this.render_diff_row(index, cx)).collect()
+                            range
+                                .map(|index| this.render_diff_list_row(index, cx))
+                                .collect()
                         }),
                     )
                     .track_scroll(&view.scroll)
                     .flex_1(),
                 )
             })
+            .into_any_element()
+    }
+
+    fn render_diff_list_row(&self, index: usize, cx: &Context<Self>) -> AnyElement {
+        if self.diff_layout == DiffLayout::Split {
+            self.render_split_row(index, cx)
+        } else {
+            self.render_diff_row(index, cx)
+        }
+    }
+
+    fn render_split_row(&self, index: usize, cx: &Context<Self>) -> AnyElement {
+        let Some(row) = self
+            .project
+            .diff
+            .as_ref()
+            .and_then(|view| view.split.get(index))
+            .cloned()
+        else {
+            return div().into_any_element();
+        };
+        if let Some(hunk) = row.hunk {
+            return div()
+                .w_full()
+                .h(px(24.))
+                .px_4()
+                .flex()
+                .items_center()
+                .bg(cx.theme().list_hover)
+                .text_size(ui(11.))
+                .text_color(cx.theme().muted_foreground)
+                .child(div().min_w_0().truncate().child(hunk))
+                .into_any_element();
+        }
+        div()
+            .w_full()
+            .h(px(22.))
+            .flex()
+            .child(self.render_split_cell(index, row.old.as_ref(), true, cx))
+            .child(self.render_split_cell(index, row.new.as_ref(), false, cx))
+            .into_any_element()
+    }
+
+    fn render_split_cell(
+        &self,
+        index: usize,
+        cell: Option<&diff::SplitCell>,
+        old: bool,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let (background, marker, number, text) = match cell {
+            Some(cell) => {
+                let background = match cell.change {
+                    diff::Change::Added => Some(cx.theme().success.opacity(0.16)),
+                    diff::Change::Removed => Some(cx.theme().danger.opacity(0.16)),
+                    _ => None,
+                };
+                let marker = match cell.change {
+                    diff::Change::Added => "+",
+                    diff::Change::Removed => "−",
+                    _ => " ",
+                };
+                (background, marker, cell.number, cell.text.as_str())
+            }
+            None => (None, " ", None, ""),
+        };
+        div()
+            .id((if old { "diff-old" } else { "diff-new" }, index))
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .flex()
+            .items_center()
+            .font_family(self.code_font())
+            .text_size(px(self.settings.code_font_size))
+            .border_r_1()
+            .border_color(if old {
+                sidebar_rule(cx)
+            } else {
+                cx.theme().background
+            })
+            .when_some(background, |el, background| el.bg(background))
+            .child(Self::diff_number(number, cx))
+            .child(
+                div()
+                    .w(px(18.))
+                    .flex_shrink_0()
+                    .flex()
+                    .justify_center()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(marker),
+            )
+            .child(div().flex_1().min_w_0().truncate().child(text.to_string()))
+            .into_any_element()
+    }
+
+    fn diff_choice(
+        &self,
+        id: &'static str,
+        label: &str,
+        selected: bool,
+        on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        div()
+            .id(id)
+            .role(Role::Button)
+            .aria_label(label.to_string())
+            .px(px(6.))
+            .rounded(px(4.))
+            .cursor_pointer()
+            .text_size(ui(11.))
+            .text_color(if selected {
+                cx.theme().accent_foreground
+            } else {
+                cx.theme().muted_foreground
+            })
+            .when(selected, |el| el.bg(cx.theme().list_active))
+            .on_click(cx.listener(move |this, _, window, cx| on_click(this, window, cx)))
+            .child(label.to_string())
             .into_any_element()
     }
 
@@ -4901,9 +5139,129 @@ impl Folio {
     }
 
     /// `⌘B` and the first rail icon: show or hide the file tree.
+    /// If the sidebar is on the changes list, this just comes back to the tree.
     fn toggle_file_tree(&mut self, cx: &mut Context<Self>) {
+        if self.sidebar && self.sidebar_kind == SidebarKind::Changes {
+            self.sidebar_kind = SidebarKind::Tree;
+            cx.notify();
+            return;
+        }
         self.settings.sidebar = !self.sidebar;
         self.apply_settings(cx);
+    }
+
+    /// The rail's compare icon: the dirty-file list, or hide it if it is up.
+    fn toggle_changes_list(&mut self, cx: &mut Context<Self>) {
+        if self.sidebar && self.sidebar_kind == SidebarKind::Changes {
+            self.settings.sidebar = false;
+            self.apply_settings(cx);
+            return;
+        }
+        self.sidebar_kind = SidebarKind::Changes;
+        if !self.sidebar {
+            self.settings.sidebar = true;
+            self.apply_settings(cx);
+        }
+        self.refresh_git(cx);
+        cx.notify();
+    }
+
+    /// Current project's dirty / untracked files, as absolute paths.
+    fn changed_files(&self) -> Vec<(PathBuf, char)> {
+        let Some(root) = self.project.workspace.as_ref().map(|w| &w.root) else {
+            return Vec::new();
+        };
+        git::changed_paths(&self.project.git_status)
+            .into_iter()
+            .map(|(relative, kind)| (root.join(relative), kind))
+            .collect()
+    }
+
+    fn open_changed_file(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(index) = self
+            .changed_files()
+            .iter()
+            .position(|(entry, _)| entry == &path)
+        {
+            self.changes_selected = index;
+        }
+        // `open_file` is often async. Plant the view first so `follow_diff`
+        // loads this file's changes when the buffer lands; calling
+        // `toggle_diff` now would see no active file and turn the view off.
+        if self.project.diff.is_none() {
+            self.project.diff = Some(DiffView {
+                loading: true,
+                ..DiffView::default()
+            });
+        }
+        self.open_file(path, window, cx);
+    }
+
+    fn move_change_file(&mut self, next: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let files = self.changed_files();
+        if files.is_empty() {
+            return;
+        }
+        let last = files.len() - 1;
+        self.changes_selected = if next {
+            (self.changes_selected + 1).min(last)
+        } else {
+            self.changes_selected.saturating_sub(1)
+        };
+        let path = files[self.changes_selected].0.clone();
+        self.open_changed_file(path, window, cx);
+    }
+
+    fn move_hunk(&mut self, next: bool, cx: &mut Context<Self>) {
+        let Some(view) = self.project.diff.as_mut() else {
+            return;
+        };
+        let hunks = if self.diff_layout == DiffLayout::Split {
+            view.split
+                .iter()
+                .enumerate()
+                .filter(|(_, row)| row.hunk.is_some())
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>()
+        } else {
+            diff::hunk_indices(&view.lines)
+        };
+        if hunks.is_empty() {
+            return;
+        }
+        if next {
+            view.hunk = (view.hunk + 1).min(hunks.len() - 1);
+        } else {
+            view.hunk = view.hunk.saturating_sub(1);
+        }
+        view.scroll
+            .scroll_to_item(hunks[view.hunk], ScrollStrategy::Top);
+        cx.notify();
+    }
+
+    fn set_diff_layout(&mut self, layout: DiffLayout, cx: &mut Context<Self>) {
+        self.diff_layout = layout;
+        cx.notify();
+    }
+
+    fn set_diff_against(&mut self, against: DiffAgainst, window: &mut Window, cx: &mut Context<Self>) {
+        self.diff_against = against;
+        if against == DiffAgainst::Branch
+            && let Some(root) = self.project.workspace.as_ref().map(|w| w.root.clone())
+        {
+            self.diff_branch = git::review_branch(&root);
+        }
+        if self.project.diff.is_some() {
+            self.load_diff(window, cx);
+        }
+        cx.notify();
+    }
+
+    fn diff_base(&self) -> &str {
+        match self.diff_against {
+            DiffAgainst::Head => "HEAD",
+            DiffAgainst::Branch => self.diff_branch.as_deref().unwrap_or("HEAD"),
+        }
     }
 
     /// The title-bar button: show or hide the icon rail. The file tree
@@ -5450,6 +5808,10 @@ impl Folio {
         if self.editing.is_some() {
             return;
         }
+        if self.sidebar_kind == SidebarKind::Changes {
+            self.changes_key(event, window, cx);
+            return;
+        }
         let Some(row) = self.project.rows.get(self.project.selected_row).cloned() else {
             return;
         };
@@ -5596,8 +5958,16 @@ impl Folio {
                 "rail-files",
                 IconName::Folder,
                 "File Tree",
-                self.sidebar,
+                self.sidebar && self.sidebar_kind == SidebarKind::Tree,
                 |this, _, cx| this.toggle_file_tree(cx),
+                cx,
+            ))
+            .child(Self::rail_icon(
+                "rail-changes",
+                FolioIcon::GitCompare,
+                "Changes",
+                self.sidebar && self.sidebar_kind == SidebarKind::Changes,
+                |this, _, cx| this.toggle_changes_list(cx),
                 cx,
             ))
             .child(Self::rail_icon(
@@ -5917,6 +6287,131 @@ impl Folio {
             .when(project.documents.values().any(|d| d.dirty), |el| {
                 el.child(Icon::new(IconName::Asterisk).xsmall())
             })
+            .into_any_element()
+    }
+
+    fn changes_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let files = self.changed_files();
+        if files.is_empty() {
+            return;
+        }
+        match event.keystroke.key.as_str() {
+            "up" => {
+                self.changes_selected = self.changes_selected.saturating_sub(1);
+                cx.notify();
+            }
+            "down" => {
+                self.changes_selected = (self.changes_selected + 1).min(files.len() - 1);
+                cx.notify();
+            }
+            "enter" => {
+                let path = files[self.changes_selected.min(files.len() - 1)].0.clone();
+                self.open_changed_file(path, window, cx);
+            }
+            _ => return,
+        }
+        cx.stop_propagation();
+    }
+
+    fn render_changes_list(&self, cx: &mut Context<Self>) -> AnyElement {
+        let files = self.changed_files();
+        let against = self.diff_base();
+        div()
+            .id("changes-list")
+            .role(Role::List)
+            .aria_label("Changes")
+            .track_focus(&self.tree_focus)
+            .tab_index(0)
+            .key_context("FolioTree")
+            .w(px(self.sidebar_width))
+            .h_full()
+            .flex_shrink_0()
+            .rounded_tl(px(WORKSPACE_RADIUS))
+            .rounded_bl(px(WORKSPACE_RADIUS))
+            .flex()
+            .flex_col()
+            .on_key_down(cx.listener(Self::tree_key))
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .px_3()
+                    .h(px(TREE_ROW_HEIGHT))
+                    .flex()
+                    .items_center()
+                    .text_size(ui(11.))
+                    .text_color(cx.theme().muted_foreground)
+                    .child(if files.is_empty() {
+                        format!("No changes against {against}")
+                    } else {
+                        format!("{} files · {against}", files.len())
+                    }),
+            )
+            .child(
+                uniform_list(
+                    "changes",
+                    files.len(),
+                    cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
+                        let files = this.changed_files();
+                        let selected = this.changes_selected.min(files.len().saturating_sub(1));
+                        range
+                            .filter_map(|index| {
+                                let (path, kind) = files.get(index)?;
+                                Some(this.render_change_row(index, path, *kind, index == selected, cx))
+                            })
+                            .collect()
+                    }),
+                )
+                .flex_1(),
+            )
+            .into_any_element()
+    }
+
+    fn render_change_row(
+        &self,
+        index: usize,
+        path: &Path,
+        kind: char,
+        selected: bool,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let label = self.relative_path(path);
+        let open = path.to_path_buf();
+        let mark = if kind == 'U' { "U" } else { "M" };
+        div()
+            .id(("change-row", index))
+            .role(Role::ListItem)
+            .aria_label(label.clone())
+            .aria_selected(selected)
+            .h(px(TREE_ROW_HEIGHT))
+            .px_3()
+            .flex()
+            .items_center()
+            .gap_2()
+            .cursor_pointer()
+            .text_size(ui(12.))
+            .text_color(if selected {
+                cx.theme().foreground
+            } else {
+                cx.theme().muted_foreground
+            })
+            .when(selected, |el| el.bg(cx.theme().list_active))
+            .hover(|el| el.bg(cx.theme().list_hover))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.open_changed_file(open.clone(), window, cx);
+            }))
+            .child(
+                div()
+                    .w(px(14.))
+                    .flex_shrink_0()
+                    .text_size(ui(11.))
+                    .text_color(if kind == 'U' {
+                        cx.theme().success
+                    } else {
+                        cx.theme().warning
+                    })
+                    .child(mark),
+            )
+            .child(div().flex_1().min_w_0().truncate().child(label))
             .into_any_element()
     }
 
@@ -6928,7 +7423,11 @@ impl Folio {
             .border_color(cx.theme().border)
             .bg(cx.theme().background)
             .when(self.sidebar, |el| {
-                el.child(self.render_tree(cx)).child(
+                el.child(match self.sidebar_kind {
+                    SidebarKind::Tree => self.render_tree(cx),
+                    SidebarKind::Changes => self.render_changes_list(cx),
+                })
+                .child(
                     div()
                         .id("sidebar-resize")
                         .w(px(5.))
@@ -7967,6 +8466,15 @@ impl Render for Folio {
             )
             .on_action(cx.listener(|this, _: &OpenSettings, _, cx| this.show_settings(cx)))
             .on_action(cx.listener(|this, _: &ToggleDiff, window, cx| this.toggle_diff(window, cx)))
+            .on_action(cx.listener(|this, _: &ToggleChanges, _, cx| this.toggle_changes_list(cx)))
+            .on_action(cx.listener(|this, _: &NextHunk, _, cx| this.move_hunk(true, cx)))
+            .on_action(cx.listener(|this, _: &PrevHunk, _, cx| this.move_hunk(false, cx)))
+            .on_action(cx.listener(|this, _: &NextChangeFile, window, cx| {
+                this.move_change_file(true, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &PrevChangeFile, window, cx| {
+                this.move_change_file(false, window, cx)
+            }))
             .on_action(
                 cx.listener(|this, _: &ToggleBlame, window, cx| this.toggle_blame(window, cx)),
             )
@@ -9769,6 +10277,106 @@ mod tests {
             assert!(app.menu.is_none());
             // And the editor is what the area shows again.
             let _ = app.render(window, cx);
+        });
+    }
+
+    #[gpui::test]
+    fn the_changes_list_opens_a_file_and_can_split(cx: &mut TestAppContext) {
+        use std::process::Command;
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let git = |args: &[&str]| {
+            Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        assert!(git(&["init", "-q"]).status.success());
+        let file = root.join("main.rs");
+        let extra = root.join("extra.rs");
+        std::fs::write(&file, "let one = 1;\nlet two = 2;\n").unwrap();
+        std::fs::write(&extra, "fn extra() {}\n").unwrap();
+        assert!(git(&["add", "."]).status.success());
+        assert!(
+            git(&[
+                "-c",
+                "user.name=Folio Test",
+                "-c",
+                "user.email=test@localhost",
+                "commit",
+                "-qm",
+                "fixture"
+            ])
+            .status
+            .success()
+        );
+        std::fs::write(&file, "let one = 1;\nlet two = 22;\n").unwrap();
+        std::fs::write(&extra, "fn extra() {}\nfn more() {}\n").unwrap();
+
+        cx.update(gpui_component::init);
+        let cx = cx.add_empty_window();
+        let view = cx.update(|window, cx| {
+            cx.new(|cx| {
+                let mut app = Folio::new(window, cx);
+                app.recent_task = None;
+                app.recent_file = root.join("recent.json");
+                app.settings_file = root.join("settings.json");
+                app.window_file = root.join("window.json");
+                app.settings = Settings::default();
+                app.applied_ignored = app.settings.ignored.clone();
+                app
+            })
+        });
+        view.update_in(cx, |app, window, cx| {
+            app.request(Next::Open(root.clone()), window, cx)
+        });
+        cx.run_until_parked();
+
+        view.update(cx, |app, cx| {
+            app.toggle_changes_list(cx);
+            assert_eq!(app.sidebar_kind, SidebarKind::Changes);
+            assert!(app.sidebar);
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |app, window, cx| {
+            let files = app.changed_files();
+            assert!(
+                files.iter().any(|(path, _)| path == &file)
+                    && files.iter().any(|(path, _)| path == &extra),
+                "both dirty files show in the list: {files:?}"
+            );
+            app.open_changed_file(file.clone(), window, cx);
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |app, _, cx| {
+            {
+                let shown = app.project.diff.as_ref().expect("the file's diff is on");
+                assert_eq!(shown.path, file);
+                assert!(shown.lines.iter().any(|line| {
+                    line.change == diff::Change::Added && line.text == "let two = 22;"
+                }));
+                let replace = shown
+                    .split
+                    .iter()
+                    .find(|row| {
+                        row.old
+                            .as_ref().is_some_and(|cell| cell.text == "let two = 2;")
+                            && row
+                                .new
+                                .as_ref()
+                                .is_some_and(|cell| cell.text == "let two = 22;")
+                    })
+                    .expect("the replace sits on one split row");
+                assert_eq!(replace.old.as_ref().unwrap().change, diff::Change::Removed);
+                assert_eq!(replace.new.as_ref().unwrap().change, diff::Change::Added);
+            }
+            app.set_diff_layout(DiffLayout::Split, cx);
+            assert_eq!(app.diff_layout, DiffLayout::Split);
+            app.move_hunk(true, cx);
+            assert_eq!(app.project.diff.as_ref().unwrap().hunk, 0);
         });
     }
 

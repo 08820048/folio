@@ -22,6 +22,7 @@ pub enum FolioIcon {
     PanelLeftDashed,
     PanelRightDashed,
     SquareTerminal,
+    GitCompare,
 }
 
 impl IconNamed for FolioIcon {
@@ -30,6 +31,7 @@ impl IconNamed for FolioIcon {
             Self::PanelLeftDashed => "icons/panel-left-dashed.svg".into(),
             Self::PanelRightDashed => "icons/panel-right-dashed.svg".into(),
             Self::SquareTerminal => "icons/square-terminal.svg".into(),
+            Self::GitCompare => "icons/git-compare.svg".into(),
         }
     }
 }
@@ -47,6 +49,10 @@ const ICONS: &[(&str, &[u8])] = &[
     (
         "icons/square-terminal.svg",
         include_bytes!("../assets/icons/square-terminal.svg"),
+    ),
+    (
+        "icons/git-compare.svg",
+        include_bytes!("../assets/icons/git-compare.svg"),
     ),
 ];
 
@@ -88,6 +94,7 @@ mod tests {
             FolioIcon::PanelLeftDashed,
             FolioIcon::PanelRightDashed,
             FolioIcon::SquareTerminal,
+            FolioIcon::GitCompare,
         ] {
             let path = icon.path();
             assert!(
