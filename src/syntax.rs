@@ -44,7 +44,61 @@
 //! because the crate shares one query that does not compile against the
 //! interface grammar.
 
-use gpui_component::highlighter::{LanguageConfig, LanguageRegistry};
+use folio::buffer;
+use gpui::HighlightStyle;
+use gpui_component::{
+    Rope,
+    highlighter::{HighlightTheme, LanguageConfig, LanguageRegistry, SyntaxHighlighter},
+};
+use std::{collections::HashMap, ops::Range, path::Path};
+
+/// Tree-sitter colors for each 1-based line of `text`, using the same
+/// grammar the editor would pick for `path`. Empty when the file is plain
+/// text, too large, or has no grammar.
+pub fn line_styles(
+    path: &Path,
+    text: &str,
+    theme: &HighlightTheme,
+) -> HashMap<u32, Vec<(Range<usize>, HighlightStyle)>> {
+    if text.is_empty() || text.len() > buffer::HIGHLIGHT_LIMIT {
+        return HashMap::new();
+    }
+    let language = buffer::language(path);
+    if language == "text" {
+        return HashMap::new();
+    }
+    let mut highlighter = SyntaxHighlighter::new(language);
+    highlighter.update(None, &Rope::from_str(text), None);
+    assign_styles_to_lines(text, &highlighter.styles(&(0..text.len()), theme))
+}
+
+/// Map file-absolute highlight ranges onto each source line, so a diff
+/// row can paint without knowing the rest of the file.
+fn assign_styles_to_lines(
+    text: &str,
+    styles: &[(Range<usize>, HighlightStyle)],
+) -> HashMap<u32, Vec<(Range<usize>, HighlightStyle)>> {
+    let mut map = HashMap::new();
+    let mut byte = 0;
+    for (number, line) in (1u32..).zip(text.split_inclusive('\n')) {
+        let content = line.trim_end_matches(['\r', '\n']);
+        let start = byte;
+        let end = start + content.len();
+        let mut runs = Vec::new();
+        for (range, style) in styles {
+            let lo = range.start.max(start);
+            let hi = range.end.min(end);
+            if lo < hi {
+                runs.push((lo - start..hi - start, *style));
+            }
+        }
+        if !runs.is_empty() {
+            map.insert(number, runs);
+        }
+        byte += line.len();
+    }
+    map
+}
 
 /// A grammar and the Tree-sitter queries that highlight it.
 struct Grammar {
@@ -252,6 +306,35 @@ mod tests {
     /// `SyntaxHighlighter::new` silently falls back to `text` when a query does
     /// not compile, which would leave a language looking "supported" but
     /// unhighlighted. Assert the round trip instead.
+    #[test]
+    fn styles_land_on_the_line_they_cover() {
+        let color = HighlightStyle {
+            color: Some(gpui::hsla(0.5, 0.5, 0.5, 1.0)),
+            ..Default::default()
+        };
+        // "ab\ncd" — paint the `b` and the `c`.
+        let styles = assign_styles_to_lines("ab\ncd", &[(1..2, color), (3..4, color)]);
+        assert_eq!(styles[&1], vec![(1..2, color)]);
+        assert_eq!(styles[&2], vec![(0..1, color)]);
+    }
+
+    #[test]
+    fn a_rust_file_gets_keyword_colors() {
+        register_extra_languages();
+        let styles = line_styles(
+            Path::new("main.rs"),
+            "fn main() {}\n",
+            &HighlightTheme::default_dark(),
+        );
+        let line = &styles[&1];
+        assert!(
+            line.iter().any(|(range, style)| {
+                range.start == 0 && range.end == 2 && style.color.is_some()
+            }),
+            "`fn` should be a colored keyword, got {line:?}"
+        );
+    }
+
     #[test]
     fn every_registered_grammar_compiles_its_highlight_query() {
         register_extra_languages();

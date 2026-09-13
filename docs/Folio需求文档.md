@@ -231,7 +231,7 @@ AI 写代码已经很普遍，开发者更多是：**打开仓库、读懂改动
 
 - 菜单条 `git-compare`（`⇧⌘G`）打开当前项目的改动列表：dirty / untracked，点开即该文件的 diff
 - `⇧⌘D` 打开当前文件的改动视图。标题栏可切 Unified / Split，以及对比 `HEAD` 或主分支（`origin/HEAD` → `main` → `master`）
-- Split 把替换行左右对齐；纯增左空、纯删右空。`F7` / `⇧F7` 跳 hunk
+- Split 把替换行左右对齐；纯增左空、纯删右空。`F7` / `⇧F7` 跳 hunk。行内用和编辑器同一套 Tree-sitter 高亮（旧侧对 `base` 的文本，新侧对工作区）
 - 未跟踪文件整篇按新增显示；不在仓库或缺 git 时提示无内容可看
 - 计数按行数，改一行读作「删一行、加一行」
 - 不做 commit / push / staging / 解决冲突

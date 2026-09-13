@@ -208,6 +208,29 @@ pub fn review_branch(root: &Path) -> Option<String> {
     None
 }
 
+/// The file as `base` knew it (`HEAD:src/app.rs`). None if that revision
+/// never had the path — a new file, or a name git will not show.
+pub fn show_file(root: &Path, base: &str, path: &Path) -> Option<String> {
+    let relative = path.strip_prefix(root).ok()?;
+    let relative = relative.to_string_lossy().replace('\\', "/");
+    if base.is_empty() || relative.is_empty() || base.starts_with('-') || relative.starts_with('-') {
+        return None;
+    }
+    let spec = format!("{base}:{relative}");
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .arg("show")
+        .arg(&spec)
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout).ok()
+}
+
 fn git_stdout(root: &Path, args: &[&str]) -> Option<String> {
     let output = Command::new("git")
         .arg("-C")
@@ -262,6 +285,11 @@ mod tests {
             name == "main" || name == "master",
             "unexpected default branch {name}"
         );
+        assert_eq!(
+            show_file(root, "HEAD", &root.join("a")).as_deref(),
+            Some("a\n")
+        );
+        assert!(show_file(root, "HEAD", &root.join("missing")).is_none());
     }
 
     #[test]

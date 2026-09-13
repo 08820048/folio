@@ -1,4 +1,5 @@
 use crate::assets::FolioIcon;
+use crate::syntax;
 use crate::preview::{self, Content};
 use crate::terminal_view::TerminalView;
 use folio::{
@@ -21,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     io,
+    ops::Range,
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -881,6 +883,13 @@ struct DiffView {
     /// Bumped per request, so a slow `git` for a file the user has moved on
     /// from does not land on top of the newer one.
     request: u64,
+    /// Working tree and `base` texts, kept so a theme change can recolor
+    /// without asking git again.
+    old_text: Option<String>,
+    new_text: Option<String>,
+    /// 1-based line → highlight runs, relative to that line.
+    old_styles: HashMap<u32, Vec<(Range<usize>, HighlightStyle)>>,
+    new_styles: HashMap<u32, Vec<(Range<usize>, HighlightStyle)>>,
 }
 
 /// Which way two panes sit. One axis at a time: Folio is still two panes.
@@ -1288,6 +1297,7 @@ impl Folio {
             cx.observe_window_appearance(window, |this: &mut Self, window, cx| {
                 this.appearance = window.appearance();
                 sync_appearance(this.appearance, &this.settings, Some(window), cx);
+                this.recolor_diff(cx);
                 cx.notify();
             });
         let query = cx
@@ -3931,8 +3941,20 @@ impl Folio {
             ..DiffView::default()
         });
         cx.notify();
+        let theme = cx.theme().highlight_theme.clone();
         let task = cx.background_executor().spawn(async move {
-            diff::for_file_against(&workspace.root, &path, &base)
+            let diff = diff::for_file_against(&workspace.root, &path, &base)?;
+            let new_text = buffer::read(&path).ok();
+            let old_text = git::show_file(&workspace.root, &base, &path);
+            let new_styles = new_text
+                .as_deref()
+                .map(|text| syntax::line_styles(&path, text, &theme))
+                .unwrap_or_default();
+            let old_styles = old_text
+                .as_deref()
+                .map(|text| syntax::line_styles(&path, text, &theme))
+                .unwrap_or_default();
+            Ok::<_, io::Error>((diff, old_text, new_text, old_styles, new_styles))
         });
         cx.spawn_in(window, async move |this, cx| {
             let result = task.await;
@@ -3950,10 +3972,14 @@ impl Folio {
                 }
                 view.loading = false;
                 match result {
-                    Ok(diff) => {
+                    Ok((diff, old_text, new_text, old_styles, new_styles)) => {
                         view.split = diff::split_rows(&diff.lines);
                         view.lines = diff.lines;
                         view.untracked = diff.untracked;
+                        view.old_text = old_text;
+                        view.new_text = new_text;
+                        view.old_styles = old_styles;
+                        view.new_styles = new_styles;
                         view.error = None;
                         view.hunk = 0;
                     }
@@ -3963,6 +3989,25 @@ impl Folio {
             });
         })
         .detach();
+    }
+
+    /// Paint the open diff again after the highlight theme changes.
+    fn recolor_diff(&mut self, cx: &App) {
+        let Some(view) = self.project.diff.as_mut() else {
+            return;
+        };
+        let theme = cx.theme().highlight_theme.clone();
+        let path = view.path.clone();
+        view.old_styles = view
+            .old_text
+            .as_deref()
+            .map(|text| syntax::line_styles(&path, text, &theme))
+            .unwrap_or_default();
+        view.new_styles = view
+            .new_text
+            .as_deref()
+            .map(|text| syntax::line_styles(&path, text, &theme))
+            .unwrap_or_default();
     }
 
     /// The open files, as a strip above the editor. Always drawn so the
@@ -4447,7 +4492,7 @@ impl Folio {
                     .text_color(cx.theme().muted_foreground)
                     .child(marker),
             )
-            .child(div().flex_1().min_w_0().truncate().child(text.to_string()))
+            .child(self.render_diff_text(text, number, old))
             .into_any_element()
     }
 
@@ -4525,7 +4570,38 @@ impl Folio {
                     .text_color(cx.theme().muted_foreground)
                     .child(marker),
             )
-            .child(div().flex_1().min_w_0().truncate().child(line.text.clone()))
+            .child(self.render_diff_text(
+                &line.text,
+                match line.change {
+                    diff::Change::Removed => line.old,
+                    _ => line.new.or(line.old),
+                },
+                line.change == diff::Change::Removed,
+            ))
+            .into_any_element()
+    }
+
+    /// One diff line, colored like the editor. Hunk headers stay muted.
+    fn render_diff_text(&self, text: &str, number: Option<u32>, old: bool) -> AnyElement {
+        let styles = number.and_then(|number| {
+            let view = self.project.diff.as_ref()?;
+            let map = if old {
+                &view.old_styles
+            } else {
+                &view.new_styles
+            };
+            map.get(&number)
+        });
+        div()
+            .flex_1()
+            .min_w_0()
+            .truncate()
+            .child(match styles {
+                Some(styles) if !styles.is_empty() => StyledText::new(text.to_string())
+                    .with_highlights(styles.iter().cloned())
+                    .into_any_element(),
+                _ => text.to_string().into_any_element(),
+            })
             .into_any_element()
     }
 
@@ -11564,6 +11640,19 @@ mod tests {
             assert!(shown.lines.iter().any(|line| {
                 line.change == diff::Change::Removed && line.text == "let two = 2;"
             }));
+            let added = shown
+                .lines
+                .iter()
+                .find(|line| line.change == diff::Change::Added)
+                .expect("the new line");
+            let styles = shown
+                .new_styles
+                .get(&added.new.expect("added lines are numbered"))
+                .expect("the new side is highlighted");
+            assert!(
+                styles.iter().any(|(_, style)| style.color.is_some()),
+                "diff lines use the same colors as the editor"
+            );
             // The editor area draws the list instead of the editor.
             let _ = app.render(window, cx);
         });
