@@ -198,6 +198,28 @@ fn tree_row_indent(depth: usize) -> Pixels {
     px(TREE_ROW_PAD + depth as f32 * TREE_ROW_INDENT)
 }
 
+/// Selected file-tree row. Lighter than `list_active`, so the pill does
+/// not read as a grey slab on the white sidebar.
+fn tree_row_selected(cx: &App) -> Hsla {
+    rgb(if cx.theme().is_dark() {
+        0x24282A
+    } else {
+        0xF6F6F6
+    })
+    .into()
+}
+
+/// Hairline around a selected tree row. Close to the fill, so it keeps
+/// the rounded shape without a second, darker grey.
+fn tree_row_selected_border(cx: &App) -> Hsla {
+    rgb(if cx.theme().is_dark() {
+        0x2E3335
+    } else {
+        0xEFEFEF
+    })
+    .into()
+}
+
 /// Horizontal position of the indent guide for nesting `level`.
 /// Centered in that level's gutter so the line sits under the parent's icon.
 fn tree_guide_x(level: usize) -> Pixels {
@@ -206,19 +228,30 @@ fn tree_guide_x(level: usize) -> Pixels {
 
 /// The guide that marks the folder containing `index`: first child row,
 /// end (exclusive), and indent level. The parent row itself does not
-/// carry this line — same as Zed.
+/// carry this line — same as Zed. The project root is drawn as a header
+/// outside these rows, so its children have no parent row; their guide
+/// still runs through the flattened list.
 fn tree_active_guide(rows: &[Row], index: usize) -> Option<(usize, usize, usize)> {
     let depth = rows.get(index)?.depth;
     if depth == 0 {
         return None;
     }
     let level = depth - 1;
-    let parent = (0..=index).rev().find(|&i| rows[i].depth == level)?;
-    let mut end = parent + 1;
-    while end < rows.len() && rows[end].depth > level {
-        end += 1;
+    if let Some(parent) = (0..=index).rev().find(|&i| rows[i].depth == level) {
+        let mut end = parent + 1;
+        while end < rows.len() && rows[end].depth > level {
+            end += 1;
+        }
+        Some((parent + 1, end, level))
+    } else if level == 0 {
+        let mut end = 0;
+        while end < rows.len() && rows[end].depth > 0 {
+            end += 1;
+        }
+        Some((0, end, 0))
+    } else {
+        None
     }
-    Some((parent + 1, end, level))
 }
 
 fn tree_guide_elements(
@@ -285,6 +318,18 @@ mod tree_guide_tests {
             tree_guide_x(1),
             px(TREE_ROW_PAD + TREE_ROW_INDENT / 2. + TREE_ROW_INDENT)
         );
+    }
+
+    #[core::prelude::v1::test]
+    fn tree_active_guide_covers_children_of_the_project_header() {
+        // The project root is a separate header, so flattening starts at 1:
+        // src/       1
+        //   app.rs   2
+        // README     1
+        let rows: Vec<Row> = [1, 2, 1].into_iter().map(row_at).collect();
+        assert_eq!(tree_active_guide(&rows, 0), Some((0, 3, 0)));
+        assert_eq!(tree_active_guide(&rows, 1), Some((1, 2, 1)));
+        assert_eq!(tree_active_guide(&rows, 2), Some((0, 3, 0)));
     }
 }
 
@@ -496,6 +541,7 @@ enum MenuItem {
     Rename,
     Trash,
     Delete,
+    RemoveProject,
     // The changes view.
     HideChanges,
     // The tab strip.
@@ -572,8 +618,9 @@ const TREE_MENU: &[(MenuItem, &str, &str)] = &[
     // The two Finder bindings, so the destructive one carries the extra key.
     (MenuItem::Trash, "Move to Trash", "⌘⌫"),
     (MenuItem::Delete, "Delete Immediately", "⌥⌘⌫"),
+    (MenuItem::RemoveProject, "Remove Project", "⌘W"),
 ];
-const TREE_SEPARATORS: &[usize] = &[2, 5, 6, 10, 11];
+const TREE_SEPARATORS: &[usize] = &[2, 5, 6, 10, 11, 13];
 
 const CHANGES_MENU: &[(MenuItem, &str, &str)] =
     &[(MenuItem::HideChanges, "Hide File Changes", "⌘⇧D")];
@@ -631,11 +678,17 @@ fn surface_of(target: &MenuTarget) -> Surface {
 }
 
 impl MenuItem {
-    /// The project root is the workspace's identity: `project_order`, the
-    /// recent list and every cached path key off it, so the tree offers no way
-    /// to rename or remove it.
+    /// The project root is the workspace's identity: `project_order` and every
+    /// cached path key off it, so the tree will not rename or delete that
+    /// folder. Removing the project from the list is the one exception.
     fn applies_to_root(self) -> bool {
         !matches!(self, MenuItem::Rename | MenuItem::Trash | MenuItem::Delete)
+    }
+
+    /// Folders inside a project keep the disk actions; taking a project off
+    /// the list only belongs on the project header.
+    fn applies_to_entry(self) -> bool {
+        !matches!(self, MenuItem::RemoveProject)
     }
 }
 
@@ -644,7 +697,8 @@ const MENU_WIDTH: f32 = 228.;
 const MENU_ROW: f32 = 26.;
 
 /// The indices into the target's own menu that it shows. The project root
-/// drops the entries that would rename or remove it.
+/// drops the entries that would rename or delete it; a folder drops the
+/// entry that would take a project off the list.
 fn visible_menu_items(target: &MenuTarget) -> Vec<usize> {
     let root = matches!(target, MenuTarget::Tree { root: true, .. });
     surface_of(target)
@@ -652,7 +706,13 @@ fn visible_menu_items(target: &MenuTarget) -> Vec<usize> {
         .0
         .iter()
         .enumerate()
-        .filter(|(_, (item, _, _))| !root || item.applies_to_root())
+        .filter(|(_, (item, _, _))| {
+            if root {
+                item.applies_to_root()
+            } else {
+                item.applies_to_entry()
+            }
+        })
         .map(|(index, _)| index)
         .collect()
 }
@@ -2301,7 +2361,7 @@ impl Folio {
         {
             flatten(
                 &workspace.root,
-                0,
+                1,
                 &self.project.directories,
                 &self.project.expanded,
                 &mut self.project.rows,
@@ -2345,8 +2405,8 @@ impl Folio {
                         .position(|row| row.entry.path == parent);
                     match (parent_row, &self.project.workspace) {
                         (Some(index), _) => (index + 1, self.project.rows[index].depth + 1),
-                        (None, Some(workspace)) if parent == workspace.root => (0, 0),
-                        (None, _) => (self.project.rows.len(), 0),
+                        (None, Some(workspace)) if parent == workspace.root => (0, 1),
+                        (None, _) => (self.project.rows.len(), 1),
                     }
                 }
             };
@@ -3176,6 +3236,17 @@ impl Folio {
             }
             MenuItem::Trash => self.spawn_removal(path, true, window, cx),
             MenuItem::Delete => self.confirm_removal(path, false, window, cx),
+            MenuItem::RemoveProject => {
+                if self
+                    .project
+                    .workspace
+                    .as_ref()
+                    .is_some_and(|workspace| workspace.root != path)
+                {
+                    self.switch_project(&path, window, cx);
+                }
+                self.request(Next::Close, window, cx);
+            }
             MenuItem::Reveal => {
                 let target = path.clone();
                 self.spawn_launch(move || fs_op::reveal(&target), cx);
@@ -7368,7 +7439,7 @@ impl Folio {
                             .gap_2()
                             .text_size(ui(12.))
                             .cursor_default()
-                            .when(selected, |el| el.bg(cx.theme().list_active))
+                            .when(selected, |el| el.bg(tree_row_selected(cx)))
                             .when(!selected, |el| el.hover(|el| el.bg(cx.theme().list_hover)))
                             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                                 if *hovered {
@@ -7453,14 +7524,14 @@ impl Folio {
                                     },
                                 ))
                             })
-                            .when(selected && cx.theme().list.active_highlight, |el| {
+                            .when(selected, |el| {
                                 el.child(
                                     div()
                                         .absolute()
                                         .inset_0()
                                         .rounded(radius)
                                         .border_1()
-                                        .border_color(cx.theme().list_active_border),
+                                        .border_color(tree_row_selected_border(cx)),
                                 )
                             })
                             .into_any_element()
@@ -13064,6 +13135,13 @@ mod tests {
 
         view.update_in(cx, |app, window, cx| {
             assert!(
+                app.project
+                    .rows
+                    .iter()
+                    .any(|row| row.entry.path == src && row.depth == 1),
+                "the first folder under the project header is indented"
+            );
+            assert!(
                 !app.menu_item_enabled(MenuItem::Paste, &root),
                 "paste stays disabled until something is on the clipboard"
             );
@@ -13082,9 +13160,11 @@ mod tests {
             assert_eq!(edit.kind, EntryKind::File);
             assert_eq!(edit.parent, src);
             // The field is spliced in as the folder's first child, one level
-            // deeper than the folder's own row.
+            // deeper than the folder's own row. The folder itself sits at
+            // depth 1 because the project root is a separate header.
             assert_eq!(app.project.rows[edit.row - 1].entry.path, src);
-            assert_eq!(app.project.rows[edit.row].depth, 1);
+            assert_eq!(app.project.rows[edit.row - 1].depth, 1);
+            assert_eq!(app.project.rows[edit.row].depth, 2);
             // That row draws a text field instead of an entry; render it too.
             let _ = app.render(window, cx);
         });
@@ -13178,7 +13258,8 @@ mod tests {
         });
 
         // The project root is the workspace's identity, so its menu drops the
-        // entries that would rename or remove it.
+        // entries that would rename or delete that folder. Removing it from
+        // the project list is offered there, and only there.
         let labels = |target: &MenuTarget| {
             visible_menu_items(target)
                 .into_iter()
@@ -13201,6 +13282,14 @@ mod tests {
                 "{dropped} inside a folder"
             );
         }
+        assert!(
+            tree_labels(true).contains(&"Remove Project"),
+            "the root can leave the project list"
+        );
+        assert!(
+            !tree_labels(false).contains(&"Remove Project"),
+            "a folder is not a project"
+        );
         // The changes view offers the way out and nothing the tree has.
         let changes = labels(&MenuTarget::Changes {
             path: PathBuf::new(),
@@ -13295,6 +13384,17 @@ mod tests {
                 "a successful delete reports back instead of erroring"
             );
         });
+
+        // Removing a project takes it off the list and leaves the folder.
+        view.update_in(cx, |app, window, cx| {
+            app.project.documents.get_mut(&core).unwrap().dirty = false;
+            open_tree_menu(app, &root, true, window, cx);
+            app.run_menu_item(MenuItem::RemoveProject, window, cx);
+            assert!(app.project.workspace.is_none());
+            assert!(app.project_order.is_empty());
+        });
+        assert!(src.is_dir(), "remove must not delete the project folder");
+        assert!(core.is_file(), "remove must not delete files inside it");
     }
 
     #[gpui::test]
