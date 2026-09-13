@@ -29,8 +29,9 @@ open target/Folio.app
 
 Pass `--debug` for a development build. The packaging script signs ad-hoc for
 this machine only; distribution signing and notarization are not set up.
-It generates the Mac application icon from `assets/app-icon/folio-03-code-bookmark-1024.png`,
-including standard and Retina sizes, and embeds it in the signed bundle.
+It generates the Mac application icon from `assets/app-icon/logo-1024.png`
+(the 1024 master of `assets/app-icon/logo.jpg`), including standard and
+Retina sizes, and embeds it in the signed bundle.
 
 ## Usage
 

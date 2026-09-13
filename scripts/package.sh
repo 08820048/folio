@@ -10,8 +10,9 @@ else
 fi
 bundle="target/Folio.app"
 mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources"
-icon_source="assets/app-icon/folio-03-code-bookmark-1024.png"
+icon_source="assets/app-icon/logo-1024.png"
 iconset="target/Folio.iconset"
+rm -rf "$iconset"
 mkdir -p "$iconset"
 for size in 16 32 128 256 512; do
     sips -z "$size" "$size" "$icon_source" \
