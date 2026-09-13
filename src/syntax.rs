@@ -5,6 +5,11 @@
 //! registry is public, so more grammars can be added here without patching the
 //! component. This table adds 23 more.
 //!
+//! Two built-ins are also replaced: `.tsx` shipped with only the TypeScript
+//! overlay query (no JS keywords, strings, or JSX tags), and `.json` treated
+//! every bracket and comma as the same punctuation. The replacements live in
+//! `src/queries/`.
+//!
 //! `folio::buffer::language` returns exactly the names registered below, and the
 //! test at the bottom proves each one actually compiles its highlight query.
 //!
@@ -295,6 +300,31 @@ pub fn register_extra_languages() {
             ),
         );
     }
+    replace_queries(
+        registry,
+        "tsx",
+        include_str!("queries/tsx.scm"),
+        include_str!("queries/javascript-injections.scm"),
+    );
+    replace_queries(registry, "json", include_str!("queries/json.scm"), "");
+}
+
+/// Swap the highlight (and optionally injection) query of a built-in
+/// language. The grammar stays the one gpui-component already registered.
+fn replace_queries(
+    registry: &LanguageRegistry,
+    name: &str,
+    highlights: &str,
+    injections: &str,
+) {
+    let Some(mut config) = registry.language(name) else {
+        return;
+    };
+    config.highlights = highlights.to_string().into();
+    if !injections.is_empty() {
+        config.injections = injections.to_string().into();
+    }
+    registry.register(name, &config);
 }
 
 #[cfg(test)]
@@ -333,6 +363,48 @@ mod tests {
             }),
             "`fn` should be a colored keyword, got {line:?}"
         );
+    }
+
+    fn colored(styles: &[(std::ops::Range<usize>, HighlightStyle)], start: usize, end: usize) {
+        assert!(
+            styles
+                .iter()
+                .any(|(range, style)| range.start == start && range.end == end && style.color.is_some()),
+            "expected a color on {start}..{end}, got {styles:?}"
+        );
+    }
+
+    #[test]
+    fn a_tsx_file_highlights_keywords_and_tags() {
+        register_extra_languages();
+        assert_eq!(
+            SyntaxHighlighter::new("tsx").language().as_ref(),
+            "tsx",
+            "the replacement query must compile"
+        );
+        let source = "const App = () => <div />;\n";
+        let styles = line_styles(Path::new("app.tsx"), source, &HighlightTheme::default_dark());
+        let line = &styles[&1];
+        colored(line, 0, 5);
+        let tag = source.find("div").expect("div");
+        colored(line, tag, tag + 3);
+        let ty = source.find("App").expect("App");
+        colored(line, ty, ty + 3);
+    }
+
+    #[test]
+    fn a_json_file_colors_keys_apart_from_values() {
+        register_extra_languages();
+        assert_eq!(
+            SyntaxHighlighter::new("json").language().as_ref(),
+            "json",
+            "the replacement query must compile"
+        );
+        let source = "{\"n\": 1}\n";
+        let styles = line_styles(Path::new("a.json"), source, &HighlightTheme::default_dark());
+        let line = &styles[&1];
+        colored(line, 1, 4);
+        colored(line, 6, 7);
     }
 
     #[test]
@@ -398,6 +470,8 @@ mod tests {
             "a.less",
             "a.ipynb",
             "a.json5",
+            "a.json",
+            "a.tsx",
             "Makefile",
             "CMakeLists.txt",
             "Gemfile",
