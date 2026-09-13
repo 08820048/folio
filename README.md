@@ -17,8 +17,8 @@ cargo run --locked
 
 `rust-toolchain.toml` pins Rust 1.95.0 and rustup installs it on demand. The
 first build downloads dependencies; the app itself never needs the network. The
-code font, JetBrains Mono, is embedded in the binary — its license is
-`assets/OFL.txt`. Interface icons come from the Lucide set bundled with
+code fonts JetBrains Mono, Fira Code and Source Code Pro are embedded in the
+binary. Their licenses are in `assets/OFL.txt` and `assets/fonts/`. Interface icons come from the Lucide set bundled with
 gpui-component, except three that the component library does not ship
 (`panel-left-dashed` / `panel-right-dashed` / `square-terminal`), which are
 vendored in `assets/icons/` under the `LICENSE.txt` in that directory.
@@ -362,7 +362,12 @@ tree and search skip. A heading is not a page itself, so clicking one toggles
 it and clicking a page selects it. Each row is the setting's name and what it
 does stacked on the left and its control flush right, with a hairline
 underneath. Numbers step, two-way choices toggle, and both live in one bordered
-box with its actions split by dividers.
+box with its actions split by dividers. Font pickers are searchable dropdowns:
+the three bundled code fonts come first, followed by installed fonts. The
+interface picker also offers System default. Code starts with JetBrains Mono.
+Existing custom font choices remain listed when reopening settings. Settings
+opens on Editor → Font & Size: Code font updates open editors and the terminal;
+Appearance → Interface font only changes menus, the sidebar and settings.
 
 Changes apply as you make them. Fonts and sizes take effect at once;
 tab size applies to files opened from then on, because the pinned

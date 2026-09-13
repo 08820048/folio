@@ -16,11 +16,14 @@ fn main() {
             gpui_component::init(cx);
             syntax::register_extra_languages();
             gpui_component::set_locale("en");
-            let _ = cx
-                .text_system()
-                .add_fonts(vec![std::borrow::Cow::Borrowed(include_bytes!(
-                    "../assets/JetBrainsMono-Regular.ttf"
-                ))]);
+            if let Err(error) = cx.text_system().add_fonts(
+                BUNDLED_FONTS
+                    .iter()
+                    .map(|(_, bytes)| std::borrow::Cow::Borrowed(*bytes))
+                    .collect(),
+            ) {
+                eprintln!("Could not load bundled fonts: {error}");
+            }
             let modifier = if cfg!(target_os = "macos") {
                 "cmd"
             } else {

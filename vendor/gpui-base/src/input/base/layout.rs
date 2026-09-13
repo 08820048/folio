@@ -12,6 +12,7 @@ pub(crate) struct WhitespaceIndicators {
 
 #[derive(Clone)]
 pub(super) struct LastLayout {
+    pub(super) font: gpui::Font,
     pub(super) visible_range: Range<usize>,
     pub(super) visible_buffer_lines: Vec<usize>,
     pub(super) visible_line_byte_offsets: Vec<usize>,

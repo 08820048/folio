@@ -1857,6 +1857,7 @@ impl Element for TextElement {
         };
 
         let mut last_layout = LastLayout {
+            font: style.font(),
             visible_range,
             visible_buffer_lines,
             visible_line_byte_offsets,

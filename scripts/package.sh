@@ -33,6 +33,9 @@ sparkle_dir=$(sh scripts/sparkle.sh)
 bundle="target/Folio.app"
 rm -rf "$bundle"
 mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources" "$bundle/Contents/Frameworks"
+mkdir -p "$bundle/Contents/Resources/Licenses"
+cp assets/OFL.txt "$bundle/Contents/Resources/Licenses/JetBrainsMono-OFL.txt"
+cp assets/fonts/*-LICENSE.txt "$bundle/Contents/Resources/Licenses/"
 
 icon_source="assets/app-icon/logo-1024.png"
 iconset="target/Folio.iconset"

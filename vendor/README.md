@@ -43,6 +43,13 @@ project's tests are the only net under changes made here. They cover what the
 application does with the editor — typing, selection, undo, the commands this
 project adds — and not the editor's internals at large.
 
+The last input layout also exposes its rendered font through `rendered_font()`,
+so the application regression test can verify a live font switch after painting
+an already-open document (`input/base/layout.rs`, `state.rs`, `element.rs`;
+two layout fixtures in `input/editor/display_map/text_wrapper.rs`).
+`InputBaseState::set_font` is the way a host sets that face: the editor is its
+own view, so a parent `.font_family()` never reaches the text.
+
 ## What this project changed
 
 The diff against the revision that was copied is small, and it is named here
@@ -61,7 +68,8 @@ rather than a read of the whole crate.
   and what they do with a caret the fold has hidden. Escape during an IME
   composition deletes the marked run instead of only dropping the underline.
   `set_context_menu_enabled` is public so Folio can keep the caret move on
-  right-click and draw its own menu instead of the OS one.
+  right-click and draw its own menu instead of the OS one. `set_font` is
+  public so a code editor can paint in the code face rather than the UI face.
 - `input/base/element.rs` — drawing every selection as a path of its own and
   every caret as a quad, in the coordinates the primary's already used.
 - `input/editor/indent.rs` — `line_break_at`: what Enter inserts and where the

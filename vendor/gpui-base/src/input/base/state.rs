@@ -6,7 +6,7 @@ use anyhow::Result;
 use gpui::TextAlign;
 use gpui::{
     Action, App, AppContext, Bounds, ClipboardItem, Context, Edges, Entity, EntityInputHandler,
-    EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement, KeyBinding,
+    EventEmitter, FocusHandle, Focusable, Font, InteractiveElement as _, IntoElement, KeyBinding,
     KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _,
     Pixels, Point, Render, ScrollHandle, ScrollWheelEvent, SharedString, Styled as _, Subscription,
     Task, UTF16Selection, Window, actions, div, point, prelude::FluentBuilder as _, px,
@@ -349,6 +349,10 @@ pub struct InputBaseState {
     pub(super) editor_paddings: Edges<Pixels>,
     pub(super) decorations: DecorationCollections,
     pub(super) editor_style: InputEditorStyle,
+    /// Face this view paints with. A parent `.font_family()` does not cross
+    /// the entity boundary, so a code editor has to be told its own face.
+    preferred_font: Option<Font>,
+    preferred_font_size: Option<Pixels>,
 
     /// The mask pattern for formatting the input text
     pub(crate) mask_pattern: MaskPattern,
@@ -502,6 +506,11 @@ impl InputBaseState {
         self.last_bounds
     }
 
+    /// The font used by the most recent text layout, rather than a pending setting.
+    pub fn rendered_font(&self) -> Option<&gpui::Font> {
+        self.last_layout.as_ref().map(|layout| &layout.font)
+    }
+
     pub fn diagnostic_popover(&self) -> Option<Rc<crate::input::DiagnosticEntry>> {
         self.diagnostic_popover.clone()
     }
@@ -631,6 +640,8 @@ impl InputBaseState {
             mask_pattern_set: false,
             decorations: DecorationCollections::default(),
             editor_style: InputEditorStyle::default(),
+            preferred_font: None,
+            preferred_font_size: None,
             lsp: Lsp::default(),
             diagnostic_popover: None,
             context_menu_handler: None,
@@ -710,6 +721,13 @@ impl InputBaseState {
     /// operating system's menu. The host can draw its own.
     pub fn set_context_menu_enabled(&mut self, enabled: bool) {
         self.enable_context_menu = enabled;
+    }
+
+    /// Use this face for the next paint. Needed for code editors, whose text
+    /// lives in this view rather than in the surrounding UI style.
+    pub fn set_font(&mut self, font: Font, font_size: Pixels) {
+        self.preferred_font = Some(font);
+        self.preferred_font_size = Some(font_size);
     }
 
     /// Set this input is searchable, default is false (Default true for Code Editor).
@@ -3375,10 +3393,14 @@ impl Render for InputBaseState {
             self._pending_update = false;
         }
 
+        let font = self.preferred_font.clone();
+        let font_size = self.preferred_font_size;
         div()
             .id("input-state")
             .key_context(CONTEXT)
             .track_focus(&self.focus_handle)
+            .when_some(font, |this, font| this.font(font))
+            .when_some(font_size, |this, size| this.text_size(size))
             .when(self.is_editable(), |this| {
                 this.on_action(window.listener_for(&entity, InputBaseState::backspace))
                     .on_action(window.listener_for(&entity, InputBaseState::delete))

@@ -16,6 +16,7 @@ use gpui_component::{
     ActiveTheme, Disableable, Icon, IconName, Root, Sizable, Theme, TitleBar,
     button::{Button, ButtonVariants},
     input::{self, EditorState, Input, InputBaseState, InputEvent, InputState, Position, TabSize},
+    select::{SearchableVec, Select, SelectEvent, SelectState},
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -82,6 +83,43 @@ const TAB_HEIGHT: f32 = 26.;
 /// short list of ignored folders, and the same everywhere so the fields line
 /// up down the right-hand side.
 const FIELD_WIDTH: f32 = 240.;
+
+pub const BUNDLED_FONTS: &[(&str, &[u8])] = &[
+    (
+        "JetBrains Mono",
+        include_bytes!("../assets/JetBrainsMono-Regular.ttf"),
+    ),
+    (
+        "Fira Code",
+        include_bytes!("../assets/fonts/FiraCode-Regular.ttf"),
+    ),
+    (
+        "Source Code Pro",
+        include_bytes!("../assets/fonts/SourceCodePro-Regular.ttf"),
+    ),
+];
+
+type FontSelect = SelectState<SearchableVec<String>>;
+
+/// Bundled faces first, then installed fonts. Keep an old custom choice even
+/// when it is unavailable on this machine, so another setting cannot erase it.
+fn font_options(mut installed: Vec<String>, current: Option<&str>, code: bool) -> Vec<String> {
+    installed.retain(|name| !name.starts_with('.') && !name.trim().is_empty());
+    installed.extend(current.map(str::to_owned));
+    installed.sort_unstable();
+    installed.dedup();
+    let mut options = Vec::new();
+    if !code {
+        options.push("System default".to_owned());
+    }
+    options.extend(BUNDLED_FONTS.iter().map(|(name, _)| (*name).to_owned()));
+    for name in installed {
+        if !options.contains(&name) {
+            options.push(name);
+        }
+    }
+    options
+}
 
 /// The far-left icon rail. Narrow on purpose: icons only, no labels.
 /// The rail plus the gap before the card must stay at or under 40px.
@@ -3534,6 +3572,18 @@ impl Folio {
             .into()
     }
 
+    /// Code face plus the CJK stack. The editor is its own view, so this has
+    /// to be set on the input state rather than inherited from the window.
+    fn code_typeface(&self) -> Font {
+        Font {
+            family: self.code_font(),
+            fallbacks: Some(FontFallbacks::from_fonts(
+                CJK_FALLBACKS.iter().map(|name| name.to_string()).collect(),
+            )),
+            ..Default::default()
+        }
+    }
+
     /// Keep an open changes view pointed at whatever file is active now, so a
     /// review can walk the tree instead of reopening the view per file.
     fn follow_diff(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -5233,11 +5283,13 @@ impl Folio {
                         });
                         editor.update(cx, |state, cx| {
                             state.prepare(window, cx);
-                            state
-                                .base_state()
-                                .update(cx, |base, cx| {
-                                    base.set_soft_wrap(this.settings.soft_wrap, window, cx)
-                                });
+                            let typeface = this.code_typeface();
+                            let size = px(this.settings.code_font_size);
+                            let wrap = this.settings.soft_wrap;
+                            state.base_state().update(cx, |base, cx| {
+                                base.set_soft_wrap(wrap, window, cx);
+                                base.set_font(typeface, size);
+                            });
                         });
                         let project_id = this.project.id;
                         let subscription =
@@ -8008,7 +8060,7 @@ impl Folio {
             .justify_center()
             .rounded_sm()
             .cursor_pointer()
-            .font_family("JetBrains Mono")
+            .font_family(self.code_font())
             .text_size(ui(11.))
             .text_color(if active {
                 cx.theme().accent_foreground
@@ -8283,7 +8335,7 @@ impl Folio {
                             .w(px(44.))
                             .flex_shrink_0()
                             .text_right()
-                            .font_family("JetBrains Mono")
+                            .font_family(self.code_font())
                             .text_size(ui(11.))
                             .text_color(cx.theme().muted_foreground)
                             .child(format!("{line}")),
@@ -8295,7 +8347,7 @@ impl Folio {
                             .overflow_hidden()
                             .flex()
                             .items_center()
-                            .font_family("JetBrains Mono")
+                            .font_family(self.code_font())
                             .child(div().flex_shrink_0().whitespace_nowrap().child(before))
                             .child(
                                 div()
@@ -8666,8 +8718,11 @@ impl Folio {
                         })
                         .child({
                             let base = doc.editor.read(cx).base_state().clone();
+                            let typeface = self.code_typeface();
+                            let size = px(self.settings.code_font_size);
                             base.update(cx, |state, _| {
                                 state.set_context_menu_enabled(false);
+                                state.set_font(typeface, size);
                             });
                             let menu_path = pane.active.clone().unwrap_or_default();
                             div()
@@ -8699,7 +8754,7 @@ impl Folio {
                                                 || locked,
                                         )
                                         .text_size(px(self.settings.code_font_size))
-                                        .font_family(self.code_font())
+                                        .font(self.code_typeface())
                                         .line_height(gpui::relative(1.6))
                                         .rounded_none()
                                         .h_full(),
@@ -8838,7 +8893,7 @@ impl Page {
     fn title(self) -> &'static str {
         match self {
             Page::Interface => "Interface",
-            Page::Type => "Type",
+            Page::Type => "Font & Size",
             Page::Indentation => "Indentation",
             Page::Sidebar => "Sidebar",
             Page::Ignored => "Ignored Folders",
@@ -8904,8 +8959,8 @@ struct SettingsView {
     /// you chose.
     page: Page,
     expanded: [bool; GROUPS.len()],
-    font_query: Entity<InputState>,
-    code_font_query: Entity<InputState>,
+    font_select: Entity<FontSelect>,
+    code_font_select: Entity<FontSelect>,
     ignore_query: Entity<InputState>,
     _subscriptions: Vec<Subscription>,
 }
@@ -8917,50 +8972,71 @@ impl SettingsView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let font_query = cx.new(|cx| InputState::new(window, cx).placeholder("System default"));
-        let code_font_query =
-            cx.new(|cx| InputState::new(window, cx).placeholder("JetBrains Mono"));
+        let installed = cx.text_system().all_font_names();
+        let mut make_select = |current: &Option<String>, code: bool| {
+            let options = font_options(installed.clone(), current.as_deref(), code);
+            let value = current.clone().unwrap_or_else(|| {
+                if code { "JetBrains Mono" } else { "System default" }.to_owned()
+            });
+            cx.new(|cx| {
+                let mut select = SelectState::new(SearchableVec::new(options), None, window, cx)
+                    .searchable(true);
+                select.set_selected_value(&value, window, cx);
+                select
+            })
+        };
+        let font_select = make_select(&settings.font_family, false);
+        let code_font_select = make_select(&settings.code_font_family, true);
         let ignore_query =
             cx.new(|cx| InputState::new(window, cx).placeholder("node_modules, target"));
-        font_query.update(cx, |input, cx| {
-            input.set_value(settings.font_family.clone().unwrap_or_default(), window, cx)
-        });
-        code_font_query.update(cx, |input, cx| {
-            input.set_value(
-                settings.code_font_family.clone().unwrap_or_default(),
-                window,
-                cx,
-            )
-        });
         ignore_query.update(cx, |input, cx| {
             input.set_value(settings.ignored.join(", "), window, cx)
         });
-        // All three fields settle the same way, and each one re-reads all of
-        // them, so a value typed in one is not dropped by settling another.
-        // Enter and clicking away both count as settled.
-        let subscriptions = [&font_query, &code_font_query, &ignore_query]
-            .into_iter()
-            .map(|input| {
-                cx.subscribe_in(
-                    input,
-                    window,
-                    |this: &mut Self, _, event: &InputEvent, window, cx| {
-                        if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
-                            this.commit_text(window, cx);
-                        }
-                    },
-                )
-            })
-            .collect();
+        let mut subscriptions = vec![cx.subscribe_in(
+            &ignore_query,
+            window,
+            |this: &mut Self, _, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                    this.commit_text(window, cx);
+                }
+            },
+        )];
+        for (select, code) in [(&font_select, false), (&code_font_select, true)] {
+            subscriptions.push(cx.subscribe_in(
+                select,
+                window,
+                move |this: &mut Self, _, event: &SelectEvent<SearchableVec<String>>, _, cx| {
+                    let SelectEvent::Confirm(Some(value)) = event else {
+                        return;
+                    };
+                    let default = if code {
+                        "JetBrains Mono"
+                    } else {
+                        "System default"
+                    };
+                    let family = (value != default).then(|| value.clone());
+                    this.change(
+                        move |settings| {
+                            if code {
+                                settings.code_font_family = family;
+                            } else {
+                                settings.font_family = family;
+                            }
+                        },
+                        cx,
+                    );
+                },
+            ));
+        }
         Self {
             folio,
             settings,
-            page: Page::Interface,
+            page: Page::Type,
             // Open to begin with: five pages do not need hiding, and a tree
             // that starts folded reads as a list of nothing.
             expanded: [true; GROUPS.len()],
-            font_query,
-            code_font_query,
+            font_select,
+            code_font_select,
             ignore_query,
             _subscriptions: subscriptions,
         }
@@ -8991,16 +9067,11 @@ impl SettingsView {
         cx.notify();
     }
 
-    /// Pull the text fields into the settings. All three are read together, so
-    /// committing one does not drop what was typed in another.
-    fn commit_text(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let font = self.font_query.read(cx).value().trim().to_string();
-        let code_font = self.code_font_query.read(cx).value().trim().to_string();
+    /// Committing the ignore list never changes the font selections.
+    fn commit_text(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         let ignored = self.ignore_query.read(cx).value().to_string();
         self.change(
             move |settings| {
-                settings.font_family = (!font.is_empty()).then_some(font);
-                settings.code_font_family = (!code_font.is_empty()).then_some(code_font);
                 settings.ignored = ignored
                     .split(',')
                     .map(|name| name.trim().to_string())
@@ -9009,7 +9080,22 @@ impl SettingsView {
             },
             cx,
         );
-        let _ = window;
+    }
+
+    fn font_picker(&self, select: &Entity<FontSelect>, label: &'static str) -> AnyElement {
+        div()
+            .id(label)
+            .role(Role::Group)
+            .aria_label(label)
+            .w(px(FIELD_WIDTH))
+            .child(
+                Select::new(select)
+                    .small()
+                    .search_placeholder("Search fonts…")
+                    .menu_width(px(300.))
+                    .menu_max_h(px(280.)),
+            )
+            .into_any_element()
     }
 
     /// A row: a fixed-width label, then the control.
@@ -9367,9 +9453,9 @@ impl SettingsView {
             .children(match page {
                 Page::Interface => vec![
                     Self::row(
-                        "Font",
-                        "Used for menus, the sidebar and the settings window.",
-                        self.field(&self.font_query),
+                        "Interface font",
+                        "Menus, the sidebar and settings. Does not change code.",
+                        self.font_picker(&self.font_select, "Interface font"),
                         cx,
                     ),
                     Self::row(
@@ -9386,9 +9472,9 @@ impl SettingsView {
                 ],
                 Page::Type => vec![
                     Self::row(
-                        "Font",
-                        "Used in the editor. Glyphs it has no coverage for fall back to a CJK face.",
-                        self.field(&self.code_font_query),
+                        "Code font",
+                        "Updates open files and the terminal immediately.",
+                        self.font_picker(&self.code_font_select, "Code font"),
                         cx,
                     ),
                     Self::row(
@@ -9405,8 +9491,8 @@ impl SettingsView {
                         cx,
                     ),
                     Self::row(
-                        "Size",
-                        "How large code is drawn.",
+                        "Code size",
+                        "Updates the code in open files immediately.",
                         self.stepper(
                             "code-size",
                             format!("{:.0}", settings.code_font_size),
@@ -9489,8 +9575,19 @@ impl SettingsView {
 }
 
 impl Render for SettingsView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let settings = self.settings.clone();
+        for (select, family, default) in [
+            (&self.font_select, &settings.font_family, "System default"),
+            (&self.code_font_select, &settings.code_font_family, "JetBrains Mono"),
+        ] {
+            let value = family.as_deref().unwrap_or(default);
+            if select.read(cx).selected_value().map(String::as_str) != Some(value) {
+                select.update(cx, |select, cx| {
+                    select.set_selected_value(&value.to_owned(), window, cx);
+                });
+            }
+        }
         div()
             .id("settings")
             .key_context("FolioSettings")
@@ -13180,6 +13277,14 @@ mod tests {
         });
     }
 
+    #[test]
+    fn font_choices_keep_bundled_fonts_first_and_custom_fonts_available() {
+        let options = font_options(vec!["Menlo".into(), "Fira Code".into(), "Menlo".into(), ".Hidden".into()], Some("Custom Mono"), true);
+        assert_eq!(&options[..3], &["JetBrains Mono", "Fira Code", "Source Code Pro"]);
+        assert_eq!(&options[3..], &["Custom Mono", "Menlo"]);
+        assert_eq!(font_options(vec![], None, false)[0], "System default");
+    }
+
     /// The settings form end to end: what a change writes to disk and how it
     /// reaches the tree. `show_settings` itself is not covered — opening a
     /// window needs a real platform window, which the test harness does not
@@ -13212,6 +13317,14 @@ mod tests {
         });
         cx.run_until_parked();
 
+        view.update_in(cx, |app, window, cx| app.open_file(src.join("main.rs"), window, cx));
+        cx.run_until_parked();
+        let open_editor = view.update_in(cx, |app, _, cx| {
+            app.project.documents[&src.join("main.rs")].editor.read(cx).base_state().clone()
+        });
+        cx.update(|window, _| window.blur());
+
+
         // The settings form, wired to the app view the way the window wires it.
         let settings = view.update_in(cx, |app, window, cx| {
             let folio = cx.entity().downgrade();
@@ -13223,7 +13336,7 @@ mod tests {
         // Every page builds, not just the one it opens on, with headings both
         // open and closed; the harness never draws on its own.
         settings.update_in(cx, |view, window, cx| {
-            assert_eq!(view.page, Page::Interface);
+            assert_eq!(view.page, Page::Type);
             assert!(view.expanded.iter().all(|open| *open));
             for collapsed in [false, true] {
                 view.expanded = [collapsed; GROUPS.len()];
@@ -13261,19 +13374,86 @@ mod tests {
             assert_eq!(app.settings.font_size, settings::FONT_SIZE.1);
         });
 
-        // The text fields settle together, so a value typed in one is not lost
-        // by settling another.
+        // Confirming a dropdown applies the family and persists it. Exercise
+        // the same event as mouse/keyboard confirmation, including defaults.
+        for family in ["Fira Code", "Source Code Pro", "JetBrains Mono"] {
+            settings.update_in(cx, |view, window, cx| {
+                view.code_font_select.update(cx, |select, cx| {
+                    select.set_selected_value(&family.to_owned(), window, cx);
+                    cx.emit(SelectEvent::Confirm(Some(family.to_owned())));
+                });
+            });
+            cx.run_until_parked();
+            let stored = settings::load(&root.join("settings.json")).unwrap();
+            assert_eq!(stored.code_font_family.as_deref(),
+                (family != "JetBrains Mono").then_some(family));
+            view.update_in(cx, |app, _, cx| {
+                assert_eq!(app.code_font().as_ref(), family);
+                assert_eq!(cx.theme().mono_font_family.as_ref(), family);
+            });
+            // Draw the same open document after changing the dropdown, then
+            // compare actual glyph geometry with the selected font's metrics.
+            cx.draw(point(px(0.), px(0.)), size(px(800.), px(500.)), |_, _| {
+                div().w(px(800.)).h(px(500.)).child(view.clone())
+            });
+            cx.update(|window, cx| {
+                assert_eq!(open_editor.read(cx).rendered_font().unwrap().family.as_ref(), family);
+                let actual = open_editor.read(cx).range_to_bounds(&(0..5))
+                    .expect("the open code must have been painted").size.width;
+                let run = TextRun {
+                    len: 5,
+                    font: gpui::font(family),
+                    color: gpui::black(),
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                };
+                let expected = window.text_system().shape_line("// hi".into(), px(14.), &[run], None).width;
+                assert!((f32::from(actual - expected)).abs() < 0.1,
+                    "{family}: painted {actual:?}, expected {expected:?}");
+            });
+        }
+
         settings.update_in(cx, |view, window, cx| {
-            let code_font = view.code_font_query.clone();
-            let ignore = view.ignore_query.clone();
-            code_font.update(cx, |input, cx| input.set_value("Geist Mono", window, cx));
-            ignore.update(cx, |input, cx| input.set_value("src, notes", window, cx));
+            view.font_select.update(cx, |select, cx| {
+                select.set_selected_value(&"Source Code Pro".to_owned(), window, cx);
+                cx.emit(SelectEvent::Confirm(Some("Source Code Pro".to_owned())));
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(settings::load(&root.join("settings.json")).unwrap().font_family.as_deref(), Some("Source Code Pro"));
+        cx.draw(point(px(0.), px(0.)), size(px(800.), px(500.)), |_, _| {
+            div().w(px(800.)).h(px(500.)).child(view.clone())
+        });
+        cx.update(|_, cx| {
+            assert_eq!(open_editor.read(cx).rendered_font().unwrap().family.as_ref(), "JetBrains Mono");
+        });
+        settings.update_in(cx, |view, window, cx| {
+            view.font_select.update(cx, |select, cx| {
+                select.set_selected_value(&"System default".to_owned(), window, cx);
+                cx.emit(SelectEvent::Confirm(Some("System default".to_owned())));
+            });
+            view.code_font_select.update(cx, |select, cx| {
+                select.set_selected_value(&"Fira Code".to_owned(), window, cx);
+                cx.emit(SelectEvent::Confirm(Some("Fira Code".to_owned())));
+            });
+        });
+        cx.run_until_parked();
+        // Settling an unrelated input must not overwrite the chosen font.
+        settings.update_in(cx, |view, window, cx| {
+            view.ignore_query.update(cx, |input, cx| input.set_value("src, notes", window, cx));
             view.commit_text(window, cx);
         });
         cx.run_until_parked();
         let stored = settings::load(&root.join("settings.json")).unwrap();
-        assert_eq!(stored.code_font_family.as_deref(), Some("Geist Mono"));
+        assert_eq!(stored.code_font_family.as_deref(), Some("Fira Code"));
+        assert_eq!(stored.font_family, None);
         assert_eq!(stored.ignored, vec!["src".to_string(), "notes".to_string()]);
+        // Reopening the form restores the persisted selection.
+        settings.update_in(cx, |view, window, cx| {
+            let reopened = cx.new(|cx| SettingsView::new(view.folio.clone(), stored, window, cx));
+            assert_eq!(reopened.read(cx).code_font_select.read(cx).selected_value().map(String::as_str), Some("Fira Code"));
+        });
 
         // Both folders are ignored now, so the tree and the index agree that
         // neither is there — the new rules reached the cached listings.
