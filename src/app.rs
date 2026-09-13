@@ -16,7 +16,6 @@ use gpui_component::{
     ActiveTheme, Disableable, Icon, IconName, Root, Sizable, Theme, TitleBar,
     button::{Button, ButtonVariants},
     input::{self, EditorState, Input, InputBaseState, InputEvent, InputState, Position, TabSize},
-    native_menu::NativeMenu,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -83,74 +82,6 @@ const TAB_HEIGHT: f32 = 26.;
 /// short list of ignored folders, and the same everywhere so the fields line
 /// up down the right-hand side.
 const FIELD_WIDTH: f32 = 240.;
-
-/// What the editor's right-click menu needs to know about the editor, copied
-/// out of the component's capabilities one frame before the menu is asked for.
-/// The component's own type is not nameable from here, and this is the whole
-/// of what the menu reads from it.
-#[derive(Clone, Copy)]
-struct EditorMenuState {
-    enabled: bool,
-    /// Enabled and not read-only: a read-only editor can still be navigated
-    /// and copied out of, it only rejects what would change the text.
-    editable: bool,
-    code_editor: bool,
-    has_selection: bool,
-    can_go_to_definition: bool,
-    has_code_actions: bool,
-}
-
-/// The editor's right-click menu: the standard text actions, then the way into
-/// the changes view.
-///
-/// This replaces the component's own menu rather than adding to it. The
-/// component sets its handler on every render and offers no way to extend it,
-/// so the standard entries are rebuilt here, disabled under the same
-/// conditions. Dropping them would cost Cut, Copy and Paste on right-click,
-/// which is a poor trade for one added row.
-///
-/// That state arrives as an argument rather than being read here, because this
-/// runs inside the editor's own update — that is how the component schedules
-/// it — and reading the entity from there is a re-entrant borrow. It is read
-/// one frame earlier instead, and anything that moves it repaints.
-fn editor_context_menu(
-    editor: EditorMenuState,
-    mut menu: NativeMenu,
-    _: &mut Window,
-    cx: &mut App,
-) -> NativeMenu {
-    if editor.code_editor {
-        menu = menu
-            .menu_with_disabled(
-                "Go to Definition",
-                !(editor.enabled && editor.can_go_to_definition),
-                Box::new(input::GoToDefinition),
-            )
-            .menu_with_disabled(
-                "Show Code Actions",
-                !(editor.editable && editor.has_code_actions),
-                Box::new(input::ToggleCodeActions),
-            )
-            .separator();
-    }
-    menu.menu_with_disabled(
-        "Cut",
-        !(editor.editable && editor.has_selection),
-        Box::new(input::Cut),
-    )
-    .menu_with_disabled("Copy", !editor.has_selection, Box::new(input::Copy))
-    .menu_with_disabled(
-        "Paste",
-        !(editor.editable && cx.read_from_clipboard().is_some()),
-        Box::new(input::Paste),
-    )
-    .separator()
-    .menu("Select All", Box::new(input::SelectAll))
-    .separator()
-    // The editor is only on screen while the changes view is off, so this
-    // only ever shows one way.
-    .menu("Show File Changes", Box::new(ToggleDiff))
-}
 
 /// The far-left icon rail. Narrow on purpose: icons only, no labels.
 /// The rail plus the gap before the card must stay at or under 40px.
@@ -432,6 +363,10 @@ actions!(
         FocusLeftPane,
         FocusRightPane,
         ToggleBlame,
+        RevealInFinder,
+        OpenInTerminal,
+        CopyFilePath,
+        CopyRelativeFilePath,
         CheckForUpdates,
         ToggleComment,
         ToggleBlockComment,
@@ -556,6 +491,11 @@ enum MenuItem {
     CopyRelativePath,
     PinTab,
     RevealInTree,
+    // The editor.
+    SelectAll,
+    GoToLine,
+    ShowFileChanges,
+    Blame,
     // The tab-bar split button, the way Zed's pane menu is.
     SplitRight,
     SplitLeft,
@@ -573,6 +513,8 @@ enum MenuTarget {
     Changes { path: PathBuf },
     /// A tab in the strip, which is not necessarily the active one.
     Tab { path: PathBuf, index: usize },
+    /// The file open in the editor.
+    Editor { path: PathBuf },
     /// The split button on a pane's tab bar.
     Split { pane: usize },
 }
@@ -583,7 +525,8 @@ impl MenuTarget {
         match self {
             MenuTarget::Tree { path, .. }
             | MenuTarget::Changes { path }
-            | MenuTarget::Tab { path, .. } => path,
+            | MenuTarget::Tab { path, .. }
+            | MenuTarget::Editor { path } => path,
             MenuTarget::Split { .. } => Path::new(""),
         }
     }
@@ -594,6 +537,7 @@ enum Surface {
     Tree,
     Changes,
     Tab,
+    Editor,
     Split,
 }
 
@@ -643,6 +587,21 @@ const TAB_MENU: &[(MenuItem, &str, &str)] = &[
 ];
 const TAB_SEPARATORS: &[usize] = &[2, 4, 6, 7, 9, 10];
 
+const EDITOR_MENU: &[(MenuItem, &str, &str)] = &[
+    (MenuItem::Cut, "Cut", "⌘X"),
+    (MenuItem::Copy, "Copy", "⌘C"),
+    (MenuItem::Paste, "Paste", "⌘V"),
+    (MenuItem::SelectAll, "Select All", "⌘A"),
+    (MenuItem::GoToLine, "Go to Line…", "⌘G"),
+    (MenuItem::Reveal, "Reveal in Finder", "⌘⇧R"),
+    (MenuItem::OpenTerminal, "Open in Terminal", ""),
+    (MenuItem::CopyPath, "Copy Path", "⌥⌘C"),
+    (MenuItem::CopyRelativePath, "Copy Relative Path", "⌥⌘⇧C"),
+    (MenuItem::ShowFileChanges, "Show File Changes", "⌘⇧D"),
+    (MenuItem::Blame, "Blame", "⌥⌘B"),
+];
+const EDITOR_SEPARATORS: &[usize] = &[3, 5, 9];
+
 const SPLIT_MENU: &[(MenuItem, &str, &str)] = &[
     (MenuItem::SplitRight, "Split Right", "⌘K →"),
     (MenuItem::SplitLeft, "Split Left", "⌘K ←"),
@@ -663,6 +622,7 @@ impl Surface {
             Surface::Tree => (TREE_MENU, TREE_SEPARATORS),
             Surface::Changes => (CHANGES_MENU, CHANGES_SEPARATORS),
             Surface::Tab => (TAB_MENU, TAB_SEPARATORS),
+            Surface::Editor => (EDITOR_MENU, EDITOR_SEPARATORS),
             Surface::Split => (SPLIT_MENU, SPLIT_SEPARATORS),
         }
     }
@@ -673,6 +633,7 @@ fn surface_of(target: &MenuTarget) -> Surface {
         MenuTarget::Tree { .. } => Surface::Tree,
         MenuTarget::Changes { .. } => Surface::Changes,
         MenuTarget::Tab { .. } => Surface::Tab,
+        MenuTarget::Editor { .. } => Surface::Editor,
         MenuTarget::Split { .. } => Surface::Split,
     }
 }
@@ -2963,15 +2924,31 @@ impl Folio {
 
     /// Whether an entry can be taken here. Everything is available unless it
     /// would do nothing at all.
-    fn menu_item_enabled(&self, item: MenuItem, path: &Path) -> bool {
-        match item {
-            MenuItem::Paste => self.clipboard.is_some(),
-            MenuItem::CloseOthers
-            | MenuItem::CloseLeft
-            | MenuItem::CloseRight
-            | MenuItem::CloseAll
-            | MenuItem::CloseClean => !self.tabs_to_close(item, path).is_empty(),
-            MenuItem::CopyRelativePath | MenuItem::RevealInTree => self.project.workspace.is_some(),
+    fn menu_item_enabled(&self, item: MenuItem, target: &MenuTarget, cx: &App) -> bool {
+        let path = target.path();
+        match (target, item) {
+            (MenuTarget::Editor { .. }, MenuItem::Cut) => {
+                self.editor_is_editable(cx) && self.editor_has_selection(cx)
+            }
+            (MenuTarget::Editor { .. }, MenuItem::Copy) => self.editor_has_selection(cx),
+            (MenuTarget::Editor { .. }, MenuItem::Paste) => {
+                self.editor_is_editable(cx) && cx.read_from_clipboard().is_some()
+            }
+            (MenuTarget::Editor { .. }, MenuItem::CopyRelativePath) => {
+                self.project.workspace.is_some()
+            }
+            (_, MenuItem::Paste) => self.clipboard.is_some(),
+            (
+                _,
+                MenuItem::CloseOthers
+                | MenuItem::CloseLeft
+                | MenuItem::CloseRight
+                | MenuItem::CloseAll
+                | MenuItem::CloseClean,
+            ) => !self.tabs_to_close(item, path).is_empty(),
+            (_, MenuItem::CopyRelativePath | MenuItem::RevealInTree) => {
+                self.project.workspace.is_some()
+            }
             _ => true,
         }
     }
@@ -2982,6 +2959,7 @@ impl Folio {
         match item {
             MenuItem::ToggleReadOnly if self.is_read_only(path) => "Make Tab Writable".into(),
             MenuItem::PinTab if self.is_pinned(path) => "Unpin Tab".into(),
+            MenuItem::Blame if self.blame.is_some() => "Hide Blame".into(),
             _ => label.into(),
         }
     }
@@ -3072,6 +3050,37 @@ impl Folio {
         self.toast("Copied", cx);
     }
 
+    /// Reveal the file being edited, the same path the tab menu acts on.
+    fn reveal_active_file(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.project.active().cloned() else {
+            return;
+        };
+        self.spawn_launch(move || fs_op::reveal(&path), cx);
+    }
+
+    /// Open a terminal at the folder holding the file being edited.
+    fn open_terminal_for_active_file(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.project.active().cloned() else {
+            return;
+        };
+        let dir = path.parent().map(Path::to_path_buf).unwrap_or(path);
+        self.spawn_launch(move || fs_op::open_terminal(&dir), cx);
+    }
+
+    /// Copy the path of the file being edited, absolute or relative to the
+    /// project root.
+    fn copy_active_path(&mut self, relative: bool, cx: &mut Context<Self>) {
+        let Some(path) = self.project.active() else {
+            return;
+        };
+        let text = if relative {
+            self.relative_path(path)
+        } else {
+            path.to_string_lossy().into_owned()
+        };
+        self.copy_to_clipboard(text, cx);
+    }
+
     /// Move the keyboard highlight to the next or previous visible entry.
     fn move_menu_selection(&mut self, down: bool) {
         let Some(menu) = self.menu.as_ref() else {
@@ -3097,7 +3106,7 @@ impl Folio {
         let Some(menu) = self.menu.take() else {
             return;
         };
-        if !self.menu_item_enabled(item, menu.target.path()) {
+        if !self.menu_item_enabled(item, &menu.target, cx) {
             cx.notify();
             return;
         }
@@ -3105,6 +3114,7 @@ impl Folio {
             MenuTarget::Tree { path, .. } => self.run_tree_item(item, path, window, cx),
             MenuTarget::Changes { .. } => self.run_changes_item(item, window, cx),
             MenuTarget::Tab { path, .. } => self.run_tab_item(item, path, window, cx),
+            MenuTarget::Editor { path } => self.run_editor_item(item, path, window, cx),
             MenuTarget::Split { pane } => self.run_split_item(item, pane, window, cx),
         }
     }
@@ -3182,6 +3192,54 @@ impl Folio {
                 self.spawn_launch(move || fs_op::open_terminal(&dir), cx);
             }
             // Nothing else is offered on that surface.
+            _ => cx.notify(),
+        }
+    }
+
+    /// The entries the editor offers. Text edits go through the buffer's own
+    /// actions so they share undo with typing; the rest is the file under the
+    /// caret.
+    fn run_editor_item(
+        &mut self,
+        item: MenuItem,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match item {
+            MenuItem::Cut => {
+                self.focus_editor(window, cx);
+                window.dispatch_action(Box::new(input::Cut), cx);
+            }
+            MenuItem::Copy => {
+                self.focus_editor(window, cx);
+                window.dispatch_action(Box::new(input::Copy), cx);
+            }
+            MenuItem::Paste => {
+                self.focus_editor(window, cx);
+                window.dispatch_action(Box::new(input::Paste), cx);
+            }
+            MenuItem::SelectAll => {
+                self.focus_editor(window, cx);
+                window.dispatch_action(Box::new(input::SelectAll), cx);
+            }
+            MenuItem::GoToLine => self.show_quick_open(true, window, cx),
+            MenuItem::Reveal => {
+                self.spawn_launch(move || fs_op::reveal(&path), cx);
+            }
+            MenuItem::OpenTerminal => {
+                let dir = path.parent().map(Path::to_path_buf).unwrap_or(path);
+                self.spawn_launch(move || fs_op::open_terminal(&dir), cx);
+            }
+            MenuItem::CopyPath => {
+                self.copy_to_clipboard(path.to_string_lossy().into_owned(), cx);
+            }
+            MenuItem::CopyRelativePath => {
+                let text = self.relative_path(&path);
+                self.copy_to_clipboard(text, cx);
+            }
+            MenuItem::ShowFileChanges => self.toggle_diff(window, cx),
+            MenuItem::Blame => self.toggle_blame(window, cx),
             _ => cx.notify(),
         }
     }
@@ -3583,6 +3641,30 @@ impl Folio {
                 .base_state()
                 .read(cx)
                 .is_composing()
+    }
+
+    fn editor_is_editable(&self, cx: &App) -> bool {
+        let Some(editor) = self.active_editor() else {
+            return false;
+        };
+        editor
+            .read(cx)
+            .base_state()
+            .read(cx)
+            .context_menu_capabilities()
+            .is_editable()
+    }
+
+    fn editor_has_selection(&self, cx: &App) -> bool {
+        let Some(editor) = self.active_editor() else {
+            return false;
+        };
+        editor
+            .read(cx)
+            .base_state()
+            .read(cx)
+            .context_menu_capabilities()
+            .has_selection()
     }
 
     /// The buffer being edited, if one is. An image preview has none.
@@ -7646,7 +7728,7 @@ impl Folio {
                     .flat_map(|(position, index)| {
                         let (item, label, shortcut) = entries[index];
                         let label = self.menu_label(item, path, label);
-                        let enabled = self.menu_item_enabled(item, path);
+                        let enabled = self.menu_item_enabled(item, &menu.target, cx);
                         // A rule only ever sits between two entries.
                         let separator = (position > 0 && rules.contains(&index)).then(|| {
                             div()
@@ -8557,35 +8639,44 @@ impl Folio {
                         })
                         .child({
                             let base = doc.editor.read(cx).base_state().clone();
-                            let editor = {
-                                let capabilities = base.read(cx).context_menu_capabilities();
-                                let enabled = !capabilities.is_disabled();
-                                EditorMenuState {
-                                    enabled,
-                                    editable: enabled && !capabilities.is_readonly(),
-                                    code_editor: capabilities.is_code_editor(),
-                                    has_selection: capabilities.has_selection(),
-                                    can_go_to_definition: capabilities.can_go_to_definition(),
-                                    has_code_actions: capabilities.has_code_actions(),
-                                }
-                            };
-                            div().key_context("FolioEditor").size_full().child(
-                                Input::from_base(&base)
-                                    .appearance(false)
-                                    .bordered(false)
-                                    .focus_bordered(false)
-                                    .readonly(
-                                        self.saving || self.loading || self.prompting || locked,
-                                    )
-                                    .context_menu(move |menu, window, cx| {
-                                        editor_context_menu(editor, menu, window, cx)
-                                    })
-                                    .text_size(px(self.settings.code_font_size))
-                                    .font_family(self.code_font())
-                                    .line_height(gpui::relative(1.6))
-                                    .rounded_none()
-                                    .h_full(),
-                            )
+                            base.update(cx, |state, _| {
+                                state.set_context_menu_enabled(false);
+                            });
+                            let menu_path = pane.active.clone().unwrap_or_default();
+                            div()
+                                .key_context("FolioEditor")
+                                .size_full()
+                                .on_mouse_down(
+                                    MouseButton::Right,
+                                    cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                                        this.open_menu(
+                                            MenuTarget::Editor {
+                                                path: menu_path.clone(),
+                                            },
+                                            event.position,
+                                            window,
+                                            cx,
+                                        );
+                                        cx.stop_propagation();
+                                    }),
+                                )
+                                .child(
+                                    Input::from_base(&base)
+                                        .appearance(false)
+                                        .bordered(false)
+                                        .focus_bordered(false)
+                                        .readonly(
+                                            self.saving
+                                                || self.loading
+                                                || self.prompting
+                                                || locked,
+                                        )
+                                        .text_size(px(self.settings.code_font_size))
+                                        .font_family(self.code_font())
+                                        .line_height(gpui::relative(1.6))
+                                        .rounded_none()
+                                        .h_full(),
+                                )
                         })
                         .when_some(blame, |el, text| {
                             el.child(
@@ -9551,6 +9642,18 @@ impl Render for Folio {
             .on_action(
                 cx.listener(|this, _: &ToggleBlame, window, cx| this.toggle_blame(window, cx)),
             )
+            .on_action(cx.listener(|this, _: &RevealInFinder, _, cx| {
+                this.reveal_active_file(cx)
+            }))
+            .on_action(cx.listener(|this, _: &OpenInTerminal, _, cx| {
+                this.open_terminal_for_active_file(cx)
+            }))
+            .on_action(cx.listener(|this, _: &CopyFilePath, _, cx| {
+                this.copy_active_path(false, cx)
+            }))
+            .on_action(cx.listener(|this, _: &CopyRelativeFilePath, _, cx| {
+                this.copy_active_path(true, cx)
+            }))
             .on_action(cx.listener(|this, _: &OpenAbout, _, cx| this.show_about(cx)))
             .on_action(cx.listener(|this, _: &CheckForUpdates, _, cx| this.check_for_updates(cx)))
             .on_action(
@@ -10981,8 +11084,8 @@ mod tests {
             );
             let target = app.menu.as_ref().unwrap().target.clone();
             assert_eq!(visible_menu_items(&target).len(), TAB_MENU.len());
-            assert!(!app.menu_item_enabled(MenuItem::CloseLeft, &first));
-            assert!(app.menu_item_enabled(MenuItem::CloseRight, &first));
+            assert!(!app.menu_item_enabled(MenuItem::CloseLeft, &target, cx));
+            assert!(app.menu_item_enabled(MenuItem::CloseRight, &target, cx));
             // The strip draws under it.
             let _ = app.render(window, cx);
             app.run_menu_item(MenuItem::CloseRight, window, cx);
@@ -11051,7 +11154,8 @@ mod tests {
                 window,
                 cx,
             );
-            assert!(!app.menu_item_enabled(MenuItem::CloseOthers, &first));
+            let target = app.menu.as_ref().unwrap().target.clone();
+            assert!(!app.menu_item_enabled(MenuItem::CloseOthers, &target, cx));
             app.run_menu_item(MenuItem::CloseOthers, window, cx);
         });
         cx.run_until_parked();
@@ -12824,6 +12928,77 @@ mod tests {
         assert!(session::load_unsaved(&unsaved_file).is_empty());
     }
 
+    #[gpui::test]
+    fn editor_copies_the_active_file_path(cx: &mut TestAppContext) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let file = root.join("main.rs");
+        std::fs::write(&file, "fn main() {}\n").unwrap();
+        cx.update(gpui_component::init);
+        let cx = cx.add_empty_window();
+        let view = cx.update(|window, cx| {
+            cx.new(|cx| {
+                let mut app = Folio::new(window, cx);
+                app.recent_task = None;
+                app.recent_file = root.join("recent.json");
+                app.settings_file = root.join("settings.json");
+                app.window_file = root.join("window.json");
+                app.settings = Settings::default();
+                app.applied_ignored = app.settings.ignored.clone();
+                app
+            })
+        });
+        view.update_in(cx, |app, window, cx| {
+            app.request(Next::Open(root.clone()), window, cx)
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |app, window, cx| {
+            app.open_file(file.clone(), window, cx)
+        });
+        cx.run_until_parked();
+
+        view.update_in(cx, |app, window, cx| {
+            app.open_menu(
+                MenuTarget::Editor { path: file.clone() },
+                point(px(80.), px(80.)),
+                window,
+                cx,
+            );
+            assert_eq!(
+                visible_menu_items(&app.menu.as_ref().unwrap().target)
+                    .into_iter()
+                    .map(|index| EDITOR_MENU[index].1)
+                    .collect::<Vec<_>>(),
+                [
+                    "Cut",
+                    "Copy",
+                    "Paste",
+                    "Select All",
+                    "Go to Line…",
+                    "Reveal in Finder",
+                    "Open in Terminal",
+                    "Copy Path",
+                    "Copy Relative Path",
+                    "Show File Changes",
+                    "Blame",
+                ]
+            );
+            app.run_menu_item(MenuItem::CopyRelativePath, window, cx);
+        });
+        assert_eq!(
+            cx.read_from_clipboard()
+                .and_then(|item| item.text())
+                .as_deref(),
+            Some("main.rs")
+        );
+        view.update_in(cx, |app, _, cx| app.copy_active_path(false, cx));
+        let copied = cx
+            .read_from_clipboard()
+            .and_then(|item| item.text())
+            .expect("the absolute path");
+        assert_eq!(Path::new(&copied), file.as_path());
+    }
+
     /// Blame: the strip says who last wrote the line the caret is on, and says
     /// something else when the caret moves to a line another commit wrote.
     #[gpui::test]
@@ -13142,7 +13317,14 @@ mod tests {
                 "the first folder under the project header is indented"
             );
             assert!(
-                !app.menu_item_enabled(MenuItem::Paste, &root),
+                !app.menu_item_enabled(
+                    MenuItem::Paste,
+                    &MenuTarget::Tree {
+                        path: root.clone(),
+                        root: true
+                    },
+                    cx
+                ),
                 "paste stays disabled until something is on the clipboard"
             );
             open_tree_menu(app, &src, false, window, cx);
@@ -13152,7 +13334,8 @@ mod tests {
             let _ = app.render(window, cx);
             app.move_menu_selection(true);
             assert_eq!(app.menu.as_ref().unwrap().selected, 1);
-            assert!(app.menu_item_enabled(TREE_MENU[1].0, &src));
+            let target = app.menu.as_ref().unwrap().target.clone();
+            assert!(app.menu_item_enabled(TREE_MENU[1].0, &target, cx));
 
             app.run_menu_item(MenuItem::NewFile, window, cx);
             assert!(app.menu.is_none(), "choosing an item closes the menu");
@@ -13298,6 +13481,24 @@ mod tests {
         assert_eq!(
             labels(&MenuTarget::Split { pane: 0 }),
             vec!["Split Right", "Split Left", "Split Up", "Split Down"]
+        );
+        assert_eq!(
+            labels(&MenuTarget::Editor {
+                path: PathBuf::new()
+            }),
+            vec![
+                "Cut",
+                "Copy",
+                "Paste",
+                "Select All",
+                "Go to Line…",
+                "Reveal in Finder",
+                "Open in Terminal",
+                "Copy Path",
+                "Copy Relative Path",
+                "Show File Changes",
+                "Blame",
+            ]
         );
         assert!(!tree_labels(false).contains(&"Hide File Changes"));
         view.update_in(cx, |app, window, cx| {

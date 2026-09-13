@@ -706,7 +706,9 @@ impl InputBaseState {
         self
     }
 
-    pub(crate) fn set_context_menu_enabled(&mut self, enabled: bool) {
+    /// When false, right-click still places the caret but does not open the
+    /// operating system's menu. The host can draw its own.
+    pub fn set_context_menu_enabled(&mut self, enabled: bool) {
         self.enable_context_menu = enabled;
     }
 
@@ -2094,12 +2096,13 @@ impl InputBaseState {
             return;
         }
 
-        // Show Mouse context menu
+        // Right-click moves the caret when it missed the selection, then
+        // either opens the OS menu or leaves that to the host.
         if event.button == MouseButton::Right {
+            if !self.selections.primary().contains(offset) {
+                self.move_to(offset, None, cx);
+            }
             if self.enable_context_menu {
-                if !self.selections.primary().contains(offset) {
-                    self.move_to(offset, None, cx);
-                }
                 self.pending_context_menu = Some((event.position, offset));
             }
             return;
