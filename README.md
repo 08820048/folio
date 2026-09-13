@@ -4,6 +4,9 @@ A local code reading editor built with Rust and GPUI. Light and dark follow the
 system; one window, several projects; no WebView, no AI service. A project's
 shell sits in a drawer under the workspace.
 
+The source is public under the [PolyForm Noncommercial License 1.0.0](LICENSE).
+Personal and educational use is fine. **Commercial use is not.**
+
 ## Running
 
 On macOS, after installing the Xcode Command Line Tools:
@@ -627,3 +630,16 @@ The specification in [docs/Folio需求文档.md](docs/Folio需求文档.md) is r
 to match what is implemented, and lists what is not. Full progress and the
 outstanding acceptance items are in
 [docs/开发进度.md](docs/开发进度.md). Both are in Chinese.
+
+## License
+
+Folio is licensed under the [PolyForm Noncommercial License 1.0.0](LICENSE)
+(`SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0`). You may use, study,
+change, and share it for personal, educational, charitable, and other
+non-commercial purposes. **Commercial use is not allowed** unless you have a
+separate written agreement.
+
+A pull request offers the change under the same terms. How to work on the
+project is in [CONTRIBUTING.md](CONTRIBUTING.md). How to report a
+vulnerability is in [SECURITY.md](SECURITY.md). Fonts, icons, and vendored
+crates keep their own licenses; see [NOTICE](NOTICE).

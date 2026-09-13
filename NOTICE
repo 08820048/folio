@@ -1,0 +1,14 @@
+Folio
+Copyright 2026 xuyi
+
+This project is licensed under the PolyForm Noncommercial License 1.0.0.
+See LICENSE. Commercial use requires a separate written agreement.
+
+Required Notice: Copyright 2026 xuyi (https://github.com/08820048/folio)
+
+Third-party material keeps its own license:
+
+- JetBrains Mono — SIL Open Font License 1.1 (`assets/OFL.txt`)
+- Lucide icons vendored in `assets/icons/` — ISC (`assets/icons/LICENSE.txt`)
+- `vendor/gpui-base` — Apache License 2.0 (`vendor/gpui-base/LICENSE-APACHE`)
+- Other Rust crates listed in `Cargo.lock` — see each crate's own license

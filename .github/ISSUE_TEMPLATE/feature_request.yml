@@ -1,0 +1,28 @@
+name: Feature request
+description: A change that fits Folio's shape
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: >
+        Folio is a small reader. New pillars need a note in `docs/` first.
+        See [CONTRIBUTING.md](../CONTRIBUTING.md).
+  - type: textarea
+    id: why
+    attributes:
+      label: Why
+      description: The reading or editing job this helps.
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What
+      description: The thinnest change that would do it.
+    validations:
+      required: true
+  - type: textarea
+    id: not
+    attributes:
+      label: Not this
+      description: Nearby work this request is not asking for.

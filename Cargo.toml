@@ -3,7 +3,7 @@ name = "folio"
 version = "0.1.0"
 edition = "2024"
 description = "A small native code reading and editing workspace"
-license = "MIT"
+license = "PolyForm-Noncommercial-1.0.0"
 
 [features]
 default = ["desktop"]
