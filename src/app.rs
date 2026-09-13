@@ -357,6 +357,7 @@ actions!(
     [
         OpenProject,
         NewProject,
+        CloneFromGithub,
         CloseProject,
         Save,
         QuickOpen,
@@ -417,6 +418,7 @@ actions!(
 enum Next {
     Picker,
     NewProject,
+    CloneFromGithub,
     Open(PathBuf),
     Close,
     /// Close these open files. One for a single tab; several for Close
@@ -1075,6 +1077,10 @@ pub struct Folio {
     generation: u64,
     open_request: u64,
     query: Entity<InputState>,
+    /// Shown over the launcher (or the workspace) to paste a GitHub URL.
+    clone_url: Entity<InputState>,
+    clone_open: bool,
+    cloning: bool,
     panel: Option<Panel>,
     matches: Vec<PathBuf>,
     match_selected: usize,
@@ -1330,6 +1336,18 @@ impl Folio {
                 }
             },
         );
+        let clone_url = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("owner/repo or https://github.com/…")
+        });
+        let clone_subscription = cx.subscribe_in(
+            &clone_url,
+            window,
+            |this: &mut Self, _, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::PressEnter { .. }) {
+                    this.confirm_clone_url(window, cx);
+                }
+            },
+        );
         let recent_file = config_dir().join("recent.json");
         let window_file = config_dir().join("window.json");
         let settings_bounds = WindowState::load(&window_file).settings;
@@ -1362,6 +1380,9 @@ impl Folio {
             generation: 0,
             open_request: 0,
             query,
+            clone_url,
+            clone_open: false,
+            cloning: false,
             panel: None,
             matches: vec![],
             match_selected: 0,
@@ -1407,6 +1428,7 @@ impl Folio {
                 subscription,
                 search_subscription,
                 replace_subscription,
+                clone_subscription,
                 bounds_subscription,
                 appearance_subscription,
             ],
@@ -1429,16 +1451,17 @@ impl Folio {
     }
 
     fn request(&mut self, next: Next, window: &mut Window, cx: &mut Context<Self>) {
-        if self.saving || self.prompting || self.project_loading {
+        if self.saving || self.prompting || self.project_loading || self.cloning {
             return;
         }
+        self.clone_open = false;
         // Invalidate a pending file read before changing project or opening a modal.
         self.open_request += 1;
         self.loading = false;
         // By reference: one arm needs the path, and `next` is still wanted
         // for the prompt and the follow-up.
         let dirty = match &next {
-            Next::Picker | Next::NewProject | Next::Open(_) => 0,
+            Next::Picker | Next::NewProject | Next::CloneFromGithub | Next::Open(_) => 0,
             // Only the files being closed are at stake, so only their own
             // edits are counted.
             Next::CloseTabs(paths) => paths.iter().filter(|path| self.is_dirty(path)).count(),
@@ -1764,6 +1787,7 @@ impl Folio {
                 cx.notify();
             }
             Next::Open(path) => self.open_project(path, window, cx),
+            Next::CloneFromGithub => self.show_clone_prompt(window, cx),
             Next::NewProject => {
                 // A save panel, so the name and the parent folder are one
                 // choice. Folio only `mkdir`s what comes back; it does not
@@ -1825,6 +1849,8 @@ impl Folio {
         self.goto = None;
         self.loading = false;
         self.project_loading = false;
+        self.clone_open = false;
+        self.cloning = false;
         self.resizing = false;
         self.resizing_pane = false;
         self.split_chord = false;
@@ -1949,6 +1975,107 @@ impl Folio {
             let _ = this.update_in(cx, |this, window, cx| match result {
                 Ok(path) => this.open_project(path, window, cx),
                 Err(e) => this.error(e.to_string(), cx),
+            });
+        })
+        .detach();
+    }
+
+    fn show_clone_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.panel = None;
+        self.clone_open = true;
+        self.clone_url.update(cx, |input, cx| {
+            input.set_value("", window, cx);
+            input.focus(window, cx);
+        });
+        cx.notify();
+    }
+
+    fn close_clone_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.clone_open = false;
+        self.tree_focus.focus(window, cx);
+        cx.notify();
+    }
+
+    fn confirm_clone_url(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.clone_open || self.prompting || self.project_loading || self.cloning {
+            return;
+        }
+        match git::parse_github(&self.clone_url.read(cx).value()) {
+            Ok(repo) => {
+                self.clone_open = false;
+                self.pick_clone_destination(repo, window, cx);
+            }
+            Err(e) => self.error(e, cx),
+        }
+    }
+
+    fn pick_clone_destination(
+        &mut self,
+        repo: git::GithubRepo,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // A folder picker: the repo lands in `chosen/name`. The name comes
+        // from the URL, not a second prompt.
+        let picker = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Clone Project".into()),
+        });
+        self.prompting = true;
+        cx.notify();
+        cx.spawn_in(window, async move |this, cx| {
+            let result = picker.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.prompting = false;
+                match result {
+                    Ok(Ok(Some(paths))) => {
+                        if let Some(parent) = paths.into_iter().next() {
+                            this.start_clone(repo.url, parent.join(&repo.name), window, cx);
+                        }
+                    }
+                    Ok(Err(e)) => this.error(e.to_string(), cx),
+                    _ => {}
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Clone into `dest` on a background thread, then open it. `url` is
+    /// whatever `git clone` accepts — GitHub after the prompt, a local
+    /// path in tests.
+    fn start_clone(
+        &mut self,
+        url: String,
+        dest: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.project_loading || self.saving || self.prompting || self.cloning {
+            return;
+        }
+        self.cloning = true;
+        self.project_loading = true;
+        self.message = Some("Cloning…".into());
+        cx.notify();
+        let task = cx
+            .background_executor()
+            .spawn(async move { git::clone(&url, &dest) });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.cloning = false;
+                this.project_loading = false;
+                match result {
+                    Ok(path) => {
+                        this.message = None;
+                        this.open_project(path, window, cx);
+                    }
+                    Err(e) => this.error(e.to_string(), cx),
+                }
             });
         })
         .detach();
@@ -3364,6 +3491,12 @@ impl Folio {
                 .is_composing()
             || self
                 .replace_query
+                .read(cx)
+                .base_state()
+                .read(cx)
+                .is_composing()
+            || self
+                .clone_url
                 .read(cx)
                 .base_state()
                 .read(cx)
@@ -5451,6 +5584,7 @@ impl Folio {
         if self.project.workspace.is_none() || self.project_loading || self.prompting {
             return;
         }
+        self.clone_open = false;
         self.panel = Some(Panel::Files);
         self.query.update(cx, |query, cx| {
             query.set_value(if line { ":" } else { "" }, window, cx);
@@ -5465,6 +5599,7 @@ impl Folio {
         if self.project.workspace.is_none() || self.project_loading || self.prompting {
             return;
         }
+        self.clone_open = false;
         self.panel = Some(Panel::Search);
         // Only "Find in Folder" narrows the scan; reopening the panel starts
         // from the whole project again.
@@ -6586,6 +6721,19 @@ impl Folio {
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.request(Next::NewProject, window, cx)
                                     })),
+                            )
+                            .child(
+                                Button::new("clone-github")
+                                    .text()
+                                    .icon(FolioIcon::Github)
+                                    .label(if self.cloning {
+                                        "Cloning…"
+                                    } else {
+                                        "Clone from GitHub…"
+                                    })
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.request(Next::CloneFromGithub, window, cx)
+                                    })),
                             ),
                     )
                     .child(
@@ -6608,7 +6756,7 @@ impl Folio {
                                         .py_4()
                                         .text_size(ui(13.))
                                         .text_color(cx.theme().muted_foreground)
-                                        .child("Open a folder, or start a new one."),
+                                        .child("Open a folder, start a new one, or clone from GitHub."),
                                 )
                             })
                             .children(self.recent.iter().enumerate().map(|(i, item)| {
@@ -7321,6 +7469,41 @@ impl Folio {
             .unwrap_or(path)
             .to_string_lossy()
             .into_owned()
+    }
+
+    fn render_clone_prompt(&self, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .id("clone-prompt")
+            .absolute()
+            .top(px(48.))
+            .left(relative(0.5))
+            .ml(px(-260.))
+            .w(px(520.))
+            .rounded_lg()
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().sidebar)
+            .shadow_lg()
+            .p_2()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .text_size(ui(13.))
+                    .child("Clone from GitHub"),
+            )
+            .child(Input::new(&self.clone_url).focus_bordered(false))
+            .child(
+                div()
+                    .px_2()
+                    .text_size(ui(11.))
+                    .text_color(cx.theme().muted_foreground)
+                    .child("Enter to choose a folder · Esc to close"),
+            )
+            .into_any_element()
     }
 
     /// The `⌘P` / `⇧⌘F` overlay. Both lookups share one panel so the mode switch
@@ -9064,6 +9247,9 @@ impl Render for Folio {
             .on_action(cx.listener(|this, _: &NewProject, window, cx| {
                 this.request(Next::NewProject, window, cx)
             }))
+            .on_action(cx.listener(|this, _: &CloneFromGithub, window, cx| {
+                this.request(Next::CloneFromGithub, window, cx)
+            }))
             .on_action(cx.listener(|this, _: &CloseProject, window, cx| {
                 this.request(Next::Close, window, cx)
             }))
@@ -9377,6 +9563,11 @@ impl Render for Folio {
                 if event.keystroke.key == "escape" && this.is_composing(cx) {
                     return;
                 }
+                if this.clone_open && event.keystroke.key == "escape" {
+                    this.close_clone_prompt(window, cx);
+                    cx.stop_propagation();
+                    return;
+                }
                 if this.editing.is_some() {
                     if event.keystroke.key == "escape" {
                         this.cancel_create(window, cx);
@@ -9455,6 +9646,9 @@ impl Render for Folio {
                         self.render_launcher(cx)
                     }),
             )
+            .when(self.clone_open, |el| {
+                el.child(self.render_clone_prompt(cx))
+            })
             .when_some(self.panel, |el, panel| {
                 el.child(self.render_panel(panel, cx))
             })
@@ -9996,6 +10190,142 @@ mod tests {
             assert!(
                 app.message.as_ref().is_some_and(|m| !m.is_empty()),
                 "an existing folder is not reused as a new project"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn clone_from_github_asks_for_a_folder_after_the_url(cx: &mut TestAppContext) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        cx.update(gpui_component::init);
+        let cx = cx.add_empty_window();
+        let view = cx.update(|window, cx| {
+            cx.new(|cx| {
+                let mut app = Folio::new(window, cx);
+                app.recent_task = None;
+                app.recent_file = root.join("recent.json");
+                app.settings_file = root.join("settings.json");
+                app.window_file = root.join("window.json");
+                app.settings = Settings::default();
+                app.applied_ignored = app.settings.ignored.clone();
+                app
+            })
+        });
+        view.update_in(cx, |app, window, cx| {
+            app.request(Next::CloneFromGithub, window, cx);
+            assert!(app.clone_open);
+            assert!(app.project.workspace.is_none());
+            app.clone_url
+                .update(cx, |input, cx| input.set_value("not-a-repo", window, cx));
+            app.confirm_clone_url(window, cx);
+            assert!(app.clone_open);
+            assert!(app.message.as_ref().is_some_and(|m| !m.is_empty()));
+            app.clone_url.update(cx, |input, cx| {
+                input.set_value("08820048/folio", window, cx)
+            });
+            app.confirm_clone_url(window, cx);
+            assert!(!app.clone_open);
+            assert!(app.prompting);
+        });
+        cx.simulate_path_prompt_response(|_| None);
+        cx.run_until_parked();
+        view.update_in(cx, |app, _, _| {
+            assert!(!app.prompting);
+            assert!(app.project.workspace.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn clone_from_github_opens_the_repo(cx: &mut TestAppContext) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let source = root.join("source");
+        std::fs::create_dir(&source).unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&source)
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        assert!(git(&["init", "-q"]).status.success());
+        std::fs::write(source.join("readme"), "from remote\n").unwrap();
+        assert!(git(&["add", "."]).status.success());
+        assert!(
+            git(&[
+                "-c",
+                "user.name=Folio Test",
+                "-c",
+                "user.email=test@localhost",
+                "commit",
+                "-qm",
+                "fixture"
+            ])
+            .status
+            .success()
+        );
+        let dest = root.join("folio");
+        cx.update(gpui_component::init);
+        let cx = cx.add_empty_window();
+        let view = cx.update(|window, cx| {
+            cx.new(|cx| {
+                let mut app = Folio::new(window, cx);
+                app.recent_task = None;
+                app.recent_file = root.join("recent.json");
+                app.settings_file = root.join("settings.json");
+                app.window_file = root.join("window.json");
+                app.settings = Settings::default();
+                app.applied_ignored = app.settings.ignored.clone();
+                app
+            })
+        });
+        view.update_in(cx, |app, window, cx| {
+            app.start_clone(
+                source.to_string_lossy().into_owned(),
+                dest.clone(),
+                window,
+                cx,
+            );
+            assert!(app.cloning);
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |app, _, _| {
+            assert!(!app.cloning);
+            assert_eq!(
+                app.project.workspace.as_ref().map(|w| w.root.clone()),
+                Some(dest.clone())
+            );
+            assert_eq!(
+                std::fs::read_to_string(dest.join("readme")).unwrap(),
+                "from remote\n"
+            );
+        });
+
+        let taken = root.join("taken");
+        std::fs::create_dir(&taken).unwrap();
+        view.update_in(cx, |app, window, cx| {
+            app.request(Next::Close, window, cx);
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |app, window, cx| {
+            assert!(app.project.workspace.is_none());
+            app.start_clone(
+                source.to_string_lossy().into_owned(),
+                taken.clone(),
+                window,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |app, _, _| {
+            assert!(app.project.workspace.is_none());
+            assert!(
+                app.message
+                    .as_ref()
+                    .is_some_and(|m| m.contains("already exists")),
+                "an existing folder is not reused as a clone"
             );
         });
     }

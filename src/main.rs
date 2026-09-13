@@ -169,6 +169,7 @@ fn main() {
                 Menu::new("File").items([
                     MenuItem::action("New Project…", NewProject),
                     MenuItem::action("Open Project…", OpenProject),
+                    MenuItem::action("Clone from GitHub…", CloneFromGithub),
                     MenuItem::action("Quick Open…", QuickOpen),
                     MenuItem::action("Find in Project…", ProjectSearch),
                     MenuItem::action("Replace in Project…", ProjectReplace),
