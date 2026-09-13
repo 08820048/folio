@@ -36,19 +36,10 @@ else
     printf '<ul>\n  <li>%s</li>\n</ul>\n' "$notes" > "$artifacts/$html_name"
 fi
 
-dmg_staging="target/Folio-$VERSION-dmg"
 dmg_path="$artifacts/Folio-$VERSION.dmg"
 dmg_upload="Folio-$VERSION-$BUILD.dmg"
-rm -rf "$dmg_staging" "$dmg_path"
-mkdir -p "$dmg_staging"
-/usr/bin/ditto "$app" "$dmg_staging/Folio.app"
-ln -s /Applications "$dmg_staging/Applications"
-hdiutil create \
-    -volname "Folio $VERSION" \
-    -srcfolder "$dmg_staging" \
-    -ov \
-    -format UDZO \
-    "$dmg_path"
+rm -f "$dmg_path"
+sh scripts/make-dmg.sh "$app" "Install Folio" "$dmg_path"
 codesign --force --sign "$CODESIGN_IDENTITY" --timestamp "$dmg_path"
 xcrun notarytool submit "$dmg_path" --keychain-profile "$NOTARY_PROFILE" --wait
 xcrun stapler staple "$dmg_path"

@@ -38,7 +38,7 @@ https://pub-307aebc4dfa4468d80e05e193c8f9c5b.r2.dev/Folio-latest.dmg
 https://pub-307aebc4dfa4468d80e05e193c8f9c5b.r2.dev/Folio-<version>.zip
 ```
 
-网站下载用 **DMG**，不要把 Sparkle 的 zip 当安装包发。
+网站下载用 **DMG**，不要把 Sparkle 的 zip 当安装包发。DMG 窗口用 `assets/app-icon/back.jpg`（1808×1104，按 2× 做成 TIFF）：左边 Folio.app，右边 Applications，中间箭头。
 
 ## 日常开发
 
