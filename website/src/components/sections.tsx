@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import {
   Check,
   FileText,
@@ -283,6 +284,18 @@ const faqs = [
 ];
 
 export function Faq() {
+  // Controlled so a direct #license link opens its answer, also after
+  // hydration — the prerendered HTML always starts closed.
+  const [open, setOpen] = useState<string[]>([]);
+  useEffect(() => {
+    const reveal = () => {
+      if (location.hash === "#license") setOpen(["license"]);
+    };
+    reveal();
+    window.addEventListener("hashchange", reveal);
+    return () => window.removeEventListener("hashchange", reveal);
+  }, []);
+
   return (
     <section
       id="faq"
@@ -297,7 +310,10 @@ export function Faq() {
           You might also wonder.
         </h2>
       </div>
-      <Accordion defaultValue={location.hash === "#license" ? ["license"] : []}>
+      <Accordion
+        value={open}
+        onValueChange={(value) => setOpen(value as string[])}
+      >
         {faqs.map((faq) => (
           <AccordionItem key={faq.id} id={faq.id} value={faq.id}>
             <AccordionTrigger>{faq.question}</AccordionTrigger>

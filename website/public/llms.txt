@@ -1,0 +1,27 @@
+# Folio
+
+> Folio is a light, focused, native code editor for macOS, built for reading code.
+
+Folio opens local project folders in a quiet, native interface: syntax highlighting
+for 60+ languages, side-by-side or stacked split editors, a split or unified Git
+diff against HEAD or a branch, line-by-line blame, a project terminal, and just
+enough editing — multi-cursor, find & replace, bracket pairing, project-wide
+search. It is built with Rust and GPUI: the interface is drawn directly, with no
+browser engine. Files are read and written locally — there is no cloud service,
+no account, and no AI integration, and the app never uploads project code.
+
+Folio is free for personal, educational, and other noncommercial use, and the
+intent is for it to stay free. It is not open-source software; commercial use is
+not covered.
+
+## Facts
+
+- Platform: macOS 12 or newer, Apple silicon (M-series)
+- Price: free for noncommercial use
+- Download: https://folio-website-7j4.pages.dev/download (DMG; auto-updates via Sparkle)
+- Source: not publicly available
+- Author: xuyi — https://x.com/shizouffa
+
+## Pages
+
+- Home: https://folio-website-7j4.pages.dev/

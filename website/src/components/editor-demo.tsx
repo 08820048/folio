@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   ArrowDown,
   ArrowUp,
@@ -295,13 +295,16 @@ function RailIcon({
 
 export function EditorDemo() {
   const { dark } = useTheme();
-  // `?view=diff|terminal` deep-links a demo view; see theme.tsx for `?theme=`.
-  const viewParam = new URLSearchParams(location.search).get("view");
-  const [view, setView] = useState<View>(
-    viewParam === "diff" || viewParam === "terminal" ? viewParam : "read",
-  );
+  const [view, setView] = useState<View>("read");
   const [layout, setLayout] = useState<Layout>("split");
   const [file, setFile] = useState<"main" | "readme">("main");
+
+  // `?view=diff|terminal` deep-links a demo view; see theme.tsx for `?theme=`.
+  // Applied after mount so the prerendered markup stays hydration-stable.
+  useEffect(() => {
+    const param = new URLSearchParams(location.search).get("view");
+    if (param === "diff" || param === "terminal") setView(param);
+  }, []);
 
   const readme = view === "read" && file === "readme";
   const relativePath = readme ? "README.md" : "src/main.rs";

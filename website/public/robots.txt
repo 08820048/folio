@@ -1,2 +1,4 @@
 User-agent: *
 Allow: /
+
+Sitemap: https://folio-website-7j4.pages.dev/sitemap.xml
