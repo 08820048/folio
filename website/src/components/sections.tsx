@@ -255,17 +255,7 @@ const faqs = [
     question: "Is it free to use?",
     answer: (
       <>
-        The source is licensed under PolyForm Noncommercial License 1.0.0 — free for personal,
-        educational, and other noncommercial use; commercial use is not granted. Read the
-        <a
-          href="https://github.com/08820048/folio/blob/main/LICENSE"
-          target="_blank"
-          rel="noopener noreferrer"
-          className="text-brand underline underline-offset-4"
-        >
-          full license
-        </a>
-        .
+        Yes, Folio is free — and I hope she stays free forever!
       </>
     ),
   },
@@ -349,7 +339,7 @@ export function FinalCta() {
           <Button
             size="lg"
             render={<a href="/download" />}
-            className="w-full bg-[#8de3bc] text-[#05231c] inset-shadow-none hover:bg-[#a9edcf] sm:w-auto"
+            className="w-full bg-[#8de3bc] text-[#05231c] inset-shadow-[0_1px_--theme(--color-white/50%)] hover:bg-[#a9edcf] sm:w-auto"
           >
             <Download />
             Download Folio for macOS
@@ -373,49 +363,27 @@ export function SiteFooter() {
           </a>
           <span>A little space for reading code.</span>
         </div>
-        <nav className="flex gap-6 text-xs text-muted-foreground">
+        <div className="flex items-center gap-4">
           <a
-            href="https://github.com/08820048/folio"
+            href="https://x.com/shizouffa"
             target="_blank"
             rel="noopener noreferrer"
-            className="flex items-center gap-1 transition-colors hover:text-foreground"
+            aria-label="Folio on X"
+            className="text-muted-foreground transition-colors hover:text-foreground"
           >
-            GitHub <ArrowUpRightSmall />
+            <XLogo />
           </a>
-          <a
-            href="https://github.com/08820048/folio/issues"
-            className="transition-colors hover:text-foreground"
-          >
-            Feedback
-          </a>
-          <a
-            href="https://github.com/08820048/folio/blob/main/LICENSE"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="transition-colors hover:text-foreground"
-          >
-            License
-          </a>
-        </nav>
-        <small className="text-xs text-muted-foreground">© 2026 Folio</small>
+          <small className="text-xs text-muted-foreground">© 2026 Folio</small>
+        </div>
       </div>
     </footer>
   );
 }
 
-function ArrowUpRightSmall() {
+function XLogo() {
   return (
-    <svg
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.6"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      className="size-3"
-      aria-hidden="true"
-    >
-      <path d="M7 17 17 7M7 7h10v10" />
+    <svg viewBox="0 0 24 24" fill="currentColor" className="size-4" aria-hidden="true">
+      <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z" />
     </svg>
   );
 }
