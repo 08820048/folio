@@ -146,6 +146,12 @@ fn language_mapping_names_registered_grammars() {
     case("a.XML", "xml");
     // Unknown extensions must not go through SyntaxHighlighter's error path.
     case("a.unknown-extension", "text");
+    case("README.md", "markdown");
+    case("note.markdown", "markdown");
+    case("page.mdx", "markdown");
+    assert!(buffer::is_markdown(std::path::Path::new("README.md")));
+    assert!(buffer::is_markdown(std::path::Path::new("page.MDX")));
+    assert!(!buffer::is_markdown(std::path::Path::new("main.rs")));
 }
 
 #[test]

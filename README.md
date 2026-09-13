@@ -95,7 +95,10 @@ sizes, font and indentation come from the settings, and soft wrap is off.
 
 Images preview in place, scaled to fit: PNG, JPEG, GIF, WebP, BMP, TIFF, ICO
 and SVG. GIF and WebP show their first frame, and an image never enters the
-text editing or saving path. Every in-app icon is Lucide and icon buttons draw
+text editing or saving path. Markdown (`.md`, `.mdx`, `.markdown`) opens as a
+rendered preview; Preview / Source on the file, or `⇧⌘V`, switches to the
+same buffer as source. A jump from search lands in source so the hit is
+visible. Large files stay in source. Every in-app icon is Lucide and icon buttons draw
 no background box. The activity-bar toggle in the title bar's top-left uses
 `panel-left-dashed` / `panel-right-dashed`; the terminal tab uses
 `square-terminal`. gpui-component does not ship those three, so `src/assets.rs`

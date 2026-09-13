@@ -192,6 +192,11 @@ pub fn language(path: &Path) -> &'static str {
     }
 }
 
+/// Markdown is opened as a rendered preview; source is still the same buffer.
+pub fn is_markdown(path: &Path) -> bool {
+    language(path) == "markdown"
+}
+
 /// The marker that comments out one line of a language, or `None` where the
 /// language has no line form. Plenty of what Folio highlights only has a block
 /// form — HTML, XML, CSS, Markdown — and a shortcut that inserted a marker the

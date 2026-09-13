@@ -78,6 +78,11 @@ fn main() {
                 KeyBinding::new(&format!("{modifier}-alt-up"), FocusLeftPane, Some("Folio")),
                 KeyBinding::new(&format!("{modifier}-alt-down"), FocusRightPane, Some("Folio")),
                 KeyBinding::new(&format!("{modifier}-alt-b"), ToggleBlame, Some("Folio")),
+                KeyBinding::new(
+                    &format!("{modifier}-shift-v"),
+                    ToggleMarkdownPreview,
+                    Some("Folio"),
+                ),
                 // The editor's own ⌘⇧F, moved off it so `⇧⌘F` can be the
                 // project search everywhere. The action is the component's;
                 // only the key it answers to changes.
@@ -217,6 +222,7 @@ fn main() {
                     MenuItem::action("Go to Line…", GoToLine),
                     MenuItem::separator(),
                     MenuItem::action("Blame", ToggleBlame),
+                    MenuItem::action("Markdown Preview", ToggleMarkdownPreview),
                 ]),
             ]);
             let state = WindowState::load(&config_dir().join("window.json"));

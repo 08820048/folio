@@ -17,6 +17,7 @@ use gpui_component::{
     button::{Button, ButtonVariants},
     input::{self, EditorState, Input, InputBaseState, InputEvent, InputState, Position, TabSize},
     select::{SearchableVec, Select, SelectEvent, SelectState},
+    text::{TextView, TextViewStyle},
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -425,6 +426,7 @@ actions!(
         FocusLeftPane,
         FocusRightPane,
         ToggleBlame,
+        ToggleMarkdownPreview,
         RevealInFinder,
         OpenInTerminal,
         CopyFilePath,
@@ -479,6 +481,8 @@ struct Document {
     saved: SharedString,
     dirty: bool,
     large: bool,
+    /// Markdown opens rendered. Source is the same editor.
+    preview: bool,
     _subscription: Subscription,
 }
 #[derive(Clone)]
@@ -1974,15 +1978,70 @@ impl Folio {
             return;
         }
         self.goto = None;
-        let Some(document) = self.project.documents.get(&target) else {
+        let Some(document) = self.project.documents.get_mut(&target) else {
             return;
         };
+        // A jump is a place in the source, so drop the rendered view.
+        document.preview = false;
         let editor = document.editor.clone();
         editor.update(cx, |state, cx| {
             state.base_state().clone().update(cx, |base, cx| {
                 base.set_cursor_position(position, window, cx)
             });
         });
+    }
+
+    /// Preview keeps the editor off the focus path so typing cannot land in
+    /// a buffer that is not on screen.
+    fn focus_open_file(
+        &mut self,
+        path: &Path,
+        editor: &Entity<EditorState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .project
+            .documents
+            .get(path)
+            .is_some_and(|document| document.preview)
+        {
+            self.tree_focus.focus(window, cx);
+        } else {
+            editor.focus_handle(cx).focus(window, cx);
+        }
+    }
+
+    fn set_markdown_preview(
+        &mut self,
+        preview: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(path) = self.project.active().cloned() else {
+            return;
+        };
+        let Some(document) = self.project.documents.get_mut(&path) else {
+            return;
+        };
+        if document.large || !buffer::is_markdown(&path) {
+            return;
+        }
+        document.preview = preview;
+        let editor = document.editor.clone();
+        self.focus_open_file(&path, &editor, window, cx);
+        cx.notify();
+    }
+
+    fn toggle_markdown_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(path) = self.project.active().cloned() else {
+            return;
+        };
+        let Some(preview) = self.project.documents.get(&path).map(|document| document.preview)
+        else {
+            return;
+        };
+        self.set_markdown_preview(!preview, window, cx);
     }
 
     fn project_ref(&self, id: u64) -> Option<&Project> {
@@ -5194,9 +5253,9 @@ impl Folio {
         if let Some(doc) = self.project.documents.get(&path) {
             let editor = doc.editor.clone();
             self.loading = false;
-            editor.focus_handle(cx).focus(window, cx);
             self.apply_goto(&path, window, cx);
             self.apply_recovered(&path, window, cx);
+            self.focus_open_file(&path, &editor, window, cx);
             self.update_title(window);
             self.follow_diff(window, cx);
             cx.notify();
@@ -5294,18 +5353,24 @@ impl Folio {
                         let project_id = this.project.id;
                         let subscription =
                             Self::subscribe_document(&editor, project_id, window, cx);
-                        editor.focus_handle(cx).focus(window, cx);
+                        let jumping = this
+                            .goto
+                            .as_ref()
+                            .is_some_and(|(target, _)| target == &path);
+                        let preview = !large && !jumping && buffer::is_markdown(&path);
                         this.project.documents.insert(
                             path.clone(),
                             Document {
-                                editor,
+                                editor: editor.clone(),
                                 saved,
                                 dirty: false,
                                 large,
+                                preview,
                                 _subscription: subscription,
                             },
                         );
                         this.apply_goto(&path, window, cx);
+                        this.focus_open_file(&path, &editor, window, cx);
                         this.project.show_path(path.clone());
                         this.message = None;
                         this.apply_recovered(&path, window, cx);
@@ -8620,6 +8685,70 @@ impl Folio {
             .into_any_element()
     }
 
+    fn render_markdown_bar(&self, preview: bool, cx: &Context<Self>) -> AnyElement {
+        div()
+            .flex_shrink_0()
+            .px_3()
+            .py_1()
+            .flex()
+            .items_center()
+            .justify_end()
+            .gap_1()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .child(self.diff_choice(
+                "md-preview",
+                "Preview",
+                preview,
+                |this, window, cx| this.set_markdown_preview(true, window, cx),
+                cx,
+            ))
+            .child(self.diff_choice(
+                "md-source",
+                "Source",
+                !preview,
+                |this, window, cx| this.set_markdown_preview(false, window, cx),
+                cx,
+            ))
+            .into_any_element()
+    }
+
+    fn render_markdown_preview(
+        &self,
+        path: &Path,
+        text: SharedString,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let mut style = TextViewStyle::default()
+            .paragraph_gap(rems(0.75))
+            .heading_font_size(|level, base| match level {
+                1 => base * 1.6,
+                2 => base * 1.3,
+                3 => base * 1.1,
+                _ => base,
+            });
+        style.heading_base_font_size = px(15.);
+        style.highlight_theme = cx.theme().highlight_theme.clone();
+        style.is_dark = cx.theme().is_dark();
+        let mut view = TextView::markdown(
+            format!("markdown-preview:{}", path.to_string_lossy()),
+            text,
+        )
+        .selectable(true)
+        .scrollable(true)
+        .style(style)
+        .h_full()
+        .w_full()
+        .p_6();
+        if path
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("mdx"))
+        {
+            view = view.markdown_mdx();
+        }
+        view.into_any_element()
+    }
+
     fn render_pane(&self, index: usize, _: &Window, cx: &mut Context<Self>) -> AnyElement {
         let pane = self
             .project
@@ -8716,51 +8845,93 @@ impl Folio {
                                     .child("Large file · syntax highlighting off"),
                             )
                         })
-                        .child({
-                            let base = doc.editor.read(cx).base_state().clone();
-                            let typeface = self.code_typeface();
-                            let size = px(self.settings.code_font_size);
-                            base.update(cx, |state, _| {
-                                state.set_context_menu_enabled(false);
-                                state.set_font(typeface, size);
-                            });
-                            let menu_path = pane.active.clone().unwrap_or_default();
-                            div()
-                                .key_context("FolioEditor")
-                                .size_full()
-                                .on_mouse_down(
-                                    MouseButton::Right,
-                                    cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                                        this.open_menu(
-                                            MenuTarget::Editor {
-                                                path: menu_path.clone(),
+                        .when(
+                            !doc.large
+                                && pane
+                                    .active
+                                    .as_ref()
+                                    .is_some_and(|path| buffer::is_markdown(path)),
+                            |el| el.child(self.render_markdown_bar(doc.preview, cx)),
+                        )
+                        .when(doc.preview, |el| {
+                            let path = pane.active.clone().unwrap_or_default();
+                            let text = doc.editor.read(cx).value();
+                            let menu_path = path.clone();
+                            el.child(
+                                div()
+                                    .id("markdown-preview")
+                                    .flex_1()
+                                    .min_h_0()
+                                    .w_full()
+                                    .overflow_hidden()
+                                    .on_mouse_down(
+                                        MouseButton::Right,
+                                        cx.listener(
+                                            move |this, event: &MouseDownEvent, window, cx| {
+                                                this.open_menu(
+                                                    MenuTarget::Editor {
+                                                        path: menu_path.clone(),
+                                                    },
+                                                    event.position,
+                                                    window,
+                                                    cx,
+                                                );
+                                                cx.stop_propagation();
                                             },
-                                            event.position,
-                                            window,
-                                            cx,
-                                        );
-                                        cx.stop_propagation();
-                                    }),
-                                )
-                                .child(
-                                    Input::from_base(&base)
-                                        .appearance(false)
-                                        .bordered(false)
-                                        .focus_bordered(false)
-                                        .readonly(
-                                            self.saving
-                                                || self.loading
-                                                || self.prompting
-                                                || locked,
-                                        )
-                                        .text_size(px(self.settings.code_font_size))
-                                        .font(self.code_typeface())
-                                        .line_height(gpui::relative(1.6))
-                                        .rounded_none()
-                                        .h_full(),
-                                )
+                                        ),
+                                    )
+                                    .child(self.render_markdown_preview(&path, text, cx)),
+                            )
                         })
-                        .when_some(blame, |el, text| {
+                        .when(!doc.preview, |el| {
+                            el.child({
+                                let base = doc.editor.read(cx).base_state().clone();
+                                let typeface = self.code_typeface();
+                                let size = px(self.settings.code_font_size);
+                                base.update(cx, |state, _| {
+                                    state.set_context_menu_enabled(false);
+                                    state.set_font(typeface, size);
+                                });
+                                let menu_path = pane.active.clone().unwrap_or_default();
+                                div()
+                                    .key_context("FolioEditor")
+                                    .size_full()
+                                    .on_mouse_down(
+                                        MouseButton::Right,
+                                        cx.listener(
+                                            move |this, event: &MouseDownEvent, window, cx| {
+                                                this.open_menu(
+                                                    MenuTarget::Editor {
+                                                        path: menu_path.clone(),
+                                                    },
+                                                    event.position,
+                                                    window,
+                                                    cx,
+                                                );
+                                                cx.stop_propagation();
+                                            },
+                                        ),
+                                    )
+                                    .child(
+                                        Input::from_base(&base)
+                                            .appearance(false)
+                                            .bordered(false)
+                                            .focus_bordered(false)
+                                            .readonly(
+                                                self.saving
+                                                    || self.loading
+                                                    || self.prompting
+                                                    || locked,
+                                            )
+                                            .text_size(px(self.settings.code_font_size))
+                                            .font(self.code_typeface())
+                                            .line_height(gpui::relative(1.6))
+                                            .rounded_none()
+                                            .h_full(),
+                                    )
+                            })
+                        })
+                        .when_some(blame.filter(|_| !doc.preview), |el, text| {
                             el.child(
                                 div()
                                     .px_4()
@@ -9766,6 +9937,9 @@ impl Render for Folio {
             .on_action(
                 cx.listener(|this, _: &ToggleBlame, window, cx| this.toggle_blame(window, cx)),
             )
+            .on_action(cx.listener(|this, _: &ToggleMarkdownPreview, window, cx| {
+                this.toggle_markdown_preview(window, cx)
+            }))
             .on_action(cx.listener(|this, _: &RevealInFinder, _, cx| {
                 this.reveal_active_file(cx)
             }))
@@ -13274,6 +13448,58 @@ mod tests {
         about.update_in(cx, |view, window, cx| {
             // The harness never draws on its own.
             let _ = view.render(window, cx);
+        });
+    }
+
+    /// Markdown opens rendered. Source is the same buffer, one toggle away.
+    #[gpui::test]
+    fn markdown_opens_rendered_and_switches_to_source(cx: &mut TestAppContext) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let note = root.join("note.md");
+        std::fs::write(&note, "# Hello\n\nA paragraph with **bold**.\n").unwrap();
+        cx.update(gpui_component::init);
+        let cx = cx.add_empty_window();
+        let view = cx.update(|window, cx| {
+            cx.new(|cx| {
+                let mut app = Folio::new(window, cx);
+                app.recent_task = None;
+                app.recent_file = root.join("recent.json");
+                app.settings_file = root.join("settings.json");
+                app.window_file = root.join("window.json");
+                app.settings = Settings::default();
+                app.applied_ignored = app.settings.ignored.clone();
+                app
+            })
+        });
+        view.update_in(cx, |app, window, cx| {
+            app.request(Next::Open(root.clone()), window, cx)
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |app, window, cx| app.open_file(note.clone(), window, cx));
+        cx.run_until_parked();
+        view.update_in(cx, |app, window, cx| {
+            let document = &app.project.documents[&note];
+            assert!(document.preview);
+            assert_eq!(
+                document.editor.read(cx).value().as_str(),
+                "# Hello\n\nA paragraph with **bold**.\n"
+            );
+            let _ = app.render(window, cx);
+            app.set_markdown_preview(false, window, cx);
+            assert!(!app.project.documents[&note].preview);
+            let _ = app.render(window, cx);
+            app.toggle_markdown_preview(window, cx);
+            assert!(app.project.documents[&note].preview);
+        });
+        view.update_in(cx, |app, window, cx| {
+            app.open_file(note.clone(), window, cx);
+            app.goto = Some((note.clone(), Position::new(2, 0)));
+            app.apply_goto(&note, window, cx);
+            assert!(
+                !app.project.documents[&note].preview,
+                "a jump is a place in the source"
+            );
         });
     }
 
