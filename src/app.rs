@@ -4010,8 +4010,85 @@ impl Folio {
             .unwrap_or_default();
     }
 
+    /// The neighbour this pane's arrows would open, if that step is still
+    /// inside the strip. The ends do not wrap.
+    fn tab_step_target(&self, pane: usize, delta: isize) -> Option<PathBuf> {
+        let pane = self.project.panes.get(pane)?;
+        let index = pane
+            .active
+            .as_ref()
+            .and_then(|active| pane.tabs.iter().position(|tab| tab == active))?;
+        pane.tabs.get(index.checked_add_signed(delta)?).cloned()
+    }
+
+    /// Open the tab one step left or right of the one this pane is showing.
+    fn step_tab(
+        &mut self,
+        pane: usize,
+        delta: isize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(path) = self.tab_step_target(pane, delta) else {
+            return;
+        };
+        self.project.focused = pane;
+        self.open_file(path, window, cx);
+    }
+
+    /// The two arrows on the left of a tab strip: previous / next, no wrap.
+    fn render_tab_step(
+        &self,
+        pane: usize,
+        delta: isize,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let (icon, label) = if delta < 0 {
+            (IconName::ChevronLeft, "Previous Tab")
+        } else {
+            (IconName::ChevronRight, "Next Tab")
+        };
+        let enabled = self.tab_step_target(pane, delta).is_some();
+        div()
+            .id((if delta < 0 { "tab-prev" } else { "tab-next" }, pane))
+            .role(Role::Button)
+            .aria_label(label)
+            .when(enabled, |el| el.focusable().tab_index(0).cursor_pointer())
+            .size(px(20.))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_color(if enabled {
+                cx.theme().muted_foreground
+            } else {
+                cx.theme().muted_foreground.opacity(0.4)
+            })
+            .when(enabled, |el| {
+                el.hover(|el| el.text_color(cx.theme().foreground))
+                    .focus_visible(|el| el.text_color(cx.theme().accent_foreground))
+                    .tooltip(move |window, cx| {
+                        gpui_component::tooltip::Tooltip::new(label).build(window, cx)
+                    })
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.step_tab(pane, delta, window, cx);
+                    }))
+                    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                        if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                            this.step_tab(pane, delta, window, cx);
+                            cx.stop_propagation();
+                        }
+                    }))
+            })
+            .child(Icon::new(icon).small())
+            .into_any_element()
+    }
+
     /// The open files, as a strip above the editor. Always drawn so the
     /// split button on the right — Zed's entry — is reachable with one file.
+    /// No hairline under the strip: it is the same surface as the code, not
+    /// a second chrome bar inside the rounded card.
     fn render_tabs(&self, pane: usize, cx: &Context<Self>) -> AnyElement {
         let tabs = self
             .project
@@ -4027,8 +4104,16 @@ impl Folio {
             .h(px(TAB_HEIGHT))
             .flex()
             .items_center()
-            .border_b_1()
-            .border_color(cx.theme().border)
+            .child(
+                div()
+                    .h_full()
+                    .flex()
+                    .flex_shrink_0()
+                    .items_center()
+                    .pl(px(2.))
+                    .child(self.render_tab_step(pane, -1, cx))
+                    .child(self.render_tab_step(pane, 1, cx)),
+            )
             .children(
                 tabs.iter()
                     .enumerate()
@@ -4161,7 +4246,7 @@ impl Folio {
             .gap_2()
             .flex_shrink_0()
             .border_r_1()
-            .border_color(cx.theme().border)
+            .border_color(sidebar_rule(cx))
             .cursor_pointer()
             .text_size(ui(11.))
             .text_color(if selected {
@@ -11087,6 +11172,65 @@ mod tests {
         view.update_in(cx, |app, _, _| {
             assert!(app.project.tabs().is_empty());
             assert!(app.project.documents.is_empty());
+        });
+    }
+
+    /// The arrows on the left of the strip walk the open files in order
+    /// and stop at the ends.
+    #[gpui::test]
+    fn tab_arrows_step_through_open_files(cx: &mut TestAppContext) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let first = root.join("first.rs");
+        let second = root.join("second.rs");
+        let third = root.join("third.rs");
+        std::fs::write(&first, "// one\n").unwrap();
+        std::fs::write(&second, "// two\n").unwrap();
+        std::fs::write(&third, "// three\n").unwrap();
+        cx.update(gpui_component::init);
+        let cx = cx.add_empty_window();
+        let view = cx.update(|window, cx| {
+            cx.new(|cx| {
+                let mut app = Folio::new(window, cx);
+                app.recent_task = None;
+                app.recent_file = root.join("recent.json");
+                app.settings_file = root.join("settings.json");
+                app.window_file = root.join("window.json");
+                app.settings = Settings::default();
+                app.applied_ignored = app.settings.ignored.clone();
+                app
+            })
+        });
+        view.update_in(cx, |app, window, cx| {
+            app.request(Next::Open(root.clone()), window, cx)
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |app, window, cx| {
+            app.open_file(first.clone(), window, cx)
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |app, window, cx| {
+            app.open_file(second.clone(), window, cx)
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |app, window, cx| {
+            app.open_file(third.clone(), window, cx)
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |app, window, cx| {
+            assert_eq!(app.project.active(), Some(&third));
+            assert!(app.tab_step_target(0, 1).is_none());
+            app.step_tab(0, 1, window, cx);
+            assert_eq!(app.project.active(), Some(&third), "the last tab stays put");
+            app.step_tab(0, -1, window, cx);
+            assert_eq!(app.project.active(), Some(&second));
+            app.step_tab(0, -1, window, cx);
+            assert_eq!(app.project.active(), Some(&first));
+            app.step_tab(0, -1, window, cx);
+            assert_eq!(app.project.active(), Some(&first), "the first tab stays put");
+            app.step_tab(0, 1, window, cx);
+            assert_eq!(app.project.active(), Some(&second));
+            let _ = app.render(window, cx);
         });
     }
 
