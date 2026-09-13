@@ -31,8 +31,6 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-/// Where the versions of this application are listed.
-const RELEASES: &str = "https://github.com/08820048/folio/releases";
 
 /// Process start, for `FOLIO_PERF=1` first-frame timing.
 static LAUNCH: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
@@ -1445,6 +1443,9 @@ impl Folio {
         };
         this.refresh_recent(RecentAction::Load, cx);
         this.tree_focus.focus(window, cx);
+        // Packaged builds load Sparkle from the app bundle. `cargo run`
+        // has no framework, so this is a no-op there.
+        crate::sparkle::start();
         this
     }
 
@@ -4782,14 +4783,13 @@ impl Folio {
         cx.notify();
     }
 
-    /// The About window. It holds the name and the version and nothing that
-    /// needs updating: automatic updates are not part of this application.
-    /// Where a new version would be announced. There is no feed behind this and
-    /// no update to install from it: the packaging this project has signs
-    /// ad-hoc for one machine, so what a version check can honestly do today is
-    /// open the page that lists the versions.
+    /// Sparkle's update window, when this process is the packaged app.
+    /// A `cargo run` binary has no framework, so it says so instead of
+    /// opening a web page that is not the installer.
     fn check_for_updates(&mut self, cx: &mut Context<Self>) {
-        cx.open_url(RELEASES);
+        if !crate::sparkle::check() {
+            self.toast("Updates ship in the packaged Mac app", cx);
+        }
     }
 
     fn show_about(&mut self, cx: &mut Context<Self>) {

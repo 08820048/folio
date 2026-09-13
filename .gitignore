@@ -1,2 +1,4 @@
 /target/
 .DS_Store
+# Sparkle's private EdDSA key is in the login keychain, not here.
+/packaging/sparkle_private*

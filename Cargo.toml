@@ -42,6 +42,9 @@ syntax = [
 terminal = ["dep:alacritty_terminal"]
 desktop = ["dep:gpui", "dep:gpui_platform", "dep:gpui-component", "dep:gpui-component-assets", "dep:image", "syntax", "terminal"]
 
+[build-dependencies]
+cc = "1"
+
 [dependencies]
 anyhow = "1"
 regex = "1"

@@ -1,6 +1,7 @@
 mod app;
 mod assets;
 mod preview;
+mod sparkle;
 mod syntax;
 mod terminal_view;
 use app::*;

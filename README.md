@@ -30,8 +30,10 @@ To build a local `.app`:
 open target/Folio.app
 ```
 
-Pass `--debug` for a development build. The packaging script signs ad-hoc for
-this machine only; distribution signing and notarization are not set up.
+Pass `--debug` for a development build. A plain `package.sh` still ad-hoc
+signs. A distribution build is `./scripts/release.sh`: Developer ID, notarized
+DMG, Sparkle zip + appcast, upload to the `folio-releases` R2 bucket. It does
+not create a GitHub Release. The runbook is [docs/mac-release.md](docs/mac-release.md).
 It generates the Mac application icon from `assets/app-icon/logo-1024.png`
 (the 1024 master of `assets/app-icon/logo.jpg`), including standard and
 Retina sizes, and embeds it in the signed bundle.
@@ -610,10 +612,10 @@ project is no longer in the session is dropped rather than shown. Blame is one
 line at a time rather than a gutter, and describes the lines as they were when
 it was read. The changes view is a unified diff — there is
 no side-by-side — and its counts count rows, so a changed line reads as one
-gone and one arrived. There is no updater: the packaging this project has signs
-ad-hoc for one machine, and there is no feed to check — so Check for Updates in
-the app menu opens the page that lists the versions, which is the honest half of
-it. Window geometry is written when a window closes and again
+gone and one arrived. Mac updates go through Sparkle. The packaged app checks
+`https://pub-307aebc4dfa4468d80e05e193c8f9c5b.r2.dev/appcast.xml` and installs
+a signed zip from the same R2 bucket; `cargo run` has no framework and says so.
+There is no GitHub Release. Window geometry is written when a window closes and again
 on quit, so a force-killed process loses wherever the windows were — the same
 is true of the settings window. The settings sidebar has no search box, and its
 pages do not scroll, which is fine at five pages and would need fixing before

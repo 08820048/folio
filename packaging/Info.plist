@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>Folio</string>
+	<key>CFBundleExecutable</key>
+	<string>Folio</string>
+	<key>CFBundleIconFile</key>
+	<string>Folio.icns</string>
+	<key>CFBundleIdentifier</key>
+	<string>app.folio.editor</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>Folio</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>VERSION</string>
+	<key>CFBundleVersion</key>
+	<string>BUILD</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.developer-tools</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>12.0</string>
+	<key>LSMultipleInstancesProhibited</key>
+	<true/>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUFeedURL</key>
+	<string>https://pub-307aebc4dfa4468d80e05e193c8f9c5b.r2.dev/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>IwNR1H0F27WEFosIOSfLnoBS2jFBj45X2TW20mRxvOw=</string>
+	<key>SUScheduledCheckInterval</key>
+	<integer>86400</integer>
+</dict>
+</plist>
