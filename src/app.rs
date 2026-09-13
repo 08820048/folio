@@ -101,6 +101,11 @@ const TREE_ROW_HEIGHT: f32 = 27.;
 /// Indent of a tree row, matching gpui-component's Tree: `16 * depth + 12`.
 const TREE_ROW_INDENT: f32 = 16.;
 const TREE_ROW_PAD: f32 = 12.;
+/// Project root header. Taller than a file row so the chevron and folder
+/// read as a section, not another entry.
+const PROJECT_HEADER_HEIGHT: f32 = 42.;
+/// Vertical padding on the file list (`.p_1()` is 4px each side).
+const TREE_LIST_PAD: f32 = 8.;
 
 /// The frame the rounded workspace sits on, so the white card reads as a
 /// surface rather than disappearing into the window.
@@ -127,6 +132,13 @@ fn sidebar_rule(cx: &App) -> Hsla {
 /// Left padding of a file-tree row. Same formula as gpui-component's Tree.
 fn tree_row_indent(depth: usize) -> Pixels {
     px(TREE_ROW_PAD + depth as f32 * TREE_ROW_INDENT)
+}
+
+/// How tall an expanded project may grow. `flex_1` would otherwise eat the
+/// leftover sidebar and shove the next project to the bottom even when this
+/// one only has a handful of rows.
+fn expanded_project_max_height(rows: usize) -> f32 {
+    PROJECT_HEADER_HEIGHT + TREE_ROW_HEIGHT * rows as f32 + TREE_LIST_PAD
 }
 
 /// Selected file-tree row. Lighter than `list_active`, so the pill does
@@ -261,6 +273,18 @@ mod tree_guide_tests {
         assert_eq!(tree_active_guide(&rows, 0), Some((0, 3, 0)));
         assert_eq!(tree_active_guide(&rows, 1), Some((1, 2, 1)));
         assert_eq!(tree_active_guide(&rows, 2), Some((0, 3, 0)));
+    }
+
+    #[core::prelude::v1::test]
+    fn an_expanded_project_is_only_as_tall_as_its_rows() {
+        let one = expanded_project_max_height(1);
+        let three = expanded_project_max_height(3);
+        assert_eq!(three - one, TREE_ROW_HEIGHT * 2.);
+        assert!(one > PROJECT_HEADER_HEIGHT);
+        assert!(
+            three < 200.,
+            "a short tree must not fill a typical sidebar"
+        );
     }
 }
 
@@ -7195,7 +7219,7 @@ impl Folio {
             .aria_expanded(expanded)
             .focusable()
             .tab_index(0)
-            .h(px(42.))
+            .h(px(PROJECT_HEADER_HEIGHT))
             .flex_shrink_0()
             .mx_1()
             .px_3()
@@ -7443,7 +7467,10 @@ impl Folio {
                         .flex()
                         .flex_col()
                         .min_h_0()
-                        .when(expanded, |el| el.flex_1())
+                        .when(expanded, |el| {
+                            el.flex_1()
+                                .max_h(px(expanded_project_max_height(self.project.rows.len())))
+                        })
                         .when(!expanded, |el| el.flex_shrink_0())
                         .child(self.render_project_header(project, cx))
                         .when(expanded, |el| el.child(self.render_file_tree(cx))),
