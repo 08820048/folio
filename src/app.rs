@@ -356,6 +356,7 @@ actions!(
     folio,
     [
         OpenProject,
+        NewProject,
         CloseProject,
         Save,
         QuickOpen,
@@ -415,6 +416,7 @@ actions!(
 #[derive(Clone)]
 enum Next {
     Picker,
+    NewProject,
     Open(PathBuf),
     Close,
     /// Close these open files. One for a single tab; several for Close
@@ -1436,7 +1438,7 @@ impl Folio {
         // By reference: one arm needs the path, and `next` is still wanted
         // for the prompt and the follow-up.
         let dirty = match &next {
-            Next::Picker | Next::Open(_) => 0,
+            Next::Picker | Next::NewProject | Next::Open(_) => 0,
             // Only the files being closed are at stake, so only their own
             // edits are counted.
             Next::CloseTabs(paths) => paths.iter().filter(|path| self.is_dirty(path)).count(),
@@ -1762,6 +1764,27 @@ impl Folio {
                 cx.notify();
             }
             Next::Open(path) => self.open_project(path, window, cx),
+            Next::NewProject => {
+                // A save panel, so the name and the parent folder are one
+                // choice. Folio only `mkdir`s what comes back; it does not
+                // write a template or run `git init`.
+                let picker = cx.prompt_for_new_path(&home_dir(), Some("untitled"));
+                self.prompting = true;
+                cx.notify();
+                cx.spawn_in(window, async move |this, cx| {
+                    let result = picker.await;
+                    let _ = this.update_in(cx, |this, window, cx| {
+                        this.prompting = false;
+                        match result {
+                            Ok(Ok(Some(path))) => this.create_empty_project(path, window, cx),
+                            Ok(Err(e)) => this.error(e.to_string(), cx),
+                            _ => {}
+                        }
+                        cx.notify();
+                    });
+                })
+                .detach();
+            }
             Next::Picker => {
                 let picker = cx.prompt_for_paths(PathPromptOptions {
                     files: false,
@@ -1900,6 +1923,35 @@ impl Folio {
         }
         self.refresh_git(cx);
         cx.notify();
+    }
+
+    /// Make an empty folder and open it. Fails rather than reuse a name that
+    /// is already on disk — that is Open, not New.
+    fn create_empty_project(
+        &mut self,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(parent) = path.parent().map(Path::to_path_buf) else {
+            self.error("Choose a folder to put the project in".into(), cx);
+            return;
+        };
+        let Some(name) = path.file_name().map(|name| name.to_string_lossy().into_owned()) else {
+            self.error("Name cannot be empty".into(), cx);
+            return;
+        };
+        let task = cx
+            .background_executor()
+            .spawn(async move { fs_op::create_dir(&parent, &name) });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            let _ = this.update_in(cx, |this, window, cx| match result {
+                Ok(path) => this.open_project(path, window, cx),
+                Err(e) => this.error(e.to_string(), cx),
+            });
+        })
+        .detach();
     }
 
     fn open_project(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
@@ -6509,17 +6561,32 @@ impl Folio {
                             ),
                     )
                     .child(
-                        Button::new("open-project")
-                            .text()
-                            .icon(IconName::FolderOpen)
-                            .label(if self.loading {
-                                "Opening…"
-                            } else {
-                                "Open Project…"
-                            })
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.request(Next::Picker, window, cx)
-                            })),
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(
+                                Button::new("open-project")
+                                    .text()
+                                    .icon(IconName::FolderOpen)
+                                    .label(if self.loading {
+                                        "Opening…"
+                                    } else {
+                                        "Open Project…"
+                                    })
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.request(Next::Picker, window, cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new("new-project")
+                                    .text()
+                                    .icon(IconName::Plus)
+                                    .label("New Project…")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.request(Next::NewProject, window, cx)
+                                    })),
+                            ),
                     )
                     .child(
                         div()
@@ -6541,7 +6608,7 @@ impl Folio {
                                         .py_4()
                                         .text_size(ui(13.))
                                         .text_color(cx.theme().muted_foreground)
-                                        .child("Start from a local folder."),
+                                        .child("Open a folder, or start a new one."),
                                 )
                             })
                             .children(self.recent.iter().enumerate().map(|(i, item)| {
@@ -8994,6 +9061,9 @@ impl Render for Folio {
             .on_action(cx.listener(|this, _: &OpenProject, window, cx| {
                 this.request(Next::Picker, window, cx)
             }))
+            .on_action(cx.listener(|this, _: &NewProject, window, cx| {
+                this.request(Next::NewProject, window, cx)
+            }))
             .on_action(cx.listener(|this, _: &CloseProject, window, cx| {
                 this.request(Next::Close, window, cx)
             }))
@@ -9495,10 +9565,14 @@ pub const MAIN_WINDOW_MIN: Size<Pixels> = size(px(640.), px(480.));
 const SETTINGS_WINDOW_MIN: Size<Pixels> = size(px(460.), px(360.));
 const SETTINGS_WINDOW_DEFAULT: Size<Pixels> = size(px(918.), px(683.));
 
-pub fn config_dir() -> PathBuf {
-    let home = std::env::var_os("HOME")
+fn home_dir() -> PathBuf {
+    std::env::var_os("HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+pub fn config_dir() -> PathBuf {
+    let home = home_dir();
     #[cfg(target_os = "macos")]
     {
         home.join("Library/Application Support/Folio")
@@ -9865,6 +9939,63 @@ mod tests {
                     .value()
                     .as_ref(),
                 "// newer edit\n"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn a_new_project_is_an_empty_folder(cx: &mut TestAppContext) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let created = root.join("notes");
+        cx.update(gpui_component::init);
+        let cx = cx.add_empty_window();
+        let view = cx.update(|window, cx| {
+            cx.new(|cx| {
+                let mut app = Folio::new(window, cx);
+                app.recent_task = None;
+                app.recent_file = root.join("recent.json");
+                app.settings_file = root.join("settings.json");
+                app.window_file = root.join("window.json");
+                app.settings = Settings::default();
+                app.applied_ignored = app.settings.ignored.clone();
+                app
+            })
+        });
+        view.update_in(cx, |app, window, cx| {
+            app.request(Next::NewProject, window, cx);
+            assert!(app.prompting);
+            assert!(app.project.workspace.is_none());
+        });
+        cx.simulate_new_path_selection(|_| Some(created.clone()));
+        cx.run_until_parked();
+        view.update_in(cx, |app, _, _| {
+            assert!(created.is_dir());
+            assert_eq!(
+                app.project.workspace.as_ref().map(|w| w.root.clone()),
+                Some(created.clone())
+            );
+            assert!(app.project.tabs().is_empty());
+            assert!(!app.prompting);
+        });
+
+        let taken = root.join("taken");
+        std::fs::create_dir(&taken).unwrap();
+        view.update_in(cx, |app, window, cx| {
+            app.request(Next::Close, window, cx);
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |app, window, cx| {
+            assert!(app.project.workspace.is_none());
+            app.request(Next::NewProject, window, cx);
+        });
+        cx.simulate_new_path_selection(|_| Some(taken.clone()));
+        cx.run_until_parked();
+        view.update_in(cx, |app, _, _| {
+            assert!(app.project.workspace.is_none());
+            assert!(
+                app.message.as_ref().is_some_and(|m| !m.is_empty()),
+                "an existing folder is not reused as a new project"
             );
         });
     }

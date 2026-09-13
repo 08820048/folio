@@ -27,6 +27,7 @@ fn main() {
             };
             cx.bind_keys([
                 KeyBinding::new(&format!("{modifier}-o"), OpenProject, Some("Folio")),
+                KeyBinding::new(&format!("{modifier}-shift-o"), NewProject, Some("Folio")),
                 KeyBinding::new(&format!("{modifier}-w"), CloseProject, Some("Folio")),
                 KeyBinding::new(&format!("{modifier}-s"), Save, Some("Folio")),
                 KeyBinding::new(&format!("{modifier}-p"), QuickOpen, Some("Folio")),
@@ -166,6 +167,7 @@ fn main() {
                     MenuItem::action("Quit Folio", Quit),
                 ]),
                 Menu::new("File").items([
+                    MenuItem::action("New Project…", NewProject),
                     MenuItem::action("Open Project…", OpenProject),
                     MenuItem::action("Quick Open…", QuickOpen),
                     MenuItem::action("Find in Project…", ProjectSearch),
