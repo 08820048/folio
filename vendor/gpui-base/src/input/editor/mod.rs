@@ -133,6 +133,10 @@ impl EditorState {
             .update(cx, |state, cx| state.set_bracket_pairs(pairs, cx));
     }
 
+    pub fn bracket_pairs(&self, cx: &App) -> Vec<(usize, usize)> {
+        self.base.read(cx).bracket_pairs.clone()
+    }
+
     #[doc(hidden)]
     pub fn base_state(&self) -> &Entity<InputBaseState> {
         &self.base

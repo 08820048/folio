@@ -2300,7 +2300,7 @@ impl Element for TextElement {
             }
 
             for path in prepaint.bracket_match_paths.iter() {
-                window.paint_path(path.clone(), editor_style.caret.opacity(0.34));
+                window.paint_path(path.clone(), editor_style.caret.opacity(0.45));
             }
 
             // Paint hover highlight
@@ -2672,6 +2672,20 @@ fn split_runs_by_bg_segments(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pair_under_caret_picks_the_innermost_on_or_after() {
+        let pairs = [(0, 5), (2, 4)];
+        assert_eq!(pair_under_caret(&pairs, 0), Some((0, 5)));
+        assert_eq!(pair_under_caret(&pairs, 1), Some((0, 5)));
+        assert_eq!(pair_under_caret(&pairs, 2), Some((2, 4)));
+        assert_eq!(pair_under_caret(&pairs, 4), Some((2, 4)));
+        assert_eq!(pair_under_caret(&pairs, 5), Some((0, 5)));
+        assert_eq!(pair_under_caret(&pairs, 6), Some((0, 5)));
+        assert_eq!(pair_under_caret(&pairs, 3), Some((2, 4)));
+        assert_eq!(pair_under_caret(&[(0, 1)], 2), Some((0, 1)));
+        assert!(pair_under_caret(&pairs, 10).is_none());
+    }
 
     #[test]
     fn test_plain_text_decorations_include_unstyled_gaps() {

@@ -191,6 +191,25 @@ fn expanded_project_max_height(rows: usize) -> f32 {
 
 /// Selected file-tree row. Lighter than `list_active`, so the pill does
 /// not read as a grey slab on the white sidebar.
+/// Scan a rope without always allocating a `String`. A single-chunk rope
+/// is borrowed; a fragmented one is flattened once.
+fn rope_pairs(rope: &Rope) -> Vec<brackets::Pair> {
+    let mut chunks = rope.chunks();
+    match (chunks.next(), chunks.next()) {
+        (None, _) => Vec::new(),
+        (Some(only), None) => brackets::pairs(only),
+        (Some(first), Some(second)) => {
+            let mut owned = String::with_capacity(rope.len());
+            owned.push_str(first);
+            owned.push_str(second);
+            for chunk in chunks {
+                owned.push_str(chunk);
+            }
+            brackets::pairs(&owned)
+        }
+    }
+}
+
 fn bracket_color(depth: usize, dark: bool) -> Hsla {
     // Sage, steel, ochre, plum, brick, teal — the same register as the rest
     // of the chrome, rotating so nested pairs stay distinct.
@@ -1505,6 +1524,7 @@ impl Folio {
                 this.appearance = window.appearance();
                 sync_appearance(this.appearance, &this.settings, Some(window), cx);
                 this.recolor_diff(cx);
+                this.refresh_all_brackets(cx);
                 cx.notify();
             });
         let query = cx
@@ -3761,8 +3781,7 @@ impl Folio {
             editor.update(cx, |state, cx| state.set_bracket_pairs(Vec::new(), cx));
             return;
         }
-        let text = editor.read(cx).snapshot().to_string();
-        let pairs = brackets::pairs(&text);
+        let pairs = rope_pairs(&editor.read(cx).snapshot());
         let rainbow: Vec<TextDecoration> = pairs
             .iter()
             .flat_map(|pair| {
@@ -3783,6 +3802,16 @@ impl Folio {
             doc.brackets.rainbow.set(rainbow, cx);
         }
         editor.update(cx, |state, cx| state.set_bracket_pairs(offsets, cx));
+    }
+
+    fn refresh_all_brackets(&mut self, cx: &mut Context<Self>) {
+        let editors: Vec<_> = std::iter::once(&self.project)
+            .chain(self.parked.iter())
+            .flat_map(|project| project.documents.values().map(|doc| doc.editor.clone()))
+            .collect();
+        for editor in editors {
+            self.refresh_brackets(&editor, cx);
+        }
     }
 
     fn cancel_create(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -5326,6 +5355,7 @@ impl Folio {
         // either of them, so apply it without borrowing a window and repaint
         // them all.
         sync_appearance(self.appearance, &self.settings, None, cx);
+        self.refresh_all_brackets(cx);
         // These two settings are the stored state the toggles write back.
         self.sidebar = self.settings.sidebar;
         self.activity_bar = self.settings.activity_bar;
@@ -5625,6 +5655,7 @@ impl Folio {
         if let Some(document) = self.project.documents.get_mut(path) {
             document.dirty = true;
         }
+        self.refresh_brackets(&editor, cx);
         self.recovered += 1;
         true
     }
@@ -6153,6 +6184,7 @@ impl Folio {
             document.saved = text.clone().into();
         }
         editor.update(cx, |editor, cx| editor.set_value(text, window, cx));
+        self.refresh_brackets(&editor, cx);
         if let Some(project) = self.project_mut(project_id) {
             if let Some(document) = project.documents.get_mut(path) {
                 document.dirty = document.editor.read(cx).is_modified(&document.saved);
@@ -12896,6 +12928,26 @@ mod tests {
                 6,
                 "three pairs, each painted on both sides"
             );
+            let pairs = doc.editor.read(cx).bracket_pairs(cx);
+            assert_eq!(
+                folio::brackets::around_offsets(&pairs, 8),
+                Some((7, 8)),
+                "a caret on main's closing paren must find that pair"
+            );
+        });
+        view.update_in(cx, |app, window, cx| {
+            assert!(app.apply_disk_text(&file, "let x = (1);\n".into(), true, window, cx));
+        });
+        view.update_in(cx, |app, _, cx| {
+            let doc = &app.project.documents[&file];
+            assert_eq!(
+                doc.brackets.rainbow.get_ranges(cx).len(),
+                2,
+                "set_value must rescan pairs, not keep the previous file's ranges"
+            );
+            let pairs = doc.editor.read(cx).bracket_pairs(cx);
+            assert_eq!(folio::brackets::around_offsets(&pairs, 8), Some((8, 10)));
+            assert_eq!(folio::brackets::around_offsets(&pairs, 11), Some((8, 10)));
         });
     }
 
