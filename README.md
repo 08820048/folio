@@ -628,9 +628,8 @@ on quit, so a force-killed process loses wherever the windows were — the same
 is true of the settings window. The settings sidebar has no search box, and its
 pages do not scroll, which is fine at four pages and would need fixing before
 there were many more. Word wrap is off and not offered: a long line scrolls
-sideways, and there is no switch for it. Neither the sidebar nor the toast
-animates — the sidebar is drawn at its width and the toast is a layer that
-removes itself after two seconds. Times in the recent list are the English
+sideways, and there is no switch for it. The sidebar does not animate — it is drawn at its width. Notices slide in from
+the right edge and, unless they are errors, slide back out after two seconds. Times in the recent list are the English
 relative strings `just now`, `N hours ago` and `N days ago` rather than anything
 formatted for the system locale, and the interface itself is English only. The
 performance targets in the specification have not been measured, and the

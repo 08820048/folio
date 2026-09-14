@@ -135,6 +135,12 @@ const WORKSPACE_INSET: f32 = 8.;
 /// background have to use the same number, or GPUI leaves the parent's
 /// cut-out as a grey triangle — overflow clip is a rectangle, not an arc.
 const WORKSPACE_RADIUS: f32 = 12.;
+/// Floating notice card. Narrower than the old toast so it reads as chrome,
+/// not a panel. Slides in from just past the right edge.
+const NOTICE_WIDTH: f32 = 320.;
+const NOTICE_INSET: f32 = 16.;
+const NOTICE_ENTER: Duration = Duration::from_millis(280);
+const NOTICE_LEAVE: Duration = Duration::from_millis(180);
 /// File-tree row height. `uniform_list` needs a fixed size.
 const TREE_ROW_HEIGHT: f32 = 27.;
 /// Indent of a tree row, matching gpui-component's Tree: `16 * depth + 12`.
@@ -1143,6 +1149,78 @@ struct TerminalTabs {
     active: usize,
 }
 
+/// One floating status card. Drawn in Folio's own chrome — the same surface
+/// and hairline as a tab preview — not the component-kit Alert palette.
+#[derive(Clone, PartialEq, Eq)]
+struct Notice {
+    kind: NoticeKind,
+    title: Option<&'static str>,
+    text: String,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NoticeKind {
+    Info,
+    Success,
+    Warning,
+    Error,
+}
+
+impl Notice {
+    fn error(text: impl Into<String>) -> Self {
+        Self {
+            kind: NoticeKind::Error,
+            title: Some("Error"),
+            text: text.into(),
+        }
+    }
+
+    fn success(text: impl Into<String>) -> Self {
+        Self {
+            kind: NoticeKind::Success,
+            title: None,
+            text: text.into(),
+        }
+    }
+
+    fn warning(text: impl Into<String>) -> Self {
+        Self {
+            kind: NoticeKind::Warning,
+            title: Some("Warning"),
+            text: text.into(),
+        }
+    }
+
+    fn info(title: &'static str, text: impl Into<String>) -> Self {
+        Self {
+            kind: NoticeKind::Info,
+            title: Some(title),
+            text: text.into(),
+        }
+    }
+
+    fn icon(&self) -> IconName {
+        match self.kind {
+            NoticeKind::Info => IconName::Info,
+            NoticeKind::Success => IconName::CircleCheck,
+            NoticeKind::Warning => IconName::TriangleAlert,
+            NoticeKind::Error => IconName::CircleX,
+        }
+    }
+
+    /// Icon colour. Sage, brick, ochre — the same register as the rest of
+    /// the chrome, not the kit's neons.
+    fn mark(&self, cx: &App) -> Hsla {
+        let dark = cx.theme().is_dark();
+        match self.kind {
+            NoticeKind::Success => cx.theme().accent_foreground,
+            NoticeKind::Error => rgb(if dark { 0xC98982 } else { 0xA35B52 }).into(),
+            NoticeKind::Warning => rgb(if dark { 0xC4B07A } else { 0x8A7340 }).into(),
+            NoticeKind::Info => cx.theme().muted_foreground,
+        }
+    }
+}
+
 pub struct Folio {
     project: Project,
     parked: Vec<Project>,
@@ -1233,7 +1311,11 @@ pub struct Folio {
     /// Set when a search result is opened, so the cursor lands on the match once
     /// the file's editor exists.
     goto: Option<(PathBuf, Position)>,
-    message: Option<String>,
+    notice: Option<Notice>,
+    /// Bumped per announcement so a new card can replay the slide-in.
+    notice_id: u64,
+    /// The card is sliding back off the right edge and should unmount after.
+    notice_leaving: bool,
     loading: bool,
     project_loading: bool,
     saving: bool,
@@ -1389,7 +1471,7 @@ impl Folio {
             Ok(settings) => (settings, None),
             Err(error) => (
                 Settings::default(),
-                Some(format!("Could not read settings: {error}")),
+                Some(Notice::error(format!("Could not read settings: {error}"))),
             ),
         };
         let appearance = window.appearance();
@@ -1520,7 +1602,9 @@ impl Folio {
             window_file,
             search_request: Arc::new(AtomicU64::new(0)),
             goto: None,
-            message: settings_error,
+            notice: settings_error,
+            notice_id: 0,
+            notice_leaving: false,
             loading: false,
             project_loading: false,
             saving: false,
@@ -1970,7 +2054,7 @@ impl Folio {
         self.resizing = false;
         self.resizing_pane = false;
         self.split_chord = false;
-        self.message = None;
+        self.clear_notice();
     }
 
     /// Supersede any running scan and drop the results it produced.
@@ -2131,11 +2215,11 @@ impl Folio {
         cx: &mut Context<Self>,
     ) {
         let Some(parent) = path.parent().map(Path::to_path_buf) else {
-            self.error("Choose a folder to put the project in".into(), cx);
+            self.error("Choose a folder to put the project in", cx);
             return;
         };
         let Some(name) = path.file_name().map(|name| name.to_string_lossy().into_owned()) else {
-            self.error("Name cannot be empty".into(), cx);
+            self.error("Name cannot be empty", cx);
             return;
         };
         let task = cx
@@ -2230,8 +2314,7 @@ impl Folio {
         }
         self.cloning = true;
         self.project_loading = true;
-        self.message = Some("Cloning…".into());
-        cx.notify();
+        self.status("Cloning", "Copying the repository onto this computer.", cx);
         let task = cx
             .background_executor()
             .spawn(async move { git::clone(&url, &dest) });
@@ -2242,7 +2325,7 @@ impl Folio {
                 this.project_loading = false;
                 match result {
                     Ok(path) => {
-                        this.message = None;
+                        this.clear_notice();
                         this.open_project(path, window, cx);
                     }
                     Err(e) => this.error(e.to_string(), cx),
@@ -2259,7 +2342,7 @@ impl Folio {
         self.open_request += 1;
         self.project_loading = true;
         self.loading = true;
-        self.message = None;
+        self.clear_notice();
         cx.notify();
         let generation = self.generation;
         let ignored = self.settings.ignored.clone();
@@ -2936,7 +3019,7 @@ impl Folio {
             return;
         }
         if source.is_dir() && into.starts_with(&source) {
-            self.error("Cannot move a folder into itself".into(), cx);
+            self.error("Cannot move a folder into itself", cx);
             return;
         }
         self.move_entry(source, into, window, cx);
@@ -4014,7 +4097,7 @@ impl Folio {
         let Some(marker) = buffer::line_comment(buffer::language(&path)) else {
             // Plenty of languages only have a block form; saying so beats
             // inserting a marker the file cannot use.
-            self.toast("This language has only block comments", cx);
+            self.warn("This language has only block comments", cx);
             return;
         };
         // An image has no buffer to comment.
@@ -4056,7 +4139,7 @@ impl Folio {
             return;
         };
         let Some((open, close)) = buffer::block_comment(buffer::language(&path)) else {
-            self.toast("This language has no block comments", cx);
+            self.warn("This language has no block comments", cx);
             return;
         };
         self.replace_active_lines(window, cx, |block| {
@@ -5117,7 +5200,7 @@ impl Folio {
     /// opening a web page that is not the installer.
     fn check_for_updates(&mut self, cx: &mut Context<Self>) {
         if !crate::sparkle::check() {
-            self.toast("Updates ship in the packaged Mac app", cx);
+            self.inform("Updates", "Updates ship in the packaged Mac app.", cx);
         }
     }
 
@@ -5348,7 +5431,7 @@ impl Folio {
                         }
                         this.project.image = Some((path.clone(), image));
                         this.project.show_path(path);
-                        this.message = None;
+                        this.clear_notice();
                         this.tree_focus.focus(window, cx);
                         this.update_title(window);
                         this.follow_diff(window, cx);
@@ -5415,7 +5498,7 @@ impl Folio {
                         this.apply_goto(&path, window, cx);
                         this.focus_open_file(&path, &editor, window, cx);
                         this.project.show_path(path.clone());
-                        this.message = None;
+                        this.clear_notice();
                         this.apply_recovered(&path, window, cx);
                         this.update_title(window);
                         this.follow_diff(window, cx);
@@ -5940,7 +6023,7 @@ impl Folio {
             self.toast(&format!("Reloaded {reloaded} files from disk"), cx);
         }
         for name in removed {
-            self.toast(&format!("{name} was removed on disk"), cx);
+            self.warn(&format!("{name} was removed on disk"), cx);
         }
         if self.blame.is_some() {
             self.read_blame(window, cx);
@@ -6925,29 +7008,156 @@ impl Folio {
                 cx.notify();
                 return;
             }
-            self.error("Enter a line number, for example :123".into(), cx);
+            self.error("Enter a line number, for example :123", cx);
         } else if let Some(path) = self.matches.get(self.match_selected).cloned() {
             self.open_file(path, window, cx);
         }
     }
 
-    fn error(&mut self, message: String, cx: &mut Context<Self>) {
-        self.message = Some(message);
-        cx.notify();
+    fn error(&mut self, message: impl Into<String>, cx: &mut Context<Self>) {
+        self.announce(Notice::error(message), false, cx);
     }
+
     fn toast(&mut self, message: &str, cx: &mut Context<Self>) {
-        self.message = Some(message.into());
-        let message = message.to_string();
+        self.announce(Notice::success(message), true, cx);
+    }
+
+    fn warn(&mut self, message: &str, cx: &mut Context<Self>) {
+        self.announce(Notice::warning(message), true, cx);
+    }
+
+    fn inform(&mut self, title: &'static str, message: &str, cx: &mut Context<Self>) {
+        self.announce(Notice::info(title, message), true, cx);
+    }
+
+    fn status(&mut self, title: &'static str, message: &str, cx: &mut Context<Self>) {
+        self.announce(Notice::info(title, message), false, cx);
+    }
+
+    fn announce(&mut self, notice: Notice, autohide: bool, cx: &mut Context<Self>) {
+        let text = notice.text.clone();
+        self.notice_id = self.notice_id.wrapping_add(1);
+        self.notice_leaving = false;
+        self.notice = Some(notice);
+        cx.notify();
+        if !autohide {
+            return;
+        }
+        let id = self.notice_id;
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(Duration::from_secs(2)).await;
             let _ = this.update(cx, |this, cx| {
-                if this.message.as_ref() == Some(&message) {
-                    this.message = None;
+                if this.notice_id == id && this.notice.as_ref().is_some_and(|n| n.text == text) {
+                    this.dismiss_notice(cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn clear_notice(&mut self) {
+        self.notice = None;
+        self.notice_leaving = false;
+    }
+
+    fn dismiss_notice(&mut self, cx: &mut Context<Self>) {
+        if self.notice.is_none() || self.notice_leaving {
+            return;
+        }
+        self.notice_leaving = true;
+        let id = self.notice_id;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(NOTICE_LEAVE).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.notice_id == id {
+                    this.clear_notice();
                     cx.notify();
                 }
             });
         })
         .detach();
+    }
+
+    fn render_notice(&self, notice: &Notice, cx: &mut Context<Self>) -> AnyElement {
+        let leaving = self.notice_leaving;
+        let mark = notice.mark(cx);
+        let body_color = if notice.title.is_some() {
+            cx.theme().muted_foreground
+        } else {
+            cx.theme().foreground
+        };
+        let card = div()
+            .id("notice-card")
+            .role(Role::Alert)
+            .flex()
+            .items_start()
+            .w_full()
+            .gap_2()
+            .px_3()
+            .py_2()
+            .rounded(px(WORKSPACE_RADIUS))
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().sidebar)
+            .shadow_md()
+            .child(
+                div()
+                    .mt(px(1.))
+                    .child(Icon::new(notice.icon()).small().text_color(mark)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w_0()
+                    .gap(px(2.))
+                    .when_some(notice.title, |el, title| {
+                        el.child(div().text_size(ui(12.)).child(title))
+                    })
+                    .child(
+                        div()
+                            .text_size(ui(12.))
+                            .text_color(body_color)
+                            .child(notice.text.clone()),
+                    ),
+            )
+            .child(Self::icon_button(
+                "dismiss-notice",
+                IconName::Close,
+                "Dismiss",
+                |this, _, cx| this.dismiss_notice(cx),
+                cx,
+            ));
+        let slide = NOTICE_WIDTH + NOTICE_INSET;
+        div()
+            .absolute()
+            .top(px(34. + NOTICE_INSET))
+            .right(px(NOTICE_INSET))
+            .w(px(NOTICE_WIDTH))
+            .child(card)
+            .with_animation(
+                ("notice-slide", self.notice_id.saturating_mul(2) + u64::from(leaving)),
+                Animation::new(if leaving { NOTICE_LEAVE } else { NOTICE_ENTER })
+                    .with_easing(move |t| {
+                        if leaving {
+                            t * t * t
+                        } else {
+                            1. - (1. - t).powi(5)
+                        }
+                    }),
+                move |this, delta| {
+                    let offset = if leaving {
+                        NOTICE_INSET - delta * slide
+                    } else {
+                        NOTICE_INSET - (1. - delta) * slide
+                    };
+                    let opacity = if leaving { 1. - delta } else { delta };
+                    this.right(px(offset)).opacity(opacity)
+                },
+            )
+            .into_any_element()
     }
 
     pub fn close_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -10287,34 +10497,8 @@ impl Render for Folio {
             .when_some(self.menu.as_ref(), |el, menu| {
                 el.child(self.render_menu(menu, cx))
             })
-            .when_some(self.message.clone(), |el, message| {
-                el.child(
-                    div()
-                        .absolute()
-                        .bottom(px(18.))
-                        .right(px(20.))
-                        .max_w(px(600.))
-                        .rounded_md()
-                        .border_1()
-                        .border_color(cx.theme().border)
-                        .bg(cx.theme().sidebar)
-                        .px_4()
-                        .py_3()
-                        .flex()
-                        .items_center()
-                        .gap_3()
-                        .child(div().flex_1().text_size(ui(12.)).child(message))
-                        .child(Self::icon_button(
-                            "dismiss-message",
-                            IconName::Close,
-                            "Dismiss",
-                            |this, _, cx| {
-                                this.message = None;
-                                cx.notify();
-                            },
-                            cx,
-                        )),
-                )
+            .when_some(self.notice.clone(), |el, notice| {
+                el.child(self.render_notice(&notice, cx))
             })
     }
 }
@@ -10541,7 +10725,7 @@ mod tests {
         );
         view.update_in(cx, |app, window, cx| {
             assert!(app.parked[0].documents[&b.join("main.rs")].dirty);
-            assert!(app.message.is_some(), "a failed save must prevent quitting");
+            assert!(app.notice.is_some(), "a failed save must prevent quitting");
             app.request(Next::Close, window, cx);
             assert_eq!(app.project.workspace.as_ref().unwrap().root, b);
             assert_eq!(app.project_order, vec![b.clone()]);
@@ -10817,7 +11001,7 @@ mod tests {
         view.update_in(cx, |app, _, _| {
             assert!(app.project.workspace.is_none());
             assert!(
-                app.message.as_ref().is_some_and(|m| !m.is_empty()),
+                app.notice.as_ref().is_some_and(|n| !n.text.is_empty()),
                 "an existing folder is not reused as a new project"
             );
         });
@@ -10849,7 +11033,7 @@ mod tests {
                 .update(cx, |input, cx| input.set_value("not-a-repo", window, cx));
             app.confirm_clone_url(window, cx);
             assert!(app.clone_open);
-            assert!(app.message.as_ref().is_some_and(|m| !m.is_empty()));
+            assert!(app.notice.as_ref().is_some_and(|n| !n.text.is_empty()));
             app.clone_url.update(cx, |input, cx| {
                 input.set_value("08820048/folio", window, cx)
             });
@@ -10951,9 +11135,9 @@ mod tests {
         view.update_in(cx, |app, _, _| {
             assert!(app.project.workspace.is_none());
             assert!(
-                app.message
+                app.notice
                     .as_ref()
-                    .is_some_and(|m| m.contains("already exists")),
+                    .is_some_and(|n| n.text.contains("already exists")),
                 "an existing folder is not reused as a clone"
             );
         });
@@ -13817,9 +14001,9 @@ mod tests {
         cx.run_until_parked();
         view.update_in(cx, |app, _, _| {
             assert!(
-                app.message
-                    .as_deref()
-                    .is_some_and(|message| message.contains("path separator")),
+                app.notice
+                    .as_ref()
+                    .is_some_and(|n| n.text.contains("path separator")),
                 "an unusable name must surface as a message"
             );
         });
@@ -14010,9 +14194,9 @@ mod tests {
         assert!(!doomed.exists(), "the whole subtree must go");
         view.update_in(cx, |app, _, _| {
             assert!(
-                app.message
-                    .as_deref()
-                    .is_some_and(|message| message.contains("Deleted")),
+                app.notice
+                    .as_ref()
+                    .is_some_and(|n| n.text.contains("Deleted")),
                 "a successful delete reports back instead of erroring"
             );
         });
