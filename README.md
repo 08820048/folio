@@ -90,6 +90,8 @@ drawer under the workspace, one set of tabs per project. Hiding it keeps the
 children running; closing the last tab, or the project, takes them with it.
 While the terminal holds the keyboard, `⌘C` / `⌘V` copy and paste its
 selection and `⌘W` closes the tab — elsewhere those keys stay the editor's.
+Printed `http(s)://` URLs and OSC 8 hyperlinks are underlined; `⌃`-click
+(or `⌘`-click on macOS) opens them in the browser.
 Editing uses gpui-component's Rope editor and a Tree-sitter allowlist; type
 sizes, font and indentation come from the settings, and soft wrap is off.
 

@@ -308,9 +308,11 @@ impl Terminal {
                     fg: color(indexed.fg),
                     bg: color(indexed.bg),
                     attrs: attrs(indexed.flags),
+                    hyperlink: indexed.cell.hyperlink().map(|link| Arc::from(link.uri())),
                 };
             }
         }
+        apply_detected_urls(&mut cells, self.size.columns, self.size.screen_lines);
         Snapshot {
             columns: self.size.columns,
             rows: self.size.screen_lines,
@@ -436,6 +438,14 @@ impl Snapshot {
             .collect::<Vec<_>>()
             .join("\n")
     }
+
+    /// The URI under a viewport cell, if that cell is a hyperlink.
+    pub fn hyperlink_at(&self, column: usize, row: usize) -> Option<Arc<str>> {
+        self.cells
+            .get(row.checked_mul(self.columns)? + column)?
+            .hyperlink
+            .clone()
+    }
 }
 
 /// The cursor's row in the visible viewport, if it sits on a drawn line.
@@ -464,12 +474,15 @@ pub enum CursorShape {
 }
 
 /// Content and attributes of one cell in the grid.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Cell {
     pub c: char,
     pub fg: Color,
     pub bg: Color,
     pub attrs: Attrs,
+    /// OSC 8 or a URL detected in the row. Shared across the cells of one
+    /// link so a click anywhere on it opens the same address.
+    pub hyperlink: Option<Arc<str>>,
 }
 
 impl Default for Cell {
@@ -479,6 +492,7 @@ impl Default for Cell {
             fg: Color::DefaultForeground,
             bg: Color::DefaultBackground,
             attrs: Attrs::default(),
+            hyperlink: None,
         }
     }
 }
@@ -606,6 +620,85 @@ fn palette_index(named: NamedColor) -> u8 {
     }
 }
 
+/// Fill cells that have no OSC 8 link but sit on a printed URL.
+fn apply_detected_urls(cells: &mut [Cell], columns: usize, rows: usize) {
+    if columns == 0 {
+        return;
+    }
+    for row in 0..rows {
+        let start = row * columns;
+        let Some(line) = cells.get(start..start + columns) else {
+            return;
+        };
+        let text: String = line.iter().map(|cell| cell.c).collect();
+        for (from, to, uri) in find_urls(&text) {
+            let uri: Arc<str> = uri.into();
+            for col in from..to.min(columns) {
+                if let Some(cell) = cells.get_mut(start + col) {
+                    if cell.hyperlink.is_none() {
+                        cell.hyperlink = Some(uri.clone());
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Byte ranges of `http(s)://` and `mailto:` URLs in a row, as character
+/// offsets so they line up with cells. Trailing punctuation is dropped.
+pub fn find_urls(line: &str) -> Vec<(usize, usize, String)> {
+    let mut out = Vec::new();
+    let bytes = line.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if let Some(scheme) = url_scheme(&bytes[i..]) {
+            let start = i;
+            i += scheme;
+            while i < bytes.len() && is_url_byte(bytes[i]) {
+                i += 1;
+            }
+            let mut end = i;
+            while end > start + scheme && is_trailing_url_punct(bytes[end - 1]) {
+                end -= 1;
+            }
+            if end > start + scheme {
+                let from = line[..start].chars().count();
+                let to = line[..end].chars().count();
+                out.push((from, to, line[start..end].to_string()));
+            }
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+fn url_scheme(bytes: &[u8]) -> Option<usize> {
+    const SCHEMES: [&[u8]; 3] = [b"https://", b"http://", b"mailto:"];
+    SCHEMES
+        .iter()
+        .find(|scheme| bytes.starts_with(scheme))
+        .map(|scheme| scheme.len())
+}
+
+fn is_url_byte(b: u8) -> bool {
+    !b.is_ascii_whitespace() && !matches!(b, b'<' | b'>' | b'"' | b'\'' | b'`')
+}
+
+fn is_trailing_url_punct(b: u8) -> bool {
+    matches!(b, b'.' | b',' | b';' | b':' | b'?' | b'!' | b')' | b']' | b'}')
+}
+
+/// Whether a URI is safe to hand to the system browser.
+pub fn openable_url(uri: &str) -> bool {
+    let uri = uri.trim();
+    if uri.is_empty() || uri.contains(['\n', '\r', '\0']) {
+        return false;
+    }
+    let lower = uri.to_ascii_lowercase();
+    lower.starts_with("https://") || lower.starts_with("http://") || lower.starts_with("mailto:")
+}
+
 fn attrs(flags: Flags) -> Attrs {
     let mut bits = 0;
     for (set, attr) in [
@@ -639,6 +732,56 @@ mod tests {
     use std::time::{Duration, Instant};
 
     const DEADLINE: Duration = Duration::from_secs(10);
+
+    #[test]
+    fn find_urls_drops_trailing_punctuation_and_skips_junk() {
+        assert_eq!(
+            find_urls("see https://example.com/a."),
+            vec![(4, 25, "https://example.com/a".into())]
+        );
+        assert_eq!(
+            find_urls("go (https://example.com/a)"),
+            vec![(4, 25, "https://example.com/a".into())]
+        );
+        assert_eq!(find_urls("no link here").len(), 0);
+        assert_eq!(
+            find_urls("mailto:dev@example.com, please"),
+            vec![(0, 22, "mailto:dev@example.com".into())]
+        );
+        assert!(!openable_url("javascript:alert(1)"));
+        assert!(!openable_url("https://example.com/\nmore"));
+        assert!(openable_url("https://example.com/a"));
+    }
+
+    #[test]
+    fn osc8_and_printed_urls_land_on_their_cells() {
+        let mut terminal = Terminal::spawn(Spawn {
+            working_directory: None,
+            shell: shell(
+                "/bin/sh",
+                "printf '\\033]8;;https://osc.example/x\\033\\\\osc8\\033]8;;\\033\\\\\\n'; printf 'see https://plain.example/y\\n'",
+            ),
+            columns: 80,
+            rows: 24,
+            scrollback: 100,
+        })
+        .unwrap();
+        let snapshot = wait_for(&mut terminal, |_, snapshot| {
+            snapshot.text().contains("osc8") && snapshot.text().contains("plain.example")
+        });
+        assert_eq!(
+            snapshot.hyperlink_at(0, 0).as_deref(),
+            Some("https://osc.example/x")
+        );
+        let plain = snapshot
+            .row_text(1)
+            .find("https://plain.example/y")
+            .expect("printed url");
+        assert_eq!(
+            snapshot.hyperlink_at(plain, 1).as_deref(),
+            Some("https://plain.example/y")
+        );
+    }
 
     #[test]
     fn viewport_cursor_row_stays_on_a_drawn_line() {

@@ -103,6 +103,8 @@ pub struct TerminalView {
     selection_anchor: Option<GridPoint>,
     /// Where the grid painted; mouse positions become cells against this.
     grid_bounds: Rc<RefCell<Option<Bounds<Pixels>>>>,
+    /// The pointer is over a hyperlink, so the cursor is a pointing hand.
+    hovered_link: bool,
     /// Text the IME has marked but not yet committed.
     marked_text: Option<String>,
 }
@@ -155,6 +157,7 @@ impl TerminalView {
             selection_anchor: None,
             grid_bounds: Rc::new(RefCell::new(None)),
             marked_text: None,
+            hovered_link: false,
         }
     }
 
@@ -290,7 +293,15 @@ impl TerminalView {
         let Some((column, row)) = self.cell_at(event.position) else {
             return;
         };
-        let modes = terminal.snapshot().modes;
+        let snapshot = terminal.snapshot();
+        if opens_link(&event.modifiers)
+            && let Some(uri) = snapshot.hyperlink_at(column, row)
+            && terminal::openable_url(&uri)
+        {
+            cx.open_url(&uri);
+            return;
+        }
+        let modes = snapshot.modes;
         if modes.mouse_reporting {
             let button = match event.button {
                 MouseButton::Middle => Button::Middle,
@@ -343,7 +354,13 @@ impl TerminalView {
             cx.notify();
             return;
         }
-        let modes = terminal.snapshot().modes;
+        let snapshot = terminal.snapshot();
+        let hovering = snapshot.hyperlink_at(column, row).is_some();
+        if hovering != self.hovered_link {
+            self.hovered_link = hovering;
+            cx.notify();
+        }
+        let modes = snapshot.modes;
         if modes.mouse_reporting && (event.pressed_button.is_some() || modes.mouse_motion) {
             let button = event.pressed_button.and_then(button_of);
             terminal.write(&terminal_mouse::motion(
@@ -525,6 +542,7 @@ impl Render for TerminalView {
             .bg(cx.theme().background)
             .key_context("FolioTerminal")
             .track_focus(&self.focus)
+            .when(self.hovered_link, |el| el.cursor_pointer())
             .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
             .on_mouse_move(cx.listener(Self::mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
@@ -899,9 +917,11 @@ fn layout_cells(
                     }),
                 }
             }
+            let linked = cell.hyperlink.is_some();
             if cell.c == ' '
                 && !cell.attrs.contains(terminal::Attrs::UNDERLINE)
                 && !cell.attrs.contains(terminal::Attrs::STRIKETHROUGH)
+                && !linked
                 && !on_cursor
             {
                 continue;
@@ -925,10 +945,12 @@ fn layout_cells(
                 font,
                 color: if on_cursor { colors.cursor_text } else { fg },
                 background_color: None,
-                underline: cell
-                    .attrs
-                    .contains(terminal::Attrs::UNDERLINE)
-                    .then(UnderlineStyle::default),
+                underline: (cell.attrs.contains(terminal::Attrs::UNDERLINE) || linked)
+                    .then(|| UnderlineStyle {
+                        color: Some(if on_cursor { colors.cursor_text } else { fg }),
+                        thickness: px(1.),
+                        wavy: false,
+                    }),
                 strikethrough: cell
                     .attrs
                     .contains(terminal::Attrs::STRIKETHROUGH)
@@ -1100,6 +1122,10 @@ impl InputHandler for TerminalInputHandler {
     }
 }
 
+fn opens_link(mods: &gpui::Modifiers) -> bool {
+    mods.control || mods.platform
+}
+
 fn mods_of(mods: gpui::Modifiers) -> Modifiers {
     Modifiers {
         shift: mods.shift,
@@ -1128,6 +1154,19 @@ fn button_of(button: MouseButton) -> Option<Button> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ctrl_or_the_platform_key_opens_a_link() {
+        assert!(opens_link(&gpui::Modifiers {
+            control: true,
+            ..Default::default()
+        }));
+        assert!(opens_link(&gpui::Modifiers {
+            platform: true,
+            ..Default::default()
+        }));
+        assert!(!opens_link(&gpui::Modifiers::default()));
+    }
 
     fn keystroke(spec: &str, key_char: Option<&str>) -> Keystroke {
         let mut keystroke = Keystroke::parse(spec).unwrap();
