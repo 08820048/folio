@@ -9092,7 +9092,6 @@ enum Page {
     Interface,
     Type,
     Indentation,
-    Sidebar,
     Ignored,
 }
 
@@ -9102,7 +9101,6 @@ impl Page {
             Page::Interface => "Interface",
             Page::Type => "Font & Size",
             Page::Indentation => "Indentation",
-            Page::Sidebar => "Sidebar",
             Page::Ignored => "Ignored Folders",
         }
     }
@@ -9112,7 +9110,6 @@ impl Page {
             Page::Interface => "interface",
             Page::Type => "type",
             Page::Indentation => "indentation",
-            Page::Sidebar => "sidebar",
             Page::Ignored => "ignored",
         }
     }
@@ -9122,7 +9119,6 @@ impl Page {
             Page::Interface => "How the interface itself looks",
             Page::Type => "The font code is drawn in",
             Page::Indentation => "Tabs, spaces and how wide they are",
-            Page::Sidebar => "How the window is arranged",
             Page::Ignored => "Which files a project shows",
         }
     }
@@ -9143,10 +9139,6 @@ const GROUPS: &[Group] = &[
     Group {
         title: "Editor",
         pages: &[Page::Type, Page::Indentation],
-    },
-    Group {
-        title: "Window & Layout",
-        pages: &[Page::Sidebar],
     },
     Group {
         title: "Files",
@@ -9239,7 +9231,7 @@ impl SettingsView {
             folio,
             settings,
             page: Page::Type,
-            // Open to begin with: five pages do not need hiding, and a tree
+            // Open to begin with: four pages do not need hiding, and a tree
             // that starts folded reads as a list of nothing.
             expanded: [true; GROUPS.len()],
             font_select,
@@ -9733,38 +9725,6 @@ impl SettingsView {
                                 settings.hard_tabs = false
                             }),
                             ("Tabs", settings.hard_tabs, |settings| settings.hard_tabs = true),
-                            cx,
-                        ),
-                        cx,
-                    ),
-                ],
-                Page::Sidebar => vec![
-                    Self::row(
-                        "Show the file tree",
-                        "Whether the project tree is shown when Folio opens.",
-                        self.choice(
-                            "sidebar",
-                            ("Shown", settings.sidebar, |settings| settings.sidebar = true),
-                            ("Hidden", !settings.sidebar, |settings| settings.sidebar = false),
-                            cx,
-                        ),
-                        cx,
-                    ),
-                    Self::row(
-                        "Show the activity bar",
-                        "The icon rail on the far left. The title-bar button writes this back.",
-                        self.choice(
-                            "activity-bar",
-                            (
-                                "Shown",
-                                settings.activity_bar,
-                                |settings| settings.activity_bar = true,
-                            ),
-                            (
-                                "Hidden",
-                                !settings.activity_bar,
-                                |settings| settings.activity_bar = false,
-                            ),
                             cx,
                         ),
                         cx,

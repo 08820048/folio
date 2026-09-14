@@ -358,10 +358,10 @@ handing it to AppKit means it is painted from a system material that samples
 whatever is behind the window, which lands nowhere near the theme in either
 appearance. The traffic lights are still the real ones.
 
-The sidebar is a tree. Four headings collapse, and the five pages under them
+The sidebar is a tree. Three headings collapse, and the four pages under them
 are the screens: interface font and size, code font and size, tab size and
-indent character, whether the sidebar starts open, and the folder names the
-tree and search skip. A heading is not a page itself, so clicking one toggles
+indent character, and the folder names the tree and search skip. The file tree
+and activity bar are toggled from the window itself, not from here. A heading is not a page itself, so clicking one toggles
 it and clicking a page selects it. Each row is the setting's name and what it
 does stacked on the left and its control flush right, with a hairline
 underneath. Numbers step, two-way choices toggle, and both live in one bordered
@@ -626,7 +626,7 @@ a signed zip from the same R2 bucket; `cargo run` has no framework and says so.
 There is no GitHub Release. Window geometry is written when a window closes and again
 on quit, so a force-killed process loses wherever the windows were — the same
 is true of the settings window. The settings sidebar has no search box, and its
-pages do not scroll, which is fine at five pages and would need fixing before
+pages do not scroll, which is fine at four pages and would need fixing before
 there were many more. Word wrap is off and not offered: a long line scrolls
 sideways, and there is no switch for it. Neither the sidebar nor the toast
 animates — the sidebar is drawn at its width and the toast is a layer that
