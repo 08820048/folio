@@ -1,6 +1,7 @@
 //! Folio filesystem and terminal operations. UI callers execute these on
 //! the background executor.
 pub mod blame;
+pub mod brackets;
 pub mod buffer;
 pub mod diff;
 pub mod editorconfig;

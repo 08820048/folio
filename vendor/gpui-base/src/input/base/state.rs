@@ -348,6 +348,9 @@ pub struct InputBaseState {
     pub(super) editor_scrollbar_snapshot: Cell<Option<EditorScrollbarSnapshot>>,
     pub(super) editor_paddings: Edges<Pixels>,
     pub(super) decorations: DecorationCollections,
+    /// Matched `()` / `[]` / `{}` pairs as `(open, close)` UTF-8 offsets.
+    /// The renderer finds the pair under the caret and draws it.
+    pub(super) bracket_pairs: Vec<(usize, usize)>,
     pub(super) editor_style: InputEditorStyle,
     /// Face this view paints with. A parent `.font_family()` does not cross
     /// the entity boundary, so a code editor has to be told its own face.
@@ -639,6 +642,7 @@ impl InputBaseState {
             mask_pattern: MaskPattern::default(),
             mask_pattern_set: false,
             decorations: DecorationCollections::default(),
+            bracket_pairs: Vec::new(),
             editor_style: InputEditorStyle::default(),
             preferred_font: None,
             preferred_font_size: None,

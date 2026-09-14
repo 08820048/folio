@@ -229,6 +229,11 @@ Four things beyond plain typing. Three are bound to the code editor's own key
 context, so they never reach the search box or a settings field; the fourth is
 Enter, which the editor already had.
 
+**Rainbow brackets.** `()`, `[]` and `{}` take a colour from how deeply they
+are nested, and the two halves of a pair share that colour. Strings and
+comments are skipped. When the caret sits on a bracket, or just after one, both
+sides of the pair sit on a slightly larger wash so the match is obvious.
+
 **Brackets pair.** `(`, `[`, `{`, `"`, `'` and `` ` `` insert both characters
 and leave the caret between them, as one edit and so one step on the undo
 stack. With a selection they wrap it instead. A closing bracket typed where one

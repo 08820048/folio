@@ -128,6 +128,11 @@ impl EditorState {
         })
     }
 
+    pub fn set_bracket_pairs(&mut self, pairs: Vec<(usize, usize)>, cx: &mut Context<Self>) {
+        self.base
+            .update(cx, |state, cx| state.set_bracket_pairs(pairs, cx));
+    }
+
     #[doc(hidden)]
     pub fn base_state(&self) -> &Entity<InputBaseState> {
         &self.base

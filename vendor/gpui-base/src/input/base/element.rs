@@ -45,6 +45,21 @@ fn diagnostic_highlight_style(
     }
 }
 
+fn pair_under_caret(pairs: &[(usize, usize)], offset: usize) -> Option<(usize, usize)> {
+    let span = |pair: &&(usize, usize)| pair.1.saturating_sub(pair.0);
+    pairs
+        .iter()
+        .filter(|(open, close)| offset == *open || offset == *close)
+        .min_by_key(span)
+        .or_else(|| {
+            pairs
+                .iter()
+                .filter(|(open, close)| offset == *open + 1 || offset == *close + 1)
+                .min_by_key(span)
+        })
+        .copied()
+}
+
 const BOTTOM_MARGIN_ROWS: usize = 3;
 pub(super) const RIGHT_MARGIN: Pixels = px(10.);
 pub(super) const LINE_NUMBER_RIGHT_MARGIN: Pixels = px(10.);
@@ -678,6 +693,16 @@ impl TextElement {
         last_layout: &LastLayout,
         bounds: &Bounds<Pixels>,
     ) -> Option<Path<Pixels>> {
+        Self::layout_match_range_padded(range, last_layout, bounds, px(0.), px(0.))
+    }
+
+    fn layout_match_range_padded(
+        range: Range<usize>,
+        last_layout: &LastLayout,
+        bounds: &Bounds<Pixels>,
+        pad_x: Pixels,
+        pad_y: Pixels,
+    ) -> Option<Path<Pixels>> {
         if range.is_empty() {
             return None;
         }
@@ -745,10 +770,12 @@ impl TextElement {
                 end_x = end_x.max(start.x + px(6.));
 
                 line_corners.push(Corners {
-                    top_left: line_origin + point(start.x, start.y),
-                    top_right: line_origin + point(end_x, start.y),
-                    bottom_left: line_origin + point(start.x, start.y + line_height),
-                    bottom_right: line_origin + point(end_x, start.y + line_height),
+                    top_left: line_origin + point(start.x - pad_x, start.y - pad_y),
+                    top_right: line_origin + point(end_x + pad_x, start.y - pad_y),
+                    bottom_left: line_origin
+                        + point(start.x - pad_x, start.y + line_height + pad_y),
+                    bottom_right: line_origin
+                        + point(end_x + pad_x, start.y + line_height + pad_y),
                 });
 
                 // wrapped lines
@@ -761,10 +788,12 @@ impl TextElement {
                     }
 
                     line_corners.push(Corners {
-                        top_left: line_origin + point(start.x, start.y),
-                        top_right: line_origin + point(end.x, start.y),
-                        bottom_left: line_origin + point(start.x, start.y + line_height),
-                        bottom_right: line_origin + point(end.x, start.y + line_height),
+                        top_left: line_origin + point(start.x - pad_x, start.y - pad_y),
+                        top_right: line_origin + point(end.x + pad_x, start.y - pad_y),
+                        bottom_left: line_origin
+                            + point(start.x - pad_x, start.y + line_height + pad_y),
+                        bottom_right: line_origin
+                            + point(end.x + pad_x, start.y + line_height + pad_y),
                     });
                 }
             }
@@ -839,6 +868,35 @@ impl TextElement {
         }
 
         paths
+    }
+
+    fn layout_bracket_matches(
+        &self,
+        last_layout: &LastLayout,
+        bounds: &Bounds<Pixels>,
+        cx: &mut App,
+    ) -> Vec<Path<Pixels>> {
+        let state = self.state.read(cx);
+        if state.bracket_pairs.is_empty() {
+            return Vec::new();
+        }
+        let mut ranges = Vec::new();
+        for selection in state.selections.all() {
+            for offset in [selection.start, selection.end] {
+                if let Some((open, close)) = pair_under_caret(&state.bracket_pairs, offset) {
+                    ranges.push(open..open + 1);
+                    ranges.push(close..close + 1);
+                }
+            }
+        }
+        ranges.sort_by_key(|range| range.start);
+        ranges.dedup();
+        ranges
+            .into_iter()
+            .filter_map(|range| {
+                Self::layout_match_range_padded(range, last_layout, bounds, px(2.5), px(1.5))
+            })
+            .collect()
     }
 
     fn layout_hover_highlight(
@@ -1625,6 +1683,7 @@ pub(super) struct PrepaintState {
     selection_paths: Vec<Path<Pixels>>,
     hover_highlight_path: Option<Path<Pixels>>,
     search_match_paths: Vec<(Path<Pixels>, bool)>,
+    bracket_match_paths: Vec<Path<Pixels>>,
     document_color_paths: Vec<(Path<Pixels>, Hsla)>,
     hover_definition_hitbox: Option<Hitbox>,
     indent_guides_path: Option<Path<Pixels>>,
@@ -2051,6 +2110,7 @@ impl Element for TextElement {
         last_layout.cursor_bounds = cursor_bounds;
 
         let search_match_paths = self.layout_search_matches(&last_layout, &mut bounds, cx);
+        let bracket_match_paths = self.layout_bracket_matches(&last_layout, &bounds, cx);
         let selection_paths = self.layout_selections(&last_layout, &bounds, window, cx);
         let hover_highlight_path = self.layout_hover_highlight(&last_layout, &mut bounds, cx);
         let document_color_paths =
@@ -2133,6 +2193,7 @@ impl Element for TextElement {
             current_row,
             selection_paths,
             search_match_paths,
+            bracket_match_paths,
             hover_highlight_path,
             hover_definition_hitbox,
             document_color_paths,
@@ -2236,6 +2297,10 @@ impl Element for TextElement {
 
             for path in prepaint.selection_paths.iter() {
                 window.paint_path(path.clone(), editor_style.selection);
+            }
+
+            for path in prepaint.bracket_match_paths.iter() {
+                window.paint_path(path.clone(), editor_style.caret.opacity(0.34));
             }
 
             // Paint hover highlight

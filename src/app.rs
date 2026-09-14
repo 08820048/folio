@@ -3,7 +3,7 @@ use crate::syntax;
 use crate::preview::{self, Content};
 use crate::terminal_view::TerminalView;
 use folio::{
-    blame, buffer, diff, editorconfig, fs_op, git,
+    blame, brackets, buffer, diff, editorconfig, fs_op, git,
     recent::{self, RecentProject},
     search, session,
     settings::{self, Settings},
@@ -15,7 +15,10 @@ use gpui::{prelude::*, *};
 use gpui_component::{
     ActiveTheme, Disableable, Icon, IconName, Root, Sizable, Theme, TitleBar,
     button::{Button, ButtonVariants},
-    input::{self, EditorState, Input, InputBaseState, InputEvent, InputState, Position, Rope, TabSize},
+    input::{
+        self, EditorState, Input, InputBaseState, InputEvent, InputState, Position, Rope, TabSize,
+        TextDecoration, TextDecorationCollection,
+    },
     select::{SearchableVec, Select, SelectEvent, SelectState},
     text::{TextView, TextViewStyle},
 };
@@ -188,6 +191,18 @@ fn expanded_project_max_height(rows: usize) -> f32 {
 
 /// Selected file-tree row. Lighter than `list_active`, so the pill does
 /// not read as a grey slab on the white sidebar.
+fn bracket_color(depth: usize, dark: bool) -> Hsla {
+    // Sage, steel, ochre, plum, brick, teal — the same register as the rest
+    // of the chrome, rotating so nested pairs stay distinct.
+    const HUES: [f32; 6] = [0.38, 0.58, 0.12, 0.82, 0.02, 0.48];
+    let hue = HUES[depth % HUES.len()];
+    if dark {
+        hsla(hue, 0.34, 0.72, 1.)
+    } else {
+        hsla(hue, 0.40, 0.42, 1.)
+    }
+}
+
 fn tree_row_selected(cx: &App) -> Hsla {
     rgb(if cx.theme().is_dark() {
         0x24282A
@@ -489,7 +504,15 @@ struct Document {
     large: bool,
     /// Markdown opens rendered. Source is the same editor.
     preview: bool,
+    brackets: BracketPaint,
     _subscription: Subscription,
+}
+
+/// Rainbow colours on every matched pair. The caret's match is drawn by
+/// the editor from the same pair list, so it updates as the caret moves.
+struct BracketPaint {
+    rainbow: TextDecorationCollection,
+    last_rainbow: Vec<TextDecoration>,
 }
 #[derive(Clone)]
 struct Row {
@@ -3704,11 +3727,62 @@ impl Folio {
                     {
                         doc.dirty = editor.read(cx).is_modified(&doc.saved);
                     }
+                    this.refresh_brackets(editor, cx);
                     this.update_title(window);
                     cx.notify();
                 }
             },
         )
+    }
+
+    fn attach_brackets(
+        editor: &Entity<EditorState>,
+        cx: &mut Context<Self>,
+    ) -> BracketPaint {
+        let rainbow = editor.update(cx, |state, cx| {
+            state.create_decorations_collection(Vec::new(), cx)
+        });
+        BracketPaint {
+            rainbow,
+            last_rainbow: Vec::new(),
+        }
+    }
+
+    fn refresh_brackets(&mut self, editor: &Entity<EditorState>, cx: &mut Context<Self>) {
+        let dark = cx.theme().is_dark();
+        let Some(doc) = std::iter::once(&mut self.project)
+            .chain(self.parked.iter_mut())
+            .flat_map(|project| project.documents.values_mut())
+            .find(|doc| &doc.editor == editor)
+        else {
+            return;
+        };
+        if doc.large {
+            editor.update(cx, |state, cx| state.set_bracket_pairs(Vec::new(), cx));
+            return;
+        }
+        let text = editor.read(cx).snapshot().to_string();
+        let pairs = brackets::pairs(&text);
+        let rainbow: Vec<TextDecoration> = pairs
+            .iter()
+            .flat_map(|pair| {
+                let style = HighlightStyle {
+                    color: Some(bracket_color(pair.depth, dark)),
+                    ..Default::default()
+                };
+                [
+                    TextDecoration::new(pair.open..pair.open + 1, style),
+                    TextDecoration::new(pair.close..pair.close + 1, style),
+                ]
+            })
+            .collect();
+        let offsets: Vec<(usize, usize)> =
+            pairs.iter().map(|pair| (pair.open, pair.close)).collect();
+        if rainbow != doc.brackets.last_rainbow {
+            doc.brackets.last_rainbow.clone_from(&rainbow);
+            doc.brackets.rainbow.set(rainbow, cx);
+        }
+        editor.update(cx, |state, cx| state.set_bracket_pairs(offsets, cx));
     }
 
     fn cancel_create(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -5479,6 +5553,7 @@ impl Folio {
                         });
                         let subscription =
                             Self::subscribe_document(&editor, window, cx);
+                        let brackets = Self::attach_brackets(&editor, cx);
                         let jumping = this
                             .goto
                             .as_ref()
@@ -5492,9 +5567,11 @@ impl Folio {
                                 dirty: false,
                                 large,
                                 preview,
+                                brackets,
                                 _subscription: subscription,
                             },
                         );
+                        this.refresh_brackets(&editor, cx);
                         this.apply_goto(&path, window, cx);
                         this.focus_open_file(&path, &editor, window, cx);
                         this.project.show_path(path.clone());
@@ -12783,6 +12860,42 @@ mod tests {
             base.update(cx, |base, cx| base.insert_line_break(window, cx));
             assert_eq!(value(cx), "let s = \"\n\";\n");
             assert_eq!(caret(cx), 10..10);
+        });
+    }
+
+    #[gpui::test]
+    fn rainbow_brackets_colour_pairs_and_mark_the_match(cx: &mut TestAppContext) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let file = root.join("main.rs");
+        std::fs::write(&file, "fn main() { let x = (1); }\n").unwrap();
+        cx.update(gpui_component::init);
+        let cx = cx.add_empty_window();
+        let view = cx.update(|window, cx| {
+            cx.new(|cx| {
+                let mut app = Folio::new(window, cx);
+                app.recent_task = None;
+                app.recent_file = root.join("recent.json");
+                app.settings_file = root.join("settings.json");
+                app.window_file = root.join("window.json");
+                app.settings = Settings::default();
+                app.applied_ignored = app.settings.ignored.clone();
+                app
+            })
+        });
+        view.update_in(cx, |app, window, cx| {
+            app.request(Next::Open(root.clone()), window, cx)
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |app, window, cx| app.open_file(file.clone(), window, cx));
+        cx.run_until_parked();
+        view.update_in(cx, |app, _, cx| {
+            let doc = &app.project.documents[&file];
+            assert_eq!(
+                doc.brackets.rainbow.get_ranges(cx).len(),
+                6,
+                "three pairs, each painted on both sides"
+            );
         });
     }
 

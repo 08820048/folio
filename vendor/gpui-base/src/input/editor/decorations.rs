@@ -246,6 +246,14 @@ impl InputBaseState {
             id,
         }
     }
+
+    /// Rainbow-bracket pairs. The caret's match is drawn on the next paint.
+    pub fn set_bracket_pairs(&mut self, pairs: Vec<(usize, usize)>, cx: &mut Context<Self>) {
+        if self.bracket_pairs != pairs {
+            self.bracket_pairs = pairs;
+            cx.notify();
+        }
+    }
 }
 
 #[cfg(test)]
