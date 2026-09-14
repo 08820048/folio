@@ -70,7 +70,7 @@ pub fn duplicate(source: &Path) -> io::Result<PathBuf> {
             None => format!("{stem} {suffix}"),
         };
         let candidate = parent.join(name);
-        if candidate.exists() {
+        if fs::symlink_metadata(&candidate).is_ok() {
             continue;
         }
         copy(source, &candidate)?;
@@ -82,9 +82,11 @@ pub fn duplicate(source: &Path) -> io::Result<PathBuf> {
 /// Copy or move `source` into the folder `into`. A cut only removes the source
 /// once the copy has landed.
 pub fn paste(source: &Path, into: &Path, cut: bool) -> io::Result<PathBuf> {
-    let name = source
-        .file_name()
-        .ok_or_else(|| io::Error::other("Invalid path"))?;
+    let kind = fs::symlink_metadata(source)?.file_type();
+    if (!kind.is_dir() && !kind.is_file()) || !fs::symlink_metadata(into)?.is_dir() {
+        return Err(io::Error::other("Copy and move require regular files and folders"));
+    }
+    let name = source.file_name().ok_or_else(|| io::Error::other("Invalid path"))?;
     let destination = into.join(name);
     if destination == source {
         return Err(io::Error::other("Source and destination are the same"));
@@ -92,7 +94,7 @@ pub fn paste(source: &Path, into: &Path, cut: bool) -> io::Result<PathBuf> {
     if source.is_dir() && into.starts_with(source) {
         return Err(io::Error::other("Cannot move a folder into itself"));
     }
-    if destination.exists() {
+    if fs::symlink_metadata(&destination).is_ok() {
         return Err(io::Error::other(format!(
             "{} already exists",
             name.to_string_lossy()
@@ -100,9 +102,13 @@ pub fn paste(source: &Path, into: &Path, cut: bool) -> io::Result<PathBuf> {
     }
     if cut {
         // A move across volumes cannot be a rename, so fall back to copy+delete.
-        if fs::rename(source, &destination).is_err() {
-            copy(source, &destination)?;
-            remove(source)?;
+        match rename_new(source, &destination) {
+            Ok(()) => {}
+            Err(error) if is_cross_device(&error) => {
+                copy(source, &destination)?;
+                remove(source)?;
+            }
+            Err(error) => return Err(error),
         }
     } else {
         copy(source, &destination)?;
@@ -120,16 +126,86 @@ pub fn rename(source: &Path, name: &str) -> io::Result<PathBuf> {
     if destination == source {
         return Ok(destination);
     }
-    // A case-only rename asks for a name that already "exists" on a
-    // case-insensitive volume, but it is the entry being renamed.
-    let same_entry = source
-        .file_name()
-        .is_some_and(|current| current.to_string_lossy().to_lowercase() == name.to_lowercase());
-    if destination.exists() && !same_entry {
-        return Err(io::Error::other(format!("{name} already exists")));
-    }
-    fs::rename(source, &destination)?;
+    rename_new(source, &destination)?;
     Ok(destination)
+}
+
+/// Atomically refuse an existing target, including symbolic links. A
+/// case-only rename on an insensitive volume is the same file, so it is
+/// allowed after the exclusive attempt reports that the destination exists.
+fn rename_new(source: &Path, destination: &Path) -> io::Result<()> {
+    match exclusive_rename(source, destination) {
+        Ok(()) => Ok(()),
+        Err(_) if same_identity(source, destination) => fs::rename(source, destination),
+        Err(error) => Err(error),
+    }
+}
+
+fn exclusive_rename(source: &Path, destination: &Path) -> io::Result<()> {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        use rustix::fs::{renameat_with, CWD, RenameFlags};
+        renameat_with(CWD, source, CWD, destination, RenameFlags::NOREPLACE).map_err(Into::into)
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if fs::symlink_metadata(destination).is_ok() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "destination exists",
+            ));
+        }
+        fs::rename(source, destination)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        let _ = (source, destination);
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Atomic non-overwriting rename is unavailable",
+        ))
+    }
+}
+
+fn same_identity(source: &Path, destination: &Path) -> bool {
+    let Ok(source) = fs::symlink_metadata(source) else {
+        return false;
+    };
+    let Ok(destination) = fs::symlink_metadata(destination) else {
+        return false;
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        source.dev() == destination.dev() && source.ino() == destination.ino()
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        source.volume_serial_number() == destination.volume_serial_number()
+            && source.file_index() == destination.file_index()
+            && source.volume_serial_number().is_some()
+            && source.file_index().is_some()
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (source, destination);
+        false
+    }
+}
+
+fn is_cross_device(error: &io::Error) -> bool {
+    if error.kind() == io::ErrorKind::CrossesDevices {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        rustix::io::Errno::from_io_error(error) == Some(rustix::io::Errno::XDEV)
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
 }
 
 /// Delete permanently. There is no undo — `trash` is the reversible one.
@@ -192,10 +268,36 @@ fn copy(source: &Path, destination: &Path) -> io::Result<()> {
         }
         Ok(())
     } else if meta.is_file() {
-        fs::copy(source, destination).map(|_| ())
+        #[cfg(unix)]
+        let mut input = fs::File::from(rustix::fs::open(
+            source, rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NOFOLLOW,
+            rustix::fs::Mode::empty(),
+        )?);
+        #[cfg(not(unix))]
+        let mut input = fs::File::open(source)?;
+        if !input.metadata()?.is_file() {
+            return Err(io::Error::other("Only regular files can be copied"));
+        }
+        let mut output = fs::OpenOptions::new().write(true).create_new(true).open(destination)?;
+        io::copy(&mut input, &mut output)?;
+        output.set_permissions(meta.permissions())?;
+        output.sync_all()
+    } else if meta.file_type().is_symlink() {
+        // Recreate the link itself. Following it would write wherever the
+        // dangling or out-of-project target pointed.
+        let target = fs::read_link(source)?;
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(target, destination)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (target, destination);
+            Err(io::Error::other(
+                "Only regular files and folders can be copied",
+            ))
+        }
     } else {
-        // Symlinks are hidden from the tree, so they never arrive here in
-        // practice; refuse rather than follow one out of the project.
         Err(io::Error::other(
             "Only regular files and folders can be copied",
         ))
@@ -298,5 +400,59 @@ fn run(mut command: Command) -> io::Result<()> {
         Ok(())
     } else {
         Err(io::Error::other("External command failed"))
+    }
+}
+
+#[cfg(all(test, unix))]
+mod safety_tests {
+    use super::*;
+    use std::os::unix::fs::symlink;
+    #[test]
+    fn copy_and_rename_refuse_links_and_existing_targets() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let source = root.join("a.txt");
+        let into = root.join("dest");
+        let outside = root.join("outside");
+        fs::write(&source, "source").unwrap();
+        fs::create_dir(&into).unwrap();
+        symlink(&outside, into.join("a.txt")).unwrap();
+        assert!(paste(&source, &into, false).is_err());
+        assert!(paste(&source, &into, true).is_err());
+        assert!(!outside.exists());
+        symlink(&outside, root.join("a copy.txt")).unwrap();
+        assert_eq!(duplicate(&source).unwrap(), root.join("a copy 2.txt"));
+        assert!(!outside.exists());
+        let other = root.join("other.txt");
+        fs::write(&other, "keep").unwrap();
+        assert!(rename_new(&source, &other).is_err());
+        assert_eq!(fs::read_to_string(other).unwrap(), "keep");
+        // Covers distinct case variants on sensitive volumes; on insensitive
+        // volumes the exclusive create must refuse the alias instead.
+        let upper = root.join("A.txt");
+        if let Ok(mut file) = fs::OpenOptions::new().write(true).create_new(true).open(&upper) {
+            use std::io::Write;
+            file.write_all(b"keep uppercase").unwrap();
+            assert!(rename(&source, "A.txt").is_err());
+            assert_eq!(fs::read_to_string(&upper).unwrap(), "keep uppercase");
+        } else {
+            assert_eq!(rename(&source, "A.txt").unwrap(), upper);
+        }
+
+        let case = root.join("case.txt");
+        fs::write(&case, "same").unwrap();
+        let renamed = rename(&case, "CASE.txt").unwrap();
+        assert_eq!(fs::read_to_string(&renamed).unwrap(), "same");
+        assert!(same_identity(&renamed, &root.join("CASE.txt")));
+
+        let folder = root.join("tree");
+        fs::create_dir(&folder).unwrap();
+        fs::write(folder.join("inside.txt"), "ok").unwrap();
+        symlink(&outside, folder.join("link.txt")).unwrap();
+        let copied = root.join("tree-copy");
+        copy(&folder, &copied).unwrap();
+        assert_eq!(fs::read_to_string(copied.join("inside.txt")).unwrap(), "ok");
+        assert_eq!(fs::read_link(copied.join("link.txt")).unwrap(), outside);
+        assert!(!outside.exists());
     }
 }

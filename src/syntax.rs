@@ -83,24 +83,25 @@ fn assign_styles_to_lines(
     text: &str,
     styles: &[(Range<usize>, HighlightStyle)],
 ) -> HashMap<u32, Vec<(Range<usize>, HighlightStyle)>> {
-    let mut map = HashMap::new();
+    let mut map: HashMap<u32, Vec<(Range<usize>, HighlightStyle)>> = HashMap::new();
     let mut byte = 0;
-    for (number, line) in (1u32..).zip(text.split_inclusive('\n')) {
-        let content = line.trim_end_matches(['\r', '\n']);
+    let lines: Vec<_> = text.split_inclusive('\n').map(|line| {
         let start = byte;
-        let end = start + content.len();
-        let mut runs = Vec::new();
-        for (range, style) in styles {
-            let lo = range.start.max(start);
-            let hi = range.end.min(end);
+        byte += line.len();
+        start..start + line.trim_end_matches(['\r', '\n']).len()
+    }).collect();
+    // Iterate each style only over the lines it intersects. Preserves style
+    // order even when the highlighter returns overlapping or unsorted ranges.
+    for (range, style) in styles {
+        let first = lines.partition_point(|line| line.end <= range.start);
+        for (index, line) in lines.iter().enumerate().skip(first) {
+            if line.start >= range.end { break; }
+            let lo = range.start.max(line.start);
+            let hi = range.end.min(line.end);
             if lo < hi {
-                runs.push((lo - start..hi - start, *style));
+                map.entry(index as u32 + 1).or_default().push((lo - line.start..hi - line.start, *style));
             }
         }
-        if !runs.is_empty() {
-            map.insert(number, runs);
-        }
-        byte += line.len();
     }
     map
 }
@@ -346,6 +347,21 @@ mod tests {
         let styles = assign_styles_to_lines("ab\ncd", &[(1..2, color), (3..4, color)]);
         assert_eq!(styles[&1], vec![(1..2, color)]);
         assert_eq!(styles[&2], vec![(0..1, color)]);
+        let styles = assign_styles_to_lines("ab\r\n\ncd", &[(5..7, color), (1..6, color), (4..4, color)]);
+        assert_eq!(styles[&1], vec![(1..2, color)]);
+        assert!(!styles.contains_key(&2));
+        assert_eq!(styles[&3], vec![(0..2, color), (0..1, color)]);
+
+        // A realistic diff must not compare every highlight to every line.
+        let text = "let x = 12;\n".repeat(20_000);
+        let ranges: Vec<_> = (0..20_000).flat_map(|line| {
+            [0..3, 4..5, 6..7, 8..10].map(|r| (r.start + line * 12..r.end + line * 12, color))
+        }).collect();
+        let started = std::time::Instant::now();
+        let styles = assign_styles_to_lines(&text, &ranges);
+        eprintln!("20k lines / 80k highlights: {:?}", started.elapsed());
+        assert_eq!(styles.len(), 20_000);
+        assert!(styles.values().all(|line| line.len() == 4));
     }
 
     #[test]

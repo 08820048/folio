@@ -1,3 +1,5 @@
+use std::cell::RefCell;
+use ropey::Rope;
 use gpui::{
     App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
     Render, RenderOnce, SharedString, Subscription, Window,
@@ -22,7 +24,8 @@ struct EditorOptions {
 
 pub struct EditorState {
     base: Entity<InputBaseState>,
-    value: SharedString,
+    text: Rope,
+    value: RefCell<Option<SharedString>>,
     options: EditorOptions,
     _subscription: Subscription,
 }
@@ -37,14 +40,16 @@ impl EditorState {
         let base = cx.new(|cx| InputBaseState::new(window, cx).code_editor(language));
         let subscription = cx.subscribe(&base, |this, base, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
-                this.value = base.read(cx).value();
+                this.text = base.read(cx).text().clone();
+                *this.value.get_mut() = None;
             }
             cx.emit(event.clone());
         });
 
         Self {
             base,
-            value: SharedString::default(),
+            text: Rope::new(),
+            value: RefCell::new(Some(SharedString::default())),
             options: EditorOptions::default(),
             _subscription: subscription,
         }
@@ -57,7 +62,8 @@ impl EditorState {
 
     pub fn default_value(mut self, value: impl Into<SharedString>) -> Self {
         let value = value.into();
-        self.value = value.clone();
+        self.text = Rope::from(value.as_ref());
+        *self.value.get_mut() = Some(value.clone());
         self.options.default_value = Some(value);
         self
     }
@@ -83,7 +89,16 @@ impl EditorState {
     }
 
     pub fn value(&self) -> SharedString {
-        self.value.clone()
+        self.value.borrow_mut().get_or_insert_with(|| self.text.to_string().into()).clone()
+    }
+
+    /// A cheap, immutable snapshot for background work.
+    pub fn snapshot(&self) -> Rope {
+        self.text.clone()
+    }
+
+    pub fn is_modified(&self, saved: &str) -> bool {
+        self.text != saved
     }
 
     pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -97,7 +112,8 @@ impl EditorState {
         cx: &mut Context<Self>,
     ) {
         let value = value.into();
-        self.value = value.clone();
+        self.text = Rope::from(value.as_ref());
+        *self.value.get_mut() = Some(value.clone());
         self.base
             .update(cx, |state, cx| state.set_value(value, window, cx));
     }

@@ -4,8 +4,8 @@
 //! out as rows the view can draw, so the parsing is testable without a window
 //! and without a repository.
 
-use crate::buffer;
-use std::{io, path::Path, process::Command};
+use crate::{buffer, git};
+use std::{io, path::Path};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Change {
@@ -56,20 +56,25 @@ pub fn for_file_against(root: &Path, path: &Path, base: &str) -> io::Result<Diff
         // Nothing to diff against, so the file is shown as all new. This is
         // the one case the view reads the file itself.
         return Ok(Diff {
-            lines: all_added(&buffer::read(path)?),
+            lines: {
+                let text = buffer::read(path)?;
+                git::check_lines(&text)?;
+                all_added(&text)
+            },
             untracked: true,
         });
     }
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(["diff", "--no-color", "--unified=3", base, "--"])
-        .arg(relative)
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .output();
+    if base.starts_with('-') { return Err(io::Error::other("Invalid diff base")); }
+    let output = git::output(git::command(root)?
+        .args(["diff", "--no-ext-diff", "--no-textconv", "--no-color", "--unified=3", base, "--"])
+        .arg(relative));
     match output {
         Ok(output) if output.status.success() => Ok(Diff {
-            lines: parse(&String::from_utf8_lossy(&output.stdout)),
+            lines: {
+                let text = String::from_utf8_lossy(&output.stdout);
+                git::check_lines(&text)?;
+                parse(&text)
+            },
             untracked: false,
         }),
         // Not a repository, a repository with no commit yet, or a file git
@@ -85,13 +90,7 @@ pub fn for_file_against(root: &Path, path: &Path, base: &str) -> io::Result<Diff
 /// `git diff HEAD` says nothing at all about an untracked file — which reads
 /// exactly like a file with no changes.
 fn is_untracked(root: &Path, relative: &Path) -> io::Result<bool> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(["status", "--porcelain=v1", "-z", "--"])
-        .arg(relative)
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .output();
+    let output = git::output(git::command(root)?.args(["status", "--porcelain=v1", "-z", "--"]).arg(relative));
     match output {
         Ok(output) if output.status.success() => Ok(output.stdout.starts_with(b"??")),
         Ok(_) => Ok(false),

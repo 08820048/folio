@@ -14,6 +14,7 @@
 //! `root` is true ending the search upward.
 
 use std::{
+    io::Read,
     fs,
     path::{Path, PathBuf},
 };
@@ -64,7 +65,7 @@ impl Rules {
         let mut configs: Vec<(PathBuf, Config)> = Vec::new();
         let mut directory = path.parent();
         while let Some(current) = directory {
-            if let Ok(text) = fs::read_to_string(current.join(".editorconfig")) {
+            if let Some(text) = read_config(&current.join(".editorconfig")) {
                 let config = Config::parse(&text);
                 let root = config.root;
                 configs.push((current.to_path_buf(), config));
@@ -134,8 +135,12 @@ impl Config {
                 .strip_prefix('[')
                 .and_then(|line| line.strip_suffix(']'))
             {
+                let mut depth = 0usize;
                 let patterns = section
-                    .split(',')
+                    .split(|c| {
+                        match c { '{' | '[' => depth += 1, '}' | ']' => depth = depth.saturating_sub(1), _ => {} }
+                        c == ',' && depth == 0
+                    })
                     .map(|pattern| pattern.trim().to_string())
                     .filter(|pattern| !pattern.is_empty())
                     .collect();
@@ -221,141 +226,83 @@ impl Config {
 /// `*` is any run of characters within one segment, `**` any run at all, `?`
 /// one character within a segment, `[...]` one character from a set — or
 /// outside it, with a leading `!` — and `{a,b}` several patterns in one.
+const CONFIG_LIMIT: u64 = 64 * 1024;
+
+fn read_config(path: &Path) -> Option<String> {
+    let meta = fs::symlink_metadata(path).ok()?;
+    if !meta.is_file() || meta.len() > CONFIG_LIMIT {
+        return None;
+    }
+    let mut text = String::new();
+    fs::File::open(path)
+        .ok()?
+        .take(CONFIG_LIMIT + 1)
+        .read_to_string(&mut text)
+        .ok()?;
+    (text.len() as u64 <= CONFIG_LIMIT).then_some(text)
+}
+
 fn matches(pattern: &str, path: &str) -> bool {
-    expand_braces(pattern)
-        .iter()
-        .any(|pattern| matches_one(pattern, path))
+    if pattern.len() > 4096 { return false; }
+    let mut expression = String::from(r"\A(?:");
+    if !glob_expression(pattern, &mut expression, 0) { return false; }
+    expression.push_str(r")\z");
+    regex::RegexBuilder::new(&expression).size_limit(1024 * 1024)
+        .build().is_ok_and(|matcher| matcher.is_match(path))
 }
 
-fn matches_one(pattern: &str, path: &str) -> bool {
-    let Some(head) = pattern.chars().next() else {
-        return path.is_empty();
-    };
-
-    match head {
-        '*' if pattern.starts_with("**") => {
-            let rest = &pattern[2..];
-            (0..=path.len())
-                .filter(|end| path.is_char_boundary(*end))
-                .any(|end| matches_one(rest, &path[end..]))
-        }
-        '*' => {
-            let rest = &pattern[1..];
-            (0..=path.len())
-                .filter(|end| path.is_char_boundary(*end))
-                .take_while(|end| !path[..*end].contains('/'))
-                .any(|end| matches_one(rest, &path[end..]))
-        }
-        '?' => match path.chars().next() {
-            Some(next) if next != '/' => matches_one(&pattern[1..], &path[next.len_utf8()..]),
-            _ => false,
-        },
-        '[' => match parse_class(pattern) {
-            Some((accepted, negated, end)) => match path.chars().next() {
-                Some(next) if next != '/' && accepted.contains(&next) != negated => {
-                    matches_one(&pattern[end..], &path[next.len_utf8()..])
+/// Translate to the existing non-backtracking engine. Brace alternatives stay
+/// alternatives instead of being expanded into an exponential list of strings.
+fn glob_expression(mut pattern: &str, out: &mut String, depth: usize) -> bool {
+    if depth > 32 { return false; }
+    while let Some(head) = pattern.chars().next() {
+        match head {
+            '*' if pattern.starts_with("**") => { out.push_str("(?s:.*)"); pattern = &pattern[2..]; }
+            '*' => { out.push_str("[^/]*"); pattern = &pattern[1..]; }
+            '?' => { out.push_str("[^/]"); pattern = &pattern[1..]; }
+            '[' if pattern[1..].contains(']') => {
+                let end = pattern.find(']').unwrap();
+                let class = &pattern[1..end];
+                out.push_str("[[");
+                let class = if let Some(rest) = class.strip_prefix('!') { out.push('^'); rest } else { class };
+                // Preserve ranges, escaping regex set-operation syntax.
+                for c in class.chars() {
+                    if matches!(c, '[' | ']' | '\\' | '&' | '~' | '^') { out.push('\\'); }
+                    out.push(c);
                 }
-                _ => false,
-            },
-            // An unclosed class is the character it looks like.
-            None => path.starts_with('[') && matches_one(&pattern[1..], &path[1..]),
-        },
-        head => {
-            path.starts_with(head)
-                && matches_one(&pattern[head.len_utf8()..], &path[head.len_utf8()..])
-        }
-    }
-}
-
-/// The characters a `[...]` class accepts, whether it is negated, and where the
-/// class ends in the pattern.
-///
-/// `a-z` is a range, a `-` anywhere else is itself, and a class cannot hold a
-/// `]` of its own — the first one closes it.
-fn parse_class(pattern: &str) -> Option<(Vec<char>, bool, usize)> {
-    let characters: Vec<(usize, char)> = pattern.char_indices().skip(1).collect();
-    let mut accepted = Vec::new();
-    let mut negated = false;
-    let mut at = 0;
-
-    if let Some(&(_, '!')) = characters.first() {
-        negated = true;
-        at = 1;
-    }
-
-    // One character is held back at a time: it may be the start of a range, and
-    // only the character after it says so.
-    let mut pending: Option<char> = None;
-    while at < characters.len() {
-        let (index, character) = characters[at];
-        match character {
-            ']' => {
-                accepted.extend(pending.take());
-                return Some((accepted, negated, index + 1));
+                out.push_str("]&&[^/]]");
+                pattern = &pattern[end + 1..];
             }
-            '-' if pending.is_some()
-                && at + 1 < characters.len()
-                && characters[at + 1].1 != ']' =>
-            {
-                let start = pending.take().expect("checked above");
-                accepted.extend(start..=characters[at + 1].1);
-                at += 2;
-                continue;
-            }
-            character => accepted.extend(pending.replace(character)),
-        }
-        at += 1;
-    }
-    None
-}
-
-/// Every pattern a brace group stands for.
-///
-/// `{a,b}` is two patterns, groups nest, and one pattern can hold several. A
-/// group without a comma in it is left alone, which leaves the format's numeric
-/// ranges — `{1..3}` — matching as literally as they were written.
-fn expand_braces(pattern: &str) -> Vec<String> {
-    let Some(open) = pattern.find('{') else {
-        return vec![pattern.to_string()];
-    };
-
-    let mut depth = 0;
-    let mut close = None;
-    let mut commas = Vec::new();
-    for (at, character) in pattern[open..].char_indices() {
-        match character {
-            '{' => depth += 1,
-            '}' => {
-                depth -= 1;
-                if depth == 0 {
-                    close = Some(open + at);
-                    break;
+            '{' => {
+                let mut nesting = 0;
+                let mut close = None;
+                let mut commas = Vec::new();
+                for (i, c) in pattern.char_indices() {
+                    match c {
+                        '{' => nesting += 1,
+                        '}' => { nesting -= 1; if nesting == 0 { close = Some(i); break; } }
+                        ',' if nesting == 1 => commas.push(i),
+                        _ => {}
+                    }
+                }
+                if let Some(close) = close.filter(|_| !commas.is_empty()) {
+                    out.push_str("(?:");
+                    let mut start = 1;
+                    for end in commas.into_iter().chain(std::iter::once(close)) {
+                        if start > 1 { out.push('|'); }
+                        if !glob_expression(&pattern[start..end], out, depth + 1) { return false; }
+                        start = end + 1;
+                    }
+                    out.push(')');
+                    pattern = &pattern[close + 1..];
+                } else {
+                    out.push_str(r"\{"); pattern = &pattern[1..];
                 }
             }
-            ',' if depth == 1 => commas.push(open + at),
-            _ => {}
+            c => { out.push_str(&regex::escape(&c.to_string())); pattern = &pattern[c.len_utf8()..]; }
         }
     }
-    let Some(close) = close else {
-        return vec![pattern.to_string()];
-    };
-    if commas.is_empty() {
-        return vec![pattern.to_string()];
-    }
-
-    let mut expanded = Vec::new();
-    let mut start = open + 1;
-    for comma in commas.iter().copied().chain(std::iter::once(close)) {
-        let combined = format!(
-            "{}{}{}",
-            &pattern[..open],
-            &pattern[start..comma],
-            &pattern[close + 1..]
-        );
-        expanded.extend(expand_braces(&combined));
-        start = comma + 1;
-    }
-    expanded
+    true
 }
 
 #[cfg(test)]
@@ -377,6 +324,17 @@ mod tests {
             columns: 4,
             hard_tabs: false,
         }
+    }
+
+    #[test]
+    fn hostile_patterns_and_oversized_configs_are_bounded() {
+        let started = std::time::Instant::now();
+        assert!(!matches(&format!("{}b", "*a".repeat(64)), &"a".repeat(128)));
+        assert!(matches(&"{a,b}".repeat(24), &"a".repeat(24)));
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join(".editorconfig"), " ".repeat(CONFIG_LIMIT as usize + 1)).unwrap();
+        assert!(read_config(&tmp.path().join(".editorconfig")).is_none());
     }
 
     #[test]
@@ -407,6 +365,8 @@ mod tests {
         assert!(matches("[mM]ain.rs", "main.rs"));
         assert!(!matches("[!m]ain.rs", "main.rs"));
         assert!(matches("[a-z]ain.rs", "main.rs"));
+        assert!(!matches("[!a]", "/"));
+        assert_eq!(rules("[{*.rs,*.toml}]\nindent_size=2\n", "main.rs").indent(settings()).columns, 2);
         assert!(matches("{*.rs,*.toml}", "main.toml"));
         assert!(!matches("{*.rs,*.toml}", "main.md"));
         // A group with nothing to choose between is not an expansion.

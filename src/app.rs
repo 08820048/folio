@@ -15,13 +15,13 @@ use gpui::{prelude::*, *};
 use gpui_component::{
     ActiveTheme, Disableable, Icon, IconName, Root, Sizable, Theme, TitleBar,
     button::{Button, ButtonVariants},
-    input::{self, EditorState, Input, InputBaseState, InputEvent, InputState, Position, TabSize},
+    input::{self, EditorState, Input, InputBaseState, InputEvent, InputState, Position, Rope, TabSize},
     select::{SearchableVec, Select, SelectEvent, SelectState},
     text::{TextView, TextViewStyle},
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     io,
     ops::Range,
     path::{Path, PathBuf},
@@ -970,8 +970,9 @@ struct DiffView {
     request: u64,
     /// Working tree and `base` texts, kept so a theme change can recolor
     /// without asking git again.
-    old_text: Option<String>,
-    new_text: Option<String>,
+    old_text: Option<Arc<str>>,
+    new_text: Option<Arc<str>>,
+    color_request: u64,
     /// 1-based line → highlight runs, relative to that line.
     old_styles: HashMap<u32, Vec<(Range<usize>, HighlightStyle)>>,
     new_styles: HashMap<u32, Vec<(Range<usize>, HighlightStyle)>>,
@@ -1038,6 +1039,10 @@ struct Project {
     git_status: HashMap<String, char>,
     files: Vec<PathBuf>,
     indexing: bool,
+    index_again: bool,
+    git_running: bool,
+    git_again: bool,
+    diff_request: u64,
     /// Set while the active file is being shown as changes rather than code.
     diff: Option<DiffView>,
     /// Open buffers whose disk copy no longer matches `saved`. Clean buffers
@@ -1065,6 +1070,10 @@ impl Default for Project {
             git_status: HashMap::new(),
             files: Vec::new(),
             indexing: false,
+            index_again: false,
+            git_running: false,
+            git_again: false,
+            diff_request: 0,
             diff: None,
             disk_notice: HashMap::new(),
         }
@@ -1249,7 +1258,8 @@ pub struct Folio {
     recovered: usize,
     /// What was last written to the unsaved file, so that the timer only
     /// rewrites it when there is something new to write.
-    written_unsaved: session::UnsavedBuffers,
+    written_unsaved: UnsavedSnapshot,
+    recovery_error: Option<String>,
     written_session: session::Session,
     disk_watch: watch::DiskWatch,
     /// Paths Folio just wrote, and when their own filesystem events expire.
@@ -1268,12 +1278,14 @@ struct BlameView {
     blame: blame::Blame,
 }
 
+type UnsavedSnapshot = BTreeMap<PathBuf, Rope>;
+
 /// The two files a session lives in, and what has changed in them.
 struct Writes {
     session_file: PathBuf,
     unsaved_file: PathBuf,
     session: Option<session::Session>,
-    unsaved: Option<session::UnsavedBuffers>,
+    unsaved: Option<UnsavedSnapshot>,
 }
 
 impl Writes {
@@ -1281,19 +1293,24 @@ impl Writes {
         self.session.is_none() && self.unsaved.is_none()
     }
 
-    /// Write both, and hand them back so the caller can remember what landed.
-    ///
-    /// Errors are dropped rather than reported: a config directory that cannot
-    /// be written to is not worth a message every few seconds, and the next
-    /// tick tries again.
-    fn write(self) -> Writes {
+    /// Only successful writes are acknowledged; failed snapshots remain pending.
+    fn write(mut self) -> (Writes, Option<String>) {
+        let mut errors = Vec::new();
         if let Some(session) = &self.session {
-            let _ = session::Session::save(session, &self.session_file);
+            if let Err(error) = session::Session::save(session, &self.session_file) {
+                errors.push(format!("Session: {error}"));
+                self.session = None;
+            }
         }
         if let Some(unsaved) = &self.unsaved {
-            let _ = session::save_unsaved(&self.unsaved_file, unsaved);
+            let text = unsaved.iter().map(|(path, text)| (path.clone(), text.to_string())).collect();
+            if let Err(error) = session::save_unsaved(&self.unsaved_file, &text) {
+                errors.push(format!("Recovery: {error}"));
+                self.unsaved = None;
+            }
         }
-        self
+        let error = (!errors.is_empty()).then(|| errors.join("; "));
+        (self, error)
     }
 }
 
@@ -1515,7 +1532,8 @@ impl Folio {
             blame_request: 0,
             restoring: None,
             recovered: 0,
-            written_unsaved: session::UnsavedBuffers::new(),
+            written_unsaved: UnsavedSnapshot::new(),
+            recovery_error: None,
             written_session: session::Session::default(),
             disk_watch: watch::DiskWatch::default(),
             quiet_writes: HashMap::new(),
@@ -2347,6 +2365,7 @@ impl Folio {
             return;
         };
         if let Some(project) = self.project_mut(project_id) {
+            if project.indexing { project.index_again = true; return; }
             project.indexing = true;
         }
         let ignored = self.settings.ignored.clone();
@@ -2361,6 +2380,10 @@ impl Folio {
                     return;
                 };
                 project.indexing = false;
+                if std::mem::take(&mut project.index_again) {
+                    this.reindex_project(project_id, cx);
+                    return;
+                }
                 match result {
                     Ok(files) => {
                         if perf_on() {
@@ -2397,6 +2420,10 @@ impl Folio {
         }) else {
             return;
         };
+        if let Some(project) = self.project_mut(project_id) {
+            if project.git_running { project.git_again = true; return; }
+            project.git_running = true;
+        }
         let task = cx
             .background_executor()
             .spawn(async move { git::status(&root) });
@@ -2406,6 +2433,11 @@ impl Folio {
                 let Some(project) = this.project_mut(project_id) else {
                     return;
                 };
+                project.git_running = false;
+                if std::mem::take(&mut project.git_again) {
+                    this.refresh_git_project(project_id, cx);
+                    return;
+                }
                 match result {
                     Ok(status) => project.git_status = status,
                     Err(e) => this.error(format!("Could not read git status: {e}"), cx),
@@ -2907,6 +2939,13 @@ impl Folio {
             self.error("Cannot move a folder into itself".into(), cx);
             return;
         }
+        self.move_entry(source, into, window, cx);
+    }
+
+    fn move_entry(
+        &mut self, source: PathBuf, into: PathBuf,
+        window: &mut Window, cx: &mut Context<Self>,
+    ) {
         let from_parent = source.parent().map(Path::to_path_buf);
         let dest_dir = into.clone();
         let moving = source.clone();
@@ -2918,6 +2957,9 @@ impl Folio {
             let _ = this.update_in(cx, |this, window, cx| {
                 match result {
                     Ok(dest) => {
+                        if this.clipboard.as_ref().is_some_and(|entry| entry.cut && entry.path == source) {
+                            this.clipboard = None;
+                        }
                         this.quiet_write(&dest);
                         this.remap_paths(&source, &dest);
                         this.rebuild_rows();
@@ -3395,17 +3437,12 @@ impl Folio {
                 let Some(clipboard) = self.clipboard.clone() else {
                     return;
                 };
-                let into = path.clone();
-                self.spawn_change(
-                    path,
-                    false,
-                    move || fs_op::paste(&clipboard.path, &into, clipboard.cut),
-                    window,
-                    cx,
-                );
-                // A cut is spent once it lands; a copy can be pasted again.
                 if clipboard.cut {
-                    self.clipboard = None;
+                    self.move_entry(clipboard.path, path, window, cx);
+                } else {
+                    let into = path.clone();
+                    self.spawn_change(path, false,
+                        move || fs_op::paste(&clipboard.path, &into, false), window, cx);
                 }
             }
             // Trashing is recoverable, so it only stops to warn about edits
@@ -3568,7 +3605,6 @@ impl Folio {
     /// currently sits at its key when it is dropped.
     fn subscribe_document(
         editor: &Entity<EditorState>,
-        project_id: u64,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Subscription {
@@ -3578,11 +3614,12 @@ impl Folio {
             window,
             move |this, editor, event: &InputEvent, window, cx| {
                 if matches!(event, InputEvent::Change) {
-                    if let Some(doc) = this
-                        .project_mut(project_id)
-                        .and_then(|p| p.documents.values_mut().find(|doc| &doc.editor == editor))
+                    if let Some(doc) = std::iter::once(&mut this.project)
+                        .chain(this.parked.iter_mut())
+                        .flat_map(|project| project.documents.values_mut())
+                        .find(|doc| &doc.editor == editor)
                     {
-                        doc.dirty = editor.read(cx).value() != doc.saved;
+                        doc.dirty = editor.read(cx).is_modified(&doc.saved);
                     }
                     this.update_title(window);
                     cx.notify();
@@ -4215,12 +4252,11 @@ impl Folio {
             cx.notify();
             return;
         };
-        if self.diff_against == DiffAgainst::Branch && self.diff_branch.is_none() {
-            self.diff_branch = git::review_branch(&workspace.root);
-        }
+        let find_branch = self.diff_against == DiffAgainst::Branch && self.diff_branch.is_none();
         let base = self.diff_base().to_string();
         let project_id = self.project.id;
-        let request = self.project.diff.as_ref().map_or(0, |view| view.request) + 1;
+        self.project.diff_request += 1;
+        let request = self.project.diff_request;
         self.project.diff = Some(DiffView {
             path: path.clone(),
             loading: true,
@@ -4228,20 +4264,13 @@ impl Folio {
             ..DiffView::default()
         });
         cx.notify();
-        let theme = cx.theme().highlight_theme.clone();
         let task = cx.background_executor().spawn(async move {
-            let diff = diff::for_file_against(&workspace.root, &path, &base)?;
-            let new_text = buffer::read(&path).ok();
-            let old_text = git::show_file(&workspace.root, &base, &path);
-            let new_styles = new_text
-                .as_deref()
-                .map(|text| syntax::line_styles(&path, text, &theme))
-                .unwrap_or_default();
-            let old_styles = old_text
-                .as_deref()
-                .map(|text| syntax::line_styles(&path, text, &theme))
-                .unwrap_or_default();
-            Ok::<_, io::Error>((diff, old_text, new_text, old_styles, new_styles))
+            let branch = find_branch.then(|| git::review_branch(&workspace.root)).flatten();
+            let base = branch.as_deref().unwrap_or(&base);
+            let diff = diff::for_file_against(&workspace.root, &path, base)?;
+            let new_text = buffer::read(&path).ok().map(Arc::<str>::from);
+            let old_text = git::show_file(&workspace.root, base, &path)?.map(Arc::<str>::from);
+            Ok::<_, io::Error>((diff, old_text, new_text, branch))
         });
         cx.spawn_in(window, async move |this, cx| {
             let result = task.await;
@@ -4259,19 +4288,21 @@ impl Folio {
                 }
                 view.loading = false;
                 match result {
-                    Ok((diff, old_text, new_text, old_styles, new_styles)) => {
+                    Ok((diff, old_text, new_text, branch)) => {
                         view.split = diff::split_rows(&diff.lines);
                         view.lines = diff.lines;
                         view.untracked = diff.untracked;
                         view.old_text = old_text;
                         view.new_text = new_text;
-                        view.old_styles = old_styles;
-                        view.new_styles = new_styles;
                         view.error = None;
                         view.hunk = 0;
+                        if this.project.id == project_id {
+                            if let Some(branch) = branch { this.diff_branch = Some(branch); }
+                        }
                     }
                     Err(error) => view.error = Some(error.to_string()),
                 }
+                this.recolor_diff(cx);
                 cx.notify();
             });
         })
@@ -4279,22 +4310,34 @@ impl Folio {
     }
 
     /// Paint the open diff again after the highlight theme changes.
-    fn recolor_diff(&mut self, cx: &App) {
-        let Some(view) = self.project.diff.as_mut() else {
-            return;
-        };
+    fn recolor_diff(&mut self, cx: &mut Context<Self>) {
         let theme = cx.theme().highlight_theme.clone();
-        let path = view.path.clone();
-        view.old_styles = view
-            .old_text
-            .as_deref()
-            .map(|text| syntax::line_styles(&path, text, &theme))
-            .unwrap_or_default();
-        view.new_styles = view
-            .new_text
-            .as_deref()
-            .map(|text| syntax::line_styles(&path, text, &theme))
-            .unwrap_or_default();
+        for project in std::iter::once(&mut self.project).chain(self.parked.iter_mut()) {
+            let Some(view) = project.diff.as_mut().filter(|view| !view.loading) else { continue; };
+            let project_id = project.id;
+            let request = view.request;
+            view.color_request += 1;
+            let color_request = view.color_request;
+            let path = view.path.clone();
+            let old = view.old_text.clone();
+            let new = view.new_text.clone();
+            let theme = theme.clone();
+            let task = cx.background_executor().spawn(async move {
+                let old = old.as_deref().map(|text| syntax::line_styles(&path, text, &theme)).unwrap_or_default();
+                let new = new.as_deref().map(|text| syntax::line_styles(&path, text, &theme)).unwrap_or_default();
+                (old, new)
+            });
+            cx.spawn(async move |this, cx| {
+                let (old, new) = task.await;
+                let _ = this.update(cx, |this, cx| {
+                    let Some(view) = this.project_mut(project_id).and_then(|project| project.diff.as_mut()) else { return; };
+                    if view.request != request || view.color_request != color_request { return; }
+                    view.old_styles = old;
+                    view.new_styles = new;
+                    cx.notify();
+                });
+            }).detach();
+        }
     }
 
     /// The neighbour this pane's arrows would open, if that step is still
@@ -5131,6 +5174,7 @@ impl Folio {
         self.activity_bar = self.settings.activity_bar;
         // Editors pick the new wrap up on the next frame of the main window.
         if ignored_changed {
+            self.sync_disk_watch();
             self.reload_tree(cx);
         }
         // Deferred: the change may have come *from* the settings window, and
@@ -5350,9 +5394,8 @@ impl Folio {
                                 base.set_font(typeface, size);
                             });
                         });
-                        let project_id = this.project.id;
                         let subscription =
-                            Self::subscribe_document(&editor, project_id, window, cx);
+                            Self::subscribe_document(&editor, window, cx);
                         let jumping = this
                             .goto
                             .as_ref()
@@ -5519,7 +5562,7 @@ impl Folio {
                                 .and_then(|p| p.documents.get_mut(&path))
                             {
                                 doc.saved = text;
-                                doc.dirty = doc.editor.read(cx).value() != doc.saved;
+                                doc.dirty = doc.editor.read(cx).is_modified(&doc.saved);
                             }
                             // The blame was read against the buffer as it was;
                             // saving is what makes the two agree again.
@@ -5717,12 +5760,12 @@ impl Folio {
     }
 
     /// Every buffer with edits that are not on disk, across every project.
-    fn collect_unsaved(&self, cx: &App) -> session::UnsavedBuffers {
+    fn collect_unsaved(&self, cx: &App) -> UnsavedSnapshot {
         std::iter::once(&self.project)
             .chain(self.parked.iter())
             .flat_map(|project| project.documents.iter())
             .filter(|(_, document)| document.dirty)
-            .map(|(path, document)| (path.clone(), document.editor.read(cx).value().to_string()))
+            .map(|(path, document)| (path.clone(), document.editor.read(cx).snapshot()))
             .collect()
     }
 
@@ -5754,10 +5797,14 @@ impl Folio {
                 if writes.is_empty() {
                     continue;
                 }
-                let written = executor.spawn(async move { writes.write() }).await;
+                let (written, error) = executor.spawn(async move { writes.write() }).await;
                 // Remembered only once the write has landed, so a failure is
                 // retried on the next tick rather than assumed done.
-                let _ = this.update(cx, |this, _| {
+                let _ = this.update(cx, |this, cx| {
+                    if error != this.recovery_error {
+                        if let Some(error) = &error { this.error(error.clone(), cx); }
+                        this.recovery_error = error;
+                    }
                     if let Some(session) = written.session {
                         this.written_session = session;
                     }
@@ -5771,7 +5818,7 @@ impl Folio {
     }
 
     fn sync_disk_watch(&mut self) {
-        self.disk_watch.sync(&self.project_order);
+        self.disk_watch.sync(&self.project_order, &self.settings.ignored);
     }
 
     /// Drain kernel events and apply them to the tree, git dots, and open
@@ -5805,56 +5852,47 @@ impl Folio {
 
     fn apply_watch_paths(
         &mut self,
-        paths: Vec<PathBuf>,
+        paths: HashMap<PathBuf, bool>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let now = Instant::now();
         self.quiet_writes.retain(|_, until| now < *until);
         let ignored = self.settings.ignored.clone();
-        let cached = std::iter::once(&self.project)
-            .chain(self.parked.iter())
-            .flat_map(|project| project.directories.keys().cloned())
-            .collect::<HashSet<_>>();
-        let open = std::iter::once(&self.project)
-            .chain(self.parked.iter())
-            .flat_map(|project| project.documents.keys().cloned())
-            .collect::<HashSet<_>>();
-        let paths = paths
-            .into_iter()
-            .map(|path| path.canonicalize().unwrap_or(path))
-            .collect::<Vec<_>>();
-        let batch = watch::batch(paths, &ignored, &self.quiet_writes, now, &cached, &open);
-        let git_ids = if batch.git {
-            std::iter::once(&self.project)
-                .chain(self.parked.iter())
-                .filter(|project| project.workspace.is_some())
-                .map(|project| project.id)
-                .collect::<Vec<_>>()
-        } else {
-            Vec::new()
-        };
-        let needs_index = !batch.files.is_empty() || !batch.directories.is_empty();
-        for dir in batch.directories {
-            self.reload_directory(dir, cx);
-        }
-        if needs_index {
-            for project_id in std::iter::once(&self.project)
-                .chain(self.parked.iter())
-                .map(|project| project.id)
-                .collect::<Vec<_>>()
-            {
-                self.reindex_project(project_id, cx);
+        let mut work = Vec::new();
+        for project in std::iter::once(&self.project).chain(self.parked.iter()) {
+            let Some(workspace) = &project.workspace else { continue; };
+            let relevant: Vec<_> = paths.iter().filter(|(path, _)| path.starts_with(&workspace.root)).collect();
+            if relevant.is_empty() { continue; }
+            let full = paths.get(&workspace.root) == Some(&true);
+            let cached = project.directories.keys().cloned().collect::<HashSet<_>>();
+            let open = project.documents.keys().cloned().collect::<HashSet<_>>();
+            let mut batch = watch::batch(relevant.iter().map(|(path, _)| (*path).clone()),
+                &[], &self.quiet_writes, now, &cached, &open);
+            let structure = relevant.iter().any(|(path, changed)| {
+                **changed
+                    && !watch::is_quiet(path, &self.quiet_writes, now)
+                    && !watch::is_git_metadata(path)
+                    && path
+                        .strip_prefix(&workspace.root)
+                        .is_ok_and(|relative| !watch::under_ignored(relative, &ignored))
+            });
+            if !structure { batch.directories.clear(); }
+            if full {
+                batch.directories = cached.into_iter().collect();
+                batch.files = open.into_iter().collect();
+                batch.git = true;
             }
+            work.push((project.id, batch, structure));
         }
-        for project_id in git_ids {
-            self.refresh_git_project(project_id, cx);
+        let mut files = HashSet::new();
+        for (project_id, batch, structure) in work {
+            for dir in batch.directories { self.reload_directory(dir, cx); }
+            if structure { self.reindex_project(project_id, cx); }
+            if batch.git { self.refresh_git_project(project_id, cx); }
+            files.extend(batch.files);
         }
-        if batch.files.is_empty() {
-            cx.notify();
-            return;
-        }
-        let files = batch.files;
+        if files.is_empty() { cx.notify(); return; }
         let task = cx.background_executor().spawn(async move {
             files
                 .into_iter()
@@ -5957,7 +5995,7 @@ impl Folio {
         editor.update(cx, |editor, cx| editor.set_value(text, window, cx));
         if let Some(project) = self.project_mut(project_id) {
             if let Some(document) = project.documents.get_mut(path) {
-                document.dirty = document.editor.read(cx).value() != document.saved;
+                document.dirty = document.editor.read(cx).is_modified(&document.saved);
             }
             project.disk_notice.remove(path);
         }
@@ -6362,10 +6400,8 @@ impl Folio {
 
     fn set_diff_against(&mut self, against: DiffAgainst, window: &mut Window, cx: &mut Context<Self>) {
         self.diff_against = against;
-        if against == DiffAgainst::Branch
-            && let Some(root) = self.project.workspace.as_ref().map(|w| w.root.clone())
-        {
-            self.diff_branch = git::review_branch(&root);
+        if against == DiffAgainst::Branch {
+            self.diff_branch = None;
         }
         if self.project.diff.is_some() {
             self.load_diff(window, cx);
@@ -6792,7 +6828,7 @@ impl Folio {
         }
         for path in &targets {
             if let Some(document) = self.project.documents.get_mut(path) {
-                document.dirty = document.editor.read(cx).value() != document.saved;
+                document.dirty = document.editor.read(cx).is_modified(&document.saved);
             }
         }
 
@@ -13835,11 +13871,12 @@ mod tests {
             assert_eq!(app.clipboard.as_ref().map(|entry| entry.cut), Some(true));
             open_tree_menu(app, &root, false, window, cx);
             app.run_menu_item(MenuItem::Paste, window, cx);
-            assert!(app.clipboard.is_none(), "a cut is spent once it lands");
+            assert!(app.clipboard.is_some(), "a cut remains pending until it lands");
         });
         cx.run_until_parked();
         let moved = root.join("笔记.md");
         assert!(moved.is_file() && !note.exists());
+        view.update(cx, |app, _| assert!(app.clipboard.is_none()));
 
         // Copy leaves the source behind, so the name is taken in `src` again.
         view.update_in(cx, |app, window, cx| {
@@ -13980,7 +14017,8 @@ mod tests {
         view.update_in(cx, |app, _, _| {
             assert!(app.project.documents.contains_key(&core));
             assert_eq!(app.project.active(), Some(&core));
-            assert!(app.project.documents.contains_key(&src.join("笔记.md")));
+            assert!(app.project.documents.contains_key(&moved));
+            assert!(!app.project.documents.contains_key(&src.join("笔记.md")));
         });
 
         // Trashing is recoverable, so it only stops when it would drop edits
@@ -14062,7 +14100,7 @@ mod tests {
 
         std::fs::write(&file, "fn second() {}\n").unwrap();
         view.update_in(cx, |app, window, cx| {
-            app.apply_watch_paths(vec![file.clone()], window, cx)
+            app.apply_watch_paths(HashMap::from([(file.clone(), false)]), window, cx)
         });
         cx.run_until_parked();
         view.update_in(cx, |app, _, cx| {
@@ -14081,7 +14119,7 @@ mod tests {
         });
         std::fs::write(&file, "fn third() {}\n").unwrap();
         view.update_in(cx, |app, window, cx| {
-            app.apply_watch_paths(vec![file.clone()], window, cx)
+            app.apply_watch_paths(HashMap::from([(file.clone(), false)]), window, cx)
         });
         cx.run_until_parked();
         view.update_in(cx, |app, window, cx| {
@@ -14258,5 +14296,141 @@ mod tests {
             );
             assert_eq!(app.panel, Some(Panel::Search));
         });
+    }
+
+    #[gpui::test]
+    fn editor_snapshots_and_multicursor_changes(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let cx = cx.add_empty_window();
+        let editor = cx.update(|window, cx| {
+            cx.new(|cx| EditorState::new("text", window, cx).default_value("foo foo foo"))
+        });
+        editor.update_in(cx, |editor, window, cx| editor.prepare(window, cx));
+        let before = editor.read_with(cx, |editor, _| editor.snapshot());
+        let changes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = changes.clone();
+        let subscription = editor.update(cx, |editor, cx| {
+            cx.subscribe(editor.base_state(), move |_, _, event, _| {
+                if matches!(event, InputEvent::Change) {
+                    count.fetch_add(1, Ordering::Relaxed);
+                }
+            })
+        });
+        editor.update_in(cx, |editor, window, cx| {
+            editor.base_state().clone().update(cx, |base, cx| {
+                base.set_selected_range(0..3, cx);
+                base.set_search_query("foo", false, cx);
+                base.select_all_occurrences(cx);
+                base.replace_in_every_selection("bar", window, cx);
+                assert_eq!(base.search_session().matcher.len(), 0);
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(changes.load(Ordering::Relaxed), 1);
+        assert_eq!(before, "foo foo foo");
+        editor.read_with(cx, |editor, _| {
+            assert_eq!(editor.snapshot(), "bar bar bar");
+            assert_eq!(editor.value(), "bar bar bar");
+            assert!(editor.is_modified("foo foo foo"));
+            assert!(!editor.is_modified("bar bar bar"));
+        });
+        editor.update_in(cx, |editor, window, cx| {
+            editor
+                .base_state()
+                .clone()
+                .update(cx, |base, cx| base.undo(&input::Undo, window, cx));
+        });
+        cx.run_until_parked();
+        editor.read_with(cx, |editor, _| assert_eq!(editor.value(), "foo foo foo"));
+        editor.update_in(cx, |editor, window, cx| {
+            editor.set_value("foo ".repeat(10_000), window, cx);
+            editor.base_state().clone().update(cx, |base, cx| {
+                base.set_selected_range(0..3, cx);
+                base.select_all_occurrences(cx);
+                assert_eq!(base.selected_ranges().len(), 1000);
+            });
+        });
+        drop(subscription);
+    }
+
+    #[gpui::test]
+    fn a_cross_project_move_keeps_tracking_edits(cx: &mut TestAppContext) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let a = root.join("a");
+        let b = root.join("b");
+        std::fs::create_dir(&a).unwrap();
+        std::fs::create_dir(&b).unwrap();
+        let file = a.join("x.rs");
+        let dest = b.join("x.rs");
+        std::fs::write(&file, "fn before() {}\n").unwrap();
+        cx.update(gpui_component::init);
+        let cx = cx.add_empty_window();
+        let view = cx.update(|window, cx| {
+            cx.new(|cx| {
+                let mut app = Folio::new(window, cx);
+                app.recent_task = None;
+                app.recent_file = root.join("recent.json");
+                app.settings_file = root.join("settings.json");
+                app.window_file = root.join("window.json");
+                app.settings = Settings::default();
+                app.applied_ignored = app.settings.ignored.clone();
+                app
+            })
+        });
+        view.update_in(cx, |app, window, cx| app.request(Next::Open(a.clone()), window, cx));
+        cx.run_until_parked();
+        view.update_in(cx, |app, window, cx| app.open_file(file.clone(), window, cx));
+        cx.run_until_parked();
+        view.update_in(cx, |app, window, cx| app.request(Next::Open(b.clone()), window, cx));
+        cx.run_until_parked();
+        view.update_in(cx, |app, window, cx| {
+            app.drop_tree_entry(file.clone(), b.clone(), window, cx)
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |app, window, cx| {
+            assert!(app.project.documents.contains_key(&dest));
+            app.open_file(dest.clone(), window, cx);
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |app, window, cx| {
+            app.project.documents[&dest]
+                .editor
+                .read(cx)
+                .base_state()
+                .clone()
+                .update(cx, |base, cx| base.replace_all("fn after() {}\n", window, cx));
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |app, _, cx| {
+            let doc = &app.project.documents[&dest];
+            assert_eq!(doc.editor.read(cx).value(), "fn after() {}\n");
+            assert!(
+                doc.dirty,
+                "moving between projects must retain dirty-change subscription"
+            );
+        });
+    }
+
+    #[test]
+    fn a_failed_recovery_write_is_not_acknowledged() {
+        let tmp = tempfile::tempdir().unwrap();
+        let blocker = tmp.path().join("not-a-directory");
+        std::fs::write(&blocker, "x").unwrap();
+        let writes = Writes {
+            session_file: blocker.join("session.json"),
+            unsaved_file: blocker.join("unsaved.json"),
+            session: None,
+            unsaved: Some(UnsavedSnapshot::from([(
+                tmp.path().join("x.rs"),
+                "edits".into(),
+            )])),
+        };
+        let (written, error) = writes.write();
+        assert!(error.is_some());
+        assert!(
+            written.unsaved.is_none(),
+            "a failed recovery write must not be returned as acknowledged"
+        );
     }
 }

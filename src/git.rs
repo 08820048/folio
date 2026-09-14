@@ -1,9 +1,128 @@
 use std::{
     collections::HashMap,
-    io,
+    io::{self, Read, Seek},
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Output, Stdio},
+    time::{Duration, Instant},
 };
+
+const OUTPUT_LIMIT: u64 = 32 * 1024 * 1024;
+const QUERY_TIMEOUT: Duration = Duration::from_secs(15);
+pub(crate) const LINE_LIMIT: usize = 100_000;
+
+fn base_command(root: &Path) -> Command {
+    let mut command = Command::new("git");
+    command
+        .arg("-C")
+        .arg(root)
+        .args([
+            "--no-pager",
+            "--literal-pathspecs",
+            "-c",
+            "core.fsmonitor=",
+            "-c",
+            "core.useBuiltinFSMonitor=false",
+            "-c",
+            NO_HOOKS,
+            "-c",
+            "core.pager=cat",
+            "-c",
+            "gc.auto=0",
+            "-c",
+            "maintenance.auto=false",
+            "-c",
+            "protocol.allow=never",
+        ])
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .env_remove("GIT_EXTERNAL_DIFF");
+    command
+}
+
+#[cfg(windows)]
+const NO_HOOKS: &str = "core.hooksPath=nul";
+#[cfg(not(windows))]
+const NO_HOOKS: &str = "core.hooksPath=/dev/null";
+
+/// Read-only Git must not run repository-provided hooks, diff drivers, or filters.
+/// Config enumeration itself only reads data; bound it just like every other query.
+pub(crate) fn command(root: &Path) -> io::Result<Command> {
+    let names = run_limited(base_command(root).args([
+        "config", "--includes", "--null", "--name-only", "--get-regexp", "^filter\\..*\\.(clean|smudge|process|required)$",
+    ]), 256 * 1024, QUERY_TIMEOUT)?;
+    if !names.status.success() && names.status.code() != Some(1) {
+        return Err(io::Error::other("Could not read repository configuration"));
+    }
+    let mut command = base_command(root);
+    for name in names
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|name| !name.is_empty())
+        .take(64)
+    {
+        let name = std::str::from_utf8(name).map_err(io::Error::other)?;
+        command.arg("-c").arg(format!(
+            "{name}={}",
+            if name.ends_with(".required") {
+                "false"
+            } else {
+                ""
+            }
+        ));
+    }
+    Ok(command)
+}
+
+pub(crate) fn output(command: &mut Command) -> io::Result<Output> {
+    run_limited(command, OUTPUT_LIMIT, QUERY_TIMEOUT)
+}
+
+/// Spool output off-heap, checking size and deadline while the child runs.
+/// The final bounded reads also catch a child that exits between checks.
+fn run_limited(command: &mut Command, limit: u64, timeout: Duration) -> io::Result<Output> {
+    let mut stdout = tempfile::tempfile()?;
+    let mut stderr = tempfile::tempfile()?;
+    command.stdin(Stdio::null()).stdout(stdout.try_clone()?).stderr(stderr.try_clone()?);
+    #[cfg(unix)]
+    { use std::os::unix::process::CommandExt; command.process_group(0); }
+    let mut child = command.spawn()?;
+    let started = Instant::now();
+    let status = (|| loop {
+        if stdout.metadata()?.len() > limit || stderr.metadata()?.len() > limit {
+            return Err(io::Error::other("Git output exceeds the size limit"));
+        }
+        if started.elapsed() >= timeout {
+            return Err(io::Error::new(io::ErrorKind::TimedOut, "Git query timed out"));
+        }
+        if let Some(status) = child.try_wait()? { return Ok(status); }
+        std::thread::sleep(Duration::from_millis(10));
+    })();
+    if status.is_err() {
+        #[cfg(unix)]
+        if let Some(pid) = rustix::process::Pid::from_raw(child.id() as i32) {
+            let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    let status = status?;
+    let read = |file: &mut std::fs::File| -> io::Result<Vec<u8>> {
+        file.rewind()?;
+        let mut bytes = Vec::new();
+        file.take(limit + 1).read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > limit { return Err(io::Error::other("Git output exceeds the size limit")); }
+        Ok(bytes)
+    };
+    Ok(Output { status, stdout: read(&mut stdout)?, stderr: read(&mut stderr)? })
+}
+
+pub(crate) fn check_lines(text: &str) -> io::Result<()> {
+    if text.lines().take(LINE_LIMIT + 1).count() > LINE_LIMIT {
+        return Err(io::Error::other("Git preview exceeds 100,000 lines"));
+    }
+    Ok(())
+}
 
 /// A GitHub repository the user asked to clone.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,12 +225,11 @@ pub fn clone(url: &str, dest: &Path) -> io::Result<PathBuf> {
     if !parent.is_dir() {
         return Err(io::Error::other("Choose a folder to put the project in"));
     }
-    let output = Command::new("git")
+    let output = run_limited(Command::new("git")
         .args(["clone", "--", url])
         .arg(dest)
         .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .output();
+        .env("GIT_OPTIONAL_LOCKS", "0"), OUTPUT_LIMIT, Duration::from_secs(600));
     let output = match output {
         Ok(output) => output,
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
@@ -137,11 +255,7 @@ fn clone_error(stderr: &[u8]) -> String {
 }
 
 pub fn status(root: &Path) -> io::Result<HashMap<String, char>> {
-    let top = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(["rev-parse", "--show-toplevel"])
-        .output();
+    let top = output(base_command(root).args(["rev-parse", "--show-toplevel"]));
     let top = match top {
         Ok(top) if top.status.success() => top,
         _ => return Ok(HashMap::new()),
@@ -150,12 +264,7 @@ pub fn status(root: &Path) -> io::Result<HashMap<String, char>> {
     if Path::new(top.trim_end()).canonicalize()? != root.canonicalize()? {
         return Ok(HashMap::new());
     }
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(["status", "--porcelain=v1", "-z", "--untracked-files=all"])
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .output();
+    let output = output(command(root)?.args(["status", "--porcelain=v1", "-z", "--untracked-files=all"]));
     let output = match output {
         Ok(o) => o,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(HashMap::new()),
@@ -171,6 +280,7 @@ pub fn status(root: &Path) -> io::Result<HashMap<String, char>> {
             continue;
         }
         let code = if &record[..2] == b"??" { 'U' } else { 'M' };
+        if status.len() >= LINE_LIMIT { return Err(io::Error::other("Git status exceeds 100,000 paths")); }
         status.insert(String::from_utf8_lossy(&record[3..]).into_owned(), code);
         if record[..2].contains(&b'R') || record[..2].contains(&b'C') {
             records.next();
@@ -210,38 +320,25 @@ pub fn review_branch(root: &Path) -> Option<String> {
 
 /// The file as `base` knew it (`HEAD:src/app.rs`). None if that revision
 /// never had the path — a new file, or a name git will not show.
-pub fn show_file(root: &Path, base: &str, path: &Path) -> Option<String> {
-    let relative = path.strip_prefix(root).ok()?;
+pub fn show_file(root: &Path, base: &str, path: &Path) -> io::Result<Option<String>> {
+    let Ok(relative) = path.strip_prefix(root) else { return Ok(None); };
     let relative = relative.to_string_lossy().replace('\\', "/");
-    if base.is_empty() || relative.is_empty() || base.starts_with('-') || relative.starts_with('-') {
-        return None;
-    }
+    if base.is_empty() || relative.is_empty() || base.starts_with('-') { return Ok(None); }
     let spec = format!("{base}:{relative}");
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .arg("show")
-        .arg(&spec)
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    String::from_utf8(output.stdout).ok()
+    let size = output(command(root)?.args(["cat-file", "-s", &spec]))?;
+    if !size.status.success() { return Ok(None); }
+    let size = String::from_utf8_lossy(&size.stdout).trim().parse::<u64>().map_err(io::Error::other)?;
+    if size > OUTPUT_LIMIT { return Err(io::Error::other("Git file exceeds 32 MB")); }
+    let result = output(command(root)?.args(["cat-file", "blob", &spec]))?;
+    if !result.status.success() { return Ok(None); }
+    let text = String::from_utf8(result.stdout).map_err(io::Error::other)?;
+    check_lines(&text)?;
+    Ok(Some(text))
 }
 
 fn git_stdout(root: &Path, args: &[&str]) -> Option<String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(args)
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
+    let output = output(command(root).ok()?.args(args)).ok()?;
+    if !output.status.success() { return None; }
     let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
     (!text.is_empty()).then_some(text)
 }
@@ -249,6 +346,45 @@ fn git_stdout(root: &Path, args: &[&str]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn queries_do_not_execute_hooks_filters_or_diff_drivers() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let run = |args: &[&str]| {
+            assert!(Command::new("git").arg("-C").arg(root).args(args).output().unwrap().status.success());
+        };
+        run(&["init", "-q"]);
+        std::fs::write(root.join("a.txt"), "before\n").unwrap();
+        run(&["add", "a.txt"]);
+        run(&["-c", "user.name=Test", "-c", "user.email=test@localhost", "commit", "-qm", "fixture"]);
+        std::fs::write(root.join("hook"), "#!/bin/sh\ntouch EXECUTED\nprintf 'token\\0'\n").unwrap();
+        std::fs::set_permissions(root.join("hook"), std::fs::Permissions::from_mode(0o700)).unwrap();
+        for key in ["core.fsmonitor", "diff.external", "diff.test.textconv", "filter.test.clean", "filter.test.process"] {
+            run(&["config", key, "./hook"]);
+        }
+        run(&["config", "filter.test.required", "true"]);
+        std::fs::write(root.join(".gitattributes"), "*.txt filter=test diff=test\n").unwrap();
+        std::fs::write(root.join("a.txt"), "after and a changed length\n").unwrap();
+        assert!(status(root).unwrap().contains_key("a.txt"));
+        assert!(!crate::diff::for_file(root, &root.join("a.txt")).unwrap().is_empty());
+        assert!(crate::blame::run(&root.join("a.txt"), "after\n").is_ok());
+        assert!(!root.join("EXECUTED").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn child_output_and_runtime_are_bounded() {
+        let overflow = run_limited(Command::new("sh").args(["-c", "printf '123456789'"]), 8, Duration::from_secs(2));
+        assert!(overflow.is_err());
+        let started = Instant::now();
+        let timeout = run_limited(Command::new("sh").args(["-c", "sleep 30"]), 128, Duration::from_millis(40));
+        assert_eq!(timeout.unwrap_err().kind(), io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(check_lines(&"x\n".repeat(LINE_LIMIT + 1)).is_err());
+    }
 
     #[test]
     fn review_branch_uses_the_repo_default() {
@@ -286,10 +422,10 @@ mod tests {
             "unexpected default branch {name}"
         );
         assert_eq!(
-            show_file(root, "HEAD", &root.join("a")).as_deref(),
+            show_file(root, "HEAD", &root.join("a")).unwrap().as_deref(),
             Some("a\n")
         );
-        assert!(show_file(root, "HEAD", &root.join("missing")).is_none());
+        assert!(show_file(root, "HEAD", &root.join("missing")).unwrap().is_none());
     }
 
     #[test]

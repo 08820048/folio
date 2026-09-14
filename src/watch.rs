@@ -24,32 +24,34 @@ pub const DEBOUNCE: Duration = Duration::from_millis(200);
 /// kernel observer. Events land in `pending` for the UI loop to drain.
 pub struct DiskWatch {
     _watcher: Option<RecommendedWatcher>,
-    pending: Arc<Mutex<Vec<PathBuf>>>,
+    pending: Arc<Mutex<HashMap<PathBuf, bool>>>,
 }
 
 impl Default for DiskWatch {
     fn default() -> Self {
         Self {
             _watcher: None,
-            pending: Arc::new(Mutex::new(Vec::new())),
+            pending: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
 
 impl DiskWatch {
     /// Watch exactly `roots`. An empty list drops the observer.
-    pub fn sync(&mut self, roots: &[PathBuf]) {
+    pub fn sync(&mut self, roots: &[PathBuf], ignored: &[String]) {
         if roots.is_empty() {
             self._watcher = None;
             return;
         }
         let pending = self.pending.clone();
+        let watched = roots.to_vec();
+        let ignored = ignored.to_vec();
         let mut watcher = match RecommendedWatcher::new(
             move |res: Result<Event, notify::Error>| {
                 if let Ok(event) = res
                     && let Ok(mut queue) = pending.lock()
                 {
-                    queue.extend(event.paths);
+                    collect_event(&mut queue, event, &watched, &ignored);
                 }
             },
             notify::Config::default(),
@@ -66,11 +68,37 @@ impl DiskWatch {
         self._watcher = Some(watcher);
     }
 
-    pub fn take(&self) -> Vec<PathBuf> {
+    pub fn take(&self) -> HashMap<PathBuf, bool> {
         self.pending
             .lock()
             .map(|mut queue| std::mem::take(&mut *queue))
             .unwrap_or_default()
+    }
+}
+
+/// The bool distinguishes tree changes from ordinary content/metadata writes.
+fn collect_event(queue: &mut HashMap<PathBuf, bool>, event: Event, roots: &[PathBuf], ignored: &[String]) {
+    use notify::{EventKind, event::ModifyKind};
+    if matches!(event.kind, EventKind::Access(_)) { return; }
+    if event.need_rescan() || queue.len() >= 4096 {
+        // Bound event bursts without dropping work: a root means a full refresh.
+        queue.clear();
+        queue.extend(roots.iter().cloned().map(|root| (root, true)));
+        return;
+    }
+    let structure = !matches!(event.kind, EventKind::Modify(ModifyKind::Data(_) | ModifyKind::Metadata(_)));
+    for path in event.paths {
+        let Some(root) = roots.iter().filter(|root| path.starts_with(root)).max_by_key(|root| root.components().count()) else { continue; };
+        let relative = path.strip_prefix(root).unwrap();
+        let git = is_git_metadata(relative);
+        if !git && under_ignored(relative, ignored) { continue; }
+        let path = if git { root.join(".git") } else { path };
+        queue.entry(path).and_modify(|changed| *changed |= structure).or_insert(structure);
+        if queue.len() >= 4096 {
+            queue.clear();
+            queue.extend(roots.iter().cloned().map(|root| (root, true)));
+            break;
+        }
     }
 }
 
@@ -153,6 +181,32 @@ pub fn batch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn event_bursts_are_filtered_coalesced_and_bounded() {
+        use notify::{EventKind, event::{AccessKind, CreateKind, DataChange, ModifyKind}};
+        let root = PathBuf::from("/repo");
+        let roots = [root.clone()];
+        let mut queue = HashMap::new();
+        for (kind, path) in [
+            (EventKind::Access(AccessKind::Read), "src/read.rs"),
+            (EventKind::Create(CreateKind::File), "node_modules/pkg/index.js"),
+            (EventKind::Modify(ModifyKind::Data(DataChange::Content)), "src/main.rs"),
+            (EventKind::Modify(ModifyKind::Data(DataChange::Content)), ".git/HEAD"),
+        ] {
+            collect_event(&mut queue, Event::new(kind).add_path(root.join(path)), &roots, &ignored());
+        }
+        assert_eq!(queue.len(), 2);
+        assert_eq!(queue[&root.join("src/main.rs")], false);
+        assert!(queue.contains_key(&root.join(".git")));
+        collect_event(&mut queue, Event::new(EventKind::Create(CreateKind::File)).add_path(root.join("src/main.rs")), &roots, &ignored());
+        assert!(queue[&root.join("src/main.rs")]);
+        for n in 0..10_000 {
+            collect_event(&mut queue, Event::new(EventKind::Create(CreateKind::File)).add_path(root.join(n.to_string())), &roots, &ignored());
+            assert!(queue.len() <= 4096);
+        }
+        assert_eq!(queue.get(&root), Some(&true), "overflow must request a complete refresh");
+    }
 
     fn ignored() -> Vec<String> {
         crate::tree::DEFAULT_IGNORED

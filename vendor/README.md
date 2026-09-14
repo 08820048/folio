@@ -61,7 +61,8 @@ rather than a read of the whole crate.
   the operations a multi-cursor is built out of.
 - `input/base/multi_cursor.rs` — new. The commands that make more than one
   selection, the edit that lands at every one of them, the collapse back to one,
-  and the rectangle the mouse and the column keys draw.
+  and the rectangle the mouse and the column keys draw. A batch edit emits one
+  `Change` and the occurrence search stops at `MAX_SELECTIONS`.
 - `input/base/state.rs` — where the set is read and written: a keystroke, a
   backspace, an Enter, an escape, a paste and a cut, and the hooks that reach
   `multi_cursor.rs`, an option-drag among them — plus the two folding commands
@@ -77,6 +78,10 @@ rather than a read of the whole crate.
   having been unreachable.
 - `input/editor/display_map/display_map.rs` — a `fold_candidates` accessor
   beside the `folded_ranges` one.
+- `input/editor/mod.rs` — `EditorState` keeps a Rope snapshot and materializes
+  `value()` only when a caller needs the string.
+- `input/editor/search.rs` — `SearchMatcher` can cap how many matches it
+  collects, so a select-all-occurrences does not first copy every hit.
 - `input/mod.rs` — the `mod` line for the new file.
 
 ## Re-vendoring, which an upgrade requires

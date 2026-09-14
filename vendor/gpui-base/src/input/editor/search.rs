@@ -13,6 +13,7 @@ pub struct SearchMatcher {
     matched_ranges: Rc<Vec<Range<usize>>>,
     current_match_ix: usize,
     replacing: bool,
+    max_matches: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -228,7 +229,13 @@ impl SearchMatcher {
             matched_ranges: Rc::new(Vec::new()),
             current_match_ix: 0,
             replacing: false,
+            max_matches: usize::MAX,
         }
+    }
+
+    pub(crate) fn with_limit(mut self, limit: usize) -> Self {
+        self.max_matches = limit;
+        self
     }
 
     /// Update the source text and recompute matches.
@@ -319,6 +326,7 @@ impl SearchMatcher {
             ranges.extend(
                 query
                     .stream_find_iter(text.as_bytes())
+                    .take(self.max_matches)
                     .map(|result| result.expect("input search match").range()),
             );
         }

@@ -19,7 +19,7 @@ use sum_tree::Bias;
 
 use super::{BoxSelection, InputBaseState, Selection};
 use crate::input::change::Change;
-use crate::input::{RopeExt as _, SearchMatcher};
+use crate::input::{InputEvent, RopeExt as _, SearchMatcher};
 
 /// How many selections a command will make before it stops.
 ///
@@ -55,12 +55,10 @@ impl InputBaseState {
     /// The editor's own search matcher does the finding, so a literal string
     /// here means what it means in the find panel.
     fn occurrences(&self, needle: &str) -> Vec<Range<usize>> {
-        let mut matcher = SearchMatcher::new();
+        let mut matcher = SearchMatcher::new().with_limit(MAX_SELECTIONS);
         matcher.update(&self.text);
         matcher.update_query(needle, false);
-        let mut ranges: Vec<Range<usize>> = matcher.matched_ranges().as_ref().clone();
-        ranges.truncate(MAX_SELECTIONS);
-        ranges
+        matcher.matched_ranges().as_ref().clone()
     }
 
     /// `⌘D`: the word under the caret, then each next place it appears.
@@ -425,6 +423,10 @@ impl InputBaseState {
         // would leave the last one standing over an edit it never made.
         let was_silent = self.silent_replace_text;
         self.silent_replace_text = true;
+        let was_emitting = self.emit_events;
+        self.emit_events = false;
+        // Search the final text once, after the whole batch.
+        let matcher = std::mem::take(&mut self.search_session.matcher);
 
         let mut carets = Vec::with_capacity(selections.len());
         for (selection, (text, caret)) in selections.iter().zip(texts).rev() {
@@ -437,6 +439,9 @@ impl InputBaseState {
         }
 
         self.silent_replace_text = was_silent;
+        self.emit_events = was_emitting;
+        self.search_session.matcher = matcher;
+        self.update_search(cx);
         self.history.set_ignoring(was_ignoring);
         // Collected right to left, so put them back in the order of the text,
         // and move each one by what the edits before it changed the length by:
@@ -458,6 +463,9 @@ impl InputBaseState {
         self.history.end_grouping();
 
         self.selections.carets(carets);
+        if was_emitting {
+            cx.emit(InputEvent::Change);
+        }
         self.ime_marked_range.take();
         self.update_preferred_column();
         cx.notify();
