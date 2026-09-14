@@ -369,15 +369,22 @@ export function FinalCta() {
   );
 }
 
-export function SiteFooter() {
+export function SiteFooter({ page = "home" }: { page?: "home" | "updates" }) {
   return (
     <footer className="border-t">
       <div className="mx-auto flex w-full max-w-6xl flex-wrap items-center justify-between gap-4 px-6 py-8">
-        <div className="flex items-center gap-4 text-xs text-muted-foreground">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-muted-foreground">
           <a href="/" className="text-xl font-semibold tracking-tight text-foreground">
             Folio.
           </a>
           <span>A little space for reading code.</span>
+          <a
+            href="/updates"
+            aria-current={page === "updates" ? "page" : undefined}
+            className="transition-colors hover:text-foreground aria-[current=page]:text-foreground"
+          >
+            Updates
+          </a>
         </div>
         <div className="flex items-center gap-4">
           <a

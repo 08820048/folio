@@ -2,13 +2,16 @@ import { ArrowUpRight, Moon, Sun } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useTheme } from "@/components/theme";
 
+// Root-relative so every link works from the home page and from `/updates`
+// alike; the browser scrolls to the fragment when the home page is already up.
 const links = [
-  { href: "#features", label: "Features" },
-  { href: "#workflow", label: "Workflow" },
-  { href: "#faq", label: "FAQ" },
+  { href: "/#features", label: "Features" },
+  { href: "/#workflow", label: "Workflow" },
+  { href: "/#faq", label: "FAQ" },
+  { href: "/updates", label: "Updates" },
 ];
 
-export function SiteHeader() {
+export function SiteHeader({ page = "home" }: { page?: "home" | "updates" }) {
   const { dark, toggle } = useTheme();
 
   return (
@@ -30,15 +33,19 @@ export function SiteHeader() {
           aria-label="Main"
           className="hidden items-center gap-7 text-sm text-muted-foreground sm:flex"
         >
-          {links.map((link) => (
-            <a
-              key={link.href}
-              href={link.href}
-              className="transition-colors hover:text-foreground"
-            >
-              {link.label}
-            </a>
-          ))}
+          {links.map((link) => {
+            const current = link.href === "/updates" && page === "updates";
+            return (
+              <a
+                key={link.href}
+                href={link.href}
+                aria-current={current ? "page" : undefined}
+                className="transition-colors hover:text-foreground aria-[current=page]:text-foreground"
+              >
+                {link.label}
+              </a>
+            );
+          })}
         </nav>
         <div className="flex items-center gap-1.5">
           <Button

@@ -18,6 +18,7 @@ not covered.
 
 - Platform: macOS 12 or newer, Apple silicon (M-series)
 - Price: free for noncommercial use
+- Latest release: 0.1.1 (2026-09-14)
 - Download: https://folio-website-7j4.pages.dev/download (DMG; auto-updates via Sparkle)
 - Source: not publicly available
 - Author: xuyi — https://x.com/shizouffa
@@ -25,3 +26,4 @@ not covered.
 ## Pages
 
 - Home: https://folio-website-7j4.pages.dev/
+- Updates: https://folio-website-7j4.pages.dev/updates

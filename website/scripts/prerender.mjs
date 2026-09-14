@@ -3,8 +3,13 @@ import { readFileSync, rmSync, writeFileSync } from "node:fs";
 
 const here = (relative) => new URL(relative, import.meta.url);
 
+const { render, renderUpdates, latestRelease } = await import(
+  here("../.prerender/ssr/entry-server.js"),
+);
+
 // The structured data travels with the page; its exact bytes get hashed into
 // the CSP in dist/_headers, so keep this block the single source of truth.
+// `softwareVersion` is filled from the site's release data below.
 const structuredData = {
   "@context": "https://schema.org",
   "@graph": [
@@ -14,6 +19,8 @@ const structuredData = {
       applicationCategory: "DeveloperApplication",
       operatingSystem: "macOS 12+ (Apple silicon)",
       url: "https://folio-website-7j4.pages.dev/",
+      softwareVersion: latestRelease.version,
+      releaseNotes: "https://folio-website-7j4.pages.dev/updates",
       description:
         "Folio is a light, focused native code editor for reading. Open a local project, read the code, review Git changes, make a few edits. Built with Rust + GPUI for macOS.",
       image: "https://folio-website-7j4.pages.dev/assets/folio.png",
@@ -76,21 +83,43 @@ const structuredData = {
   ],
 };
 
-// 1. Render the app into the client shell.
-const { render } = await import(here("../.prerender/ssr/entry-server.js"));
-const shell = readFileSync(here("../dist/index.html"), "utf8");
-const markup = render();
-if (!shell.includes('<div id="root"></div>')) {
-  throw new Error("dist/index.html has no empty #root to inject into");
+// 1. Render each page into its client shell. The root marker carries the
+//    page name the client entry reads, so it must survive the injection.
+const pages = [
+  {
+    file: "../dist/index.html",
+    open: '<div id="root">',
+    render,
+    structuredData: true,
+  },
+  {
+    file: "../dist/updates.html",
+    open: '<div id="root" data-page="updates">',
+    render: renderUpdates,
+    structuredData: false,
+  },
+];
+
+for (const page of pages) {
+  const shell = readFileSync(here(page.file), "utf8");
+  if (!shell.includes(page.open)) {
+    throw new Error(`${page.file} has no empty #root to inject into`);
+  }
+  const markup = page.render();
+  // A function replacement, so a `$` in the markup is never read as a
+  // capture-group reference.
+  let html = shell.replace(page.open, () => page.open + markup);
+  if (page.structuredData) {
+    const script = `<script type="application/ld+json">${JSON.stringify(structuredData)}</script>`;
+    html = html.replace("</head>", `  ${script}\n  </head>`);
+  }
+  writeFileSync(here(page.file), html);
+  console.log(
+    `prerendered ${page.file.replace("../", "")} (+${markup.length} bytes of markup)`,
+  );
 }
-let html = shell.replace('<div id="root"></div>', `<div id="root">${markup}</div>`);
 
-// 2. Inline the structured data.
-const script = `<script type="application/ld+json">${JSON.stringify(structuredData)}</script>`;
-html = html.replace("</head>", `  ${script}\n  </head>`);
-writeFileSync(here("../dist/index.html"), html);
-
-// 3. Let that one inline script through the CSP.
+// 2. Let the home page's inline structured data through the CSP.
 const headersPath = here("../dist/_headers");
 const hash = createHash("sha256").update(JSON.stringify(structuredData)).digest("base64");
 const headers = readFileSync(headersPath, "utf8").replace(
@@ -101,4 +130,4 @@ if (!headers.includes(hash)) throw new Error("could not patch script-src in _hea
 writeFileSync(headersPath, headers);
 
 rmSync(here("../.prerender"), { recursive: true, force: true });
-console.log(`prerendered dist/index.html (+${markup.length} bytes of markup, ld+json hashed into CSP)`);
+console.log("ld+json hashed into the CSP in dist/_headers");

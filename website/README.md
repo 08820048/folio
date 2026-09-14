@@ -7,6 +7,26 @@ Production: https://folio-website-7j4.pages.dev
 Only `dist/` (generated) plus the static files in `public/` are deployed. App
 releases remain in R2.
 
+## Pages
+
+Two prerendered HTML entries share one client bundle, which picks the page from
+the `data-page` marker on `#root`:
+
+| URL | HTML | Component |
+| --- | --- | --- |
+| `/` | `index.html` | `src/App.tsx` |
+| `/updates` | `updates.html` | `src/components/updates-page.tsx` |
+
+Adding another page means a third entry in `vite.config.ts`'s
+`rollupOptions.input` and another item in `scripts/prerender.mjs`'s `pages`
+list (with the matching `open` marker), plus the client branch in
+`src/main.tsx`.
+
+`src/data/releases.ts` is the changelog's source of truth. Edit it by hand when
+a version ships, keeping the newest entry in step with the `--notes` passed to
+`scripts/release.sh` — those become the Sparkle appcast. The prerender also
+reads its `latestRelease` to fill `softwareVersion` in the home page's JSON-LD.
+
 ## Develop
 
 ```sh
