@@ -198,8 +198,8 @@ fn same_identity(source: &Path, destination: &Path) -> bool {
     }
 }
 
-/// Windows file names use `CompareStringOrdinal` ignore-case, the same
-/// rule NTFS uses. Lengths are passed in, so the buffers need no NUL.
+/// NTFS treats ASCII letters as case-insensitive. That is the only identity
+/// this helper has to catch: a case-only rename of the same directory entry.
 #[cfg(windows)]
 fn same_path_ignore_case(source: &Path, destination: &Path) -> bool {
     use std::os::windows::ffi::OsStrExt;
@@ -209,23 +209,18 @@ fn same_path_ignore_case(source: &Path, destination: &Path) -> bool {
     let Ok(destination) = std::path::absolute(destination) else {
         return false;
     };
-    let a: Vec<u16> = source.as_os_str().encode_wide().collect();
-    let b: Vec<u16> = destination.as_os_str().encode_wide().collect();
-    const CSTR_EQUAL: i32 = 2;
-    #[link(name = "kernel32")]
-    extern "system" {
-        fn CompareStringOrdinal(
-            string1: *const u16,
-            count1: i32,
-            string2: *const u16,
-            count2: i32,
-            ignore_case: i32,
-        ) -> i32;
+    fn fold(unit: u16) -> u16 {
+        if (b'A' as u16..=b'Z' as u16).contains(&unit) {
+            unit + 32
+        } else {
+            unit
+        }
     }
-    unsafe {
-        CompareStringOrdinal(a.as_ptr(), a.len() as i32, b.as_ptr(), b.len() as i32, 1)
-            == CSTR_EQUAL
-    }
+    source
+        .as_os_str()
+        .encode_wide()
+        .map(fold)
+        .eq(destination.as_os_str().encode_wide().map(fold))
 }
 
 fn is_cross_device(error: &io::Error) -> bool {
