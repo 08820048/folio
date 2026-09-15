@@ -148,9 +148,15 @@ const NOTICE_ENTER: Duration = Duration::from_millis(280);
 const NOTICE_LEAVE: Duration = Duration::from_millis(180);
 /// File-tree row height. `uniform_list` needs a fixed size.
 const TREE_ROW_HEIGHT: f32 = 27.;
-/// Indent of a tree row, matching gpui-component's Tree: `16 * depth + 12`.
+/// Indent of a tree row per nesting level.
 const TREE_ROW_INDENT: f32 = 16.;
-const TREE_ROW_PAD: f32 = 12.;
+/// Where the project header's folder icon sits inside the list: `px_3`
+/// (12) + the `xsmall` chevron (12) + `gap_2` (8). Top-level rows are
+/// `depth == 1`, so their icon lands one indent to the right of it and
+/// every deeper level steps in by the same amount.
+const TREE_ROW_PAD: f32 = 12. + 12. + 8.;
+/// Width of a `small` icon, used to center guides under the parent icon.
+const TREE_ICON_SIZE: f32 = 14.;
 /// Project root header. Taller than a file row so the chevron and folder
 /// read as a section, not another entry.
 const PROJECT_HEADER_HEIGHT: f32 = 42.;
@@ -188,7 +194,7 @@ fn sidebar_rule(cx: &App) -> Hsla {
     .into()
 }
 
-/// Left padding of a file-tree row. Same formula as gpui-component's Tree.
+/// Left padding of a file-tree row.
 fn tree_row_indent(depth: usize) -> Pixels {
     px(TREE_ROW_PAD + depth as f32 * TREE_ROW_INDENT)
 }
@@ -253,10 +259,11 @@ fn tree_row_selected_border(cx: &App) -> Hsla {
     .into()
 }
 
-/// Horizontal position of the indent guide for nesting `level`.
-/// Centered in that level's gutter so the line sits under the parent's icon.
+/// Horizontal position of the indent guide for nesting `level`, centered
+/// under the icon of the row that owns it: level 0 is the project header's
+/// folder icon, level `n` is a depth-`n` row's icon.
 fn tree_guide_x(level: usize) -> Pixels {
-    px(TREE_ROW_PAD + TREE_ROW_INDENT / 2. + level as f32 * TREE_ROW_INDENT)
+    px(TREE_ROW_PAD + TREE_ICON_SIZE / 2. + level as f32 * TREE_ROW_INDENT)
 }
 
 /// The guide that marks the folder containing `index`: first child row,
@@ -346,11 +353,23 @@ mod tree_guide_tests {
         assert_eq!(tree_active_guide(&rows, 3), Some((3, 5, 1)));
         assert_eq!(tree_active_guide(&rows, 4), Some((3, 5, 1)));
         assert_eq!(tree_active_guide(&rows, 5), Some((1, 6, 0)));
-        assert_eq!(tree_guide_x(0), px(TREE_ROW_PAD + TREE_ROW_INDENT / 2.));
+        assert_eq!(tree_guide_x(0), px(TREE_ROW_PAD + TREE_ICON_SIZE / 2.));
         assert_eq!(
             tree_guide_x(1),
-            px(TREE_ROW_PAD + TREE_ROW_INDENT / 2. + TREE_ROW_INDENT)
+            px(TREE_ROW_PAD + TREE_ICON_SIZE / 2. + TREE_ROW_INDENT)
         );
+    }
+
+    #[core::prelude::v1::test]
+    fn each_level_steps_in_by_one_indent_from_the_header_icon() {
+        // The header draws `px_3` + a 12px chevron + `gap_2` before its
+        // folder icon; a top-level row (depth 1) must start one indent past
+        // that, not on top of it.
+        let header_icon = 12. + 12. + 8.;
+        assert_eq!(tree_row_indent(1), px(header_icon + TREE_ROW_INDENT));
+        assert_eq!(tree_row_indent(2) - tree_row_indent(1), px(TREE_ROW_INDENT));
+        // The level-0 guide runs under the header icon's center.
+        assert_eq!(tree_guide_x(0), px(header_icon + TREE_ICON_SIZE / 2.));
     }
 
     #[core::prelude::v1::test]
