@@ -1,0 +1,91 @@
+# Windows-only release. A version tag starts this job; macOS stays on
+# the local ./scripts/release.sh path and is not built here.
+name: Windows release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+concurrency:
+  group: windows-release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the tag matches this crate version
+        shell: bash
+        run: |
+          set -eu
+          VERSION=$(sed -n 's/^VERSION=//p' packaging/release.env | head -n 1)
+          CARGO=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)
+          if [ "$CARGO" != "$VERSION" ]; then
+            printf 'Cargo.toml is %s, packaging/release.env is %s\n' "$CARGO" "$VERSION" >&2
+            exit 1
+          fi
+          if [ "${GITHUB_REF_NAME}" != "v${VERSION}" ]; then
+            printf 'Tag %s does not match v%s\n' "${GITHUB_REF_NAME}" "$VERSION" >&2
+            exit 1
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.95.0"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows-msvc-release
+          cache-on-failure: true
+
+      - name: Package Folio.exe
+        shell: pwsh
+        run: ./scripts/package-windows.ps1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ZIP_KEY }}
+          path: ${{ env.ZIP_PATH }}
+          if-no-files-found: error
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Upload the zip to R2
+        shell: bash
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ env.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -eu
+          if [ -z "${CLOUDFLARE_API_TOKEN:-}" ]; then
+            printf 'Set the CLOUDFLARE_API_TOKEN Actions secret (R2 write on folio-releases).\n' >&2
+            exit 1
+          fi
+          put() {
+            key=$1
+            cache=$2
+            npx --yes wrangler@4.127.1 r2 object put "$R2_BUCKET/$key" \
+              --remote \
+              --file="$ZIP_PATH" \
+              --content-type="application/zip" \
+              --cache-control="$cache"
+          }
+          put "$ZIP_KEY" "public, max-age=31536000, immutable"
+          put "$LATEST_KEY" "no-cache"
+          printf '\nPublished Folio %s (build %s) for Windows\n' "$VERSION" "$BUILD"
+          printf '  Zip     https://pub-307aebc4dfa4468d80e05e193c8f9c5b.r2.dev/%s\n' "$ZIP_KEY"
+          printf '  Latest  https://pub-307aebc4dfa4468d80e05e193c8f9c5b.r2.dev/%s\n' "$LATEST_KEY"
+          printf 'No GitHub Release was created. macOS is still ./scripts/release.sh.\n'

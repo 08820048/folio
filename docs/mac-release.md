@@ -29,6 +29,8 @@ Sparkle 私钥        登录钥匙串，account = Folio Sparkle
 
 脚本会：Release 编译 → 嵌入 Sparkle.framework → Developer ID + hardened runtime → 做 DMG → `notarytool` + staple → 从已 staple 的 `.app` 打 Sparkle zip → `sign_update` → 写 `appcast.xml` → 先上传 zip / DMG / 说明，最后上传 appcast。
 
+Windows **不是**这条路径。同一笔 `VERSION` 的 commit 推上 `v<VERSION>` tag 之后，GitHub Actions 在 `windows-latest` 编译并上传 R2。Mac 脚本不要打 tag、不要改。详见 `docs/windows.md`。
+
 ## 用户拿到的地址
 
 ```text
@@ -50,6 +52,6 @@ cargo run --locked            # 没有 Sparkle，菜单里检查更新会 toast
 
 ## 不要
 
-- 不要 `gh release create`
+- 不要 `gh release create`（Windows 的 tag 只触发 Actions，也不发 GitHub Release）
 - 不要把未公证的 DMG 传到带 `immutable` 缓存头的旧文件名上；换 `Folio-<version>-<build>.dmg`
 - 不要把 Sparkle 私钥提交进仓库

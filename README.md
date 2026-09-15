@@ -15,8 +15,9 @@ On macOS, after installing the Xcode Command Line Tools:
 cargo run --locked
 ```
 
-Windows is not a download yet. Building from source on a Windows machine is
-covered in [docs/windows.md](docs/windows.md).
+Windows is not a public download yet. A version tag (`v0.1.2`) starts
+GitHub Actions, which uploads a zip to R2; see [docs/windows.md](docs/windows.md).
+Building from source on a Windows machine is the same document.
 
 `rust-toolchain.toml` pins Rust 1.95.0 and rustup installs it on demand. The
 first build downloads dependencies; the app itself never needs the network. The
@@ -37,7 +38,8 @@ Pass `--debug` for a development build. A plain `package.sh` still ad-hoc
 signs. A distribution build is `./scripts/release.sh`: Developer ID, notarized
 DMG, Sparkle zip + appcast, upload to the `folio-releases` R2 bucket. It does
 not create a GitHub Release. The runbook is [docs/mac-release.md](docs/mac-release.md).
-It generates the Mac application icon from `assets/app-icon/logo-1024.png`
+Windows uses a `v<VERSION>` tag instead of that script; [docs/windows.md](docs/windows.md).
+`package.sh` generates the Mac application icon from `assets/app-icon/logo-1024.png`
 (the 1024 master of `assets/app-icon/logo.jpg`), including standard and
 Retina sizes, and embeds it in the signed bundle.
 
