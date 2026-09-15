@@ -31,10 +31,34 @@ export type Release = {
 /** Newest first. */
 export const releases: Release[] = [
   {
+    version: "0.1.2",
+    build: 5,
+    date: "2026-09-15",
+    latest: true,
+    summary: "Run code from the editor, and a few places that used to get in the way.",
+    notes: [
+      {
+        kind: "added",
+        text: "Run the current file, test, or main from the gutter or ⌘R, in a dedicated Run tab. While it is running, Play becomes Stop.",
+      },
+      {
+        kind: "added",
+        text: "Rainbow brackets and matching, so nested pairs are easier to follow.",
+      },
+      {
+        kind: "added",
+        text: "Click a printed URL in the terminal to open it in the browser.",
+      },
+      {
+        kind: "fixed",
+        text: "Typing in the in-file search box no longer selects the whole query after every character.",
+      },
+    ],
+  },
+  {
     version: "0.1.1",
     build: 4,
     date: "2026-09-14",
-    latest: true,
     summary: "A quieter second build: fewer places where the app got in the way.",
     notes: [
       {
