@@ -88,6 +88,8 @@ rather than a read of the whole crate.
   `value()` only when a caller needs the string.
 - `input/editor/search.rs` — `SearchMatcher` can cap how many matches it
   collects, so a select-all-occurrences does not first copy every hit.
+  `set_search_query` updates the matcher only: the overlay re-opens the
+  search box (and selects all) whenever `SearchSession.query` changes.
 - `input/mod.rs` — the `mod` line for the new file.
 
 ## Re-vendoring, which an upgrade requires

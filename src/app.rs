@@ -15390,6 +15390,40 @@ mod tests {
         drop(subscription);
     }
 
+    /// The in-file search overlay re-seeds its box (`set_value` + `select_all`)
+    /// whenever `search_session.query` changes. Keystrokes go through
+    /// `set_search_query` and must only update the matcher, or each character
+    /// would select the whole query and the next key would replace it.
+    #[gpui::test]
+    fn typing_in_search_does_not_reselect_the_query(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let cx = cx.add_empty_window();
+        let editor = cx.update(|window, cx| {
+            cx.new(|cx| EditorState::new("text", window, cx).default_value("hello hello"))
+        });
+        editor.update_in(cx, |editor, window, cx| editor.prepare(window, cx));
+        editor.update_in(cx, |editor, _, cx| {
+            editor.base_state().clone().update(cx, |base, cx| {
+                base.set_selected_range(0..5, cx);
+                base.open_search(false, cx);
+                assert_eq!(base.search_session().query, "hello");
+                assert_eq!(base.search_session().matcher.len(), 2);
+
+                base.set_search_query("hell", false, cx);
+                assert_eq!(
+                    base.search_session().query,
+                    "hello",
+                    "the open query is what the overlay uses to decide to select-all"
+                );
+                assert_eq!(base.search_session().matcher.len(), 2);
+
+                base.set_search_query("x", false, cx);
+                assert_eq!(base.search_session().query, "hello");
+                assert!(base.search_session().matcher.is_empty());
+            });
+        });
+    }
+
     #[gpui::test]
     fn a_cross_project_move_keeps_tracking_edits(cx: &mut TestAppContext) {
         let tmp = tempfile::tempdir().unwrap();

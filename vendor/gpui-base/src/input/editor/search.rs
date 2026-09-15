@@ -21,6 +21,10 @@ pub struct SearchSession {
     pub open: bool,
     pub replace_mode: bool,
     pub case_insensitive: bool,
+    /// The query the panel was opened with (the editor selection), not the
+    /// live text in the search box. The overlay re-seeds that box — `set_value`
+    /// plus `select_all` — whenever this string changes, so keystrokes must
+    /// not write it; they update [`Self::matcher`] instead.
     pub query: String,
     pub replacement: String,
     pub anchor_offset: Option<usize>,
@@ -49,12 +53,6 @@ impl SearchSession {
 
     pub(crate) fn close(&mut self) {
         self.open = false;
-    }
-
-    pub(crate) fn update_query(&mut self, query: impl Into<String>, case_insensitive: bool) {
-        self.query = query.into();
-        self.case_insensitive = case_insensitive;
-        self.matcher.update_query(&self.query, case_insensitive);
     }
 }
 
@@ -108,7 +106,15 @@ impl InputBaseState {
         case_insensitive: bool,
         cx: &mut Context<Self>,
     ) {
-        self.search_session.update_query(query, case_insensitive);
+        // Leave `search_session.query` alone. gpui-component's overlay
+        // treats a change to that string as "the panel just opened" and
+        // runs `set_value` + `select_all` on the search box — so writing
+        // it here would select the whole query after every keystroke.
+        let query = query.into();
+        self.search_session.case_insensitive = case_insensitive;
+        self.search_session
+            .matcher
+            .update_query(&query, case_insensitive);
         self.search_session.matcher.update(&self.text);
         cx.notify();
     }
