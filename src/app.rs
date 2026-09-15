@@ -2,6 +2,8 @@ use crate::assets::FolioIcon;
 use crate::preview::{self, Content};
 use crate::syntax;
 use crate::terminal_view::{StopStep, TerminalBusy, TerminalView};
+#[cfg(target_os = "windows")]
+use folio::windows_update;
 use folio::{
     blame, brackets, buffer, diff, editorconfig, fs_op, git,
     recent::{self, RecentProject},
@@ -1717,6 +1719,8 @@ impl Folio {
         self.start_restore(window, cx);
         self.watch_unsaved(cx);
         self.watch_disk(window, cx);
+        #[cfg(target_os = "windows")]
+        self.schedule_windows_update_check(window, cx);
     }
 
     fn request(&mut self, next: Next, window: &mut Window, cx: &mut Context<Self>) {
@@ -5633,18 +5637,166 @@ impl Folio {
         cx.notify();
     }
 
-    /// Sparkle's update window, when this process is the packaged app.
-    /// A `cargo run` binary has no framework, so it says so instead of
-    /// opening a web page that is not the installer.
-    fn check_for_updates(&mut self, cx: &mut Context<Self>) {
-        if !crate::sparkle::check() {
-            let detail = if cfg!(target_os = "macos") {
-                "Updates ship in the packaged Mac app."
-            } else {
-                "Automatic updates are not available in this build."
-            };
-            self.inform("Updates", detail, cx);
+    /// Sparkle's update window on a packaged Mac app. On Windows, the
+    /// installer published to R2. `cargo run` has neither, so it says so.
+    fn check_for_updates(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        #[cfg(target_os = "macos")]
+        {
+            if crate::sparkle::check() {
+                return;
+            }
+            let _ = window;
+            self.inform("Updates", "Updates ship in the packaged Mac app.", cx);
+            return;
         }
+        #[cfg(target_os = "windows")]
+        self.check_windows_update(true, window, cx);
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let _ = window;
+            self.inform("Updates", "Updates ship in the packaged Mac app.", cx);
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn schedule_windows_update_check(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !windows_update::installed() {
+            return;
+        }
+        cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(Duration::from_secs(8)).await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.check_windows_update(false, window, cx);
+            });
+        })
+        .detach();
+    }
+
+    #[cfg(target_os = "windows")]
+    fn check_windows_update(&mut self, user: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if !windows_update::installed() {
+            if user {
+                self.inform(
+                    "Updates",
+                    "Updates ship in the packaged Windows installer.",
+                    cx,
+                );
+            }
+            return;
+        }
+        if self.saving || self.prompting || self.project_loading {
+            return;
+        }
+        if user {
+            self.status("Updates", "Checking for updates.", cx);
+        }
+        let running = windows_update::current_build();
+        let task = cx.background_executor().spawn(async move {
+            windows_update::fetch_feed()
+                .map(|feed| windows_update::is_newer(&feed, running).then_some(feed))
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            let _ = this.update_in(cx, |this, window, cx| match result {
+                Ok(None) => {
+                    if user {
+                        this.inform("Updates", "You're up to date.", cx);
+                    } else {
+                        this.clear_notice();
+                    }
+                }
+                Ok(Some(feed)) => {
+                    this.clear_notice();
+                    this.prompt_windows_update(feed, window, cx);
+                }
+                Err(error) => {
+                    if user {
+                        this.error(format!("Could not check for updates: {error}"), cx);
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
+    #[cfg(target_os = "windows")]
+    fn prompt_windows_update(
+        &mut self,
+        feed: windows_update::Feed,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.prompting {
+            return;
+        }
+        self.prompting = true;
+        cx.notify();
+        let title = format!("Folio {} is available", feed.version);
+        let detail = format!(
+            "Build {} can be installed now. Folio will close, then reopen after the installer finishes.",
+            feed.build
+        );
+        let answer = window.prompt(
+            PromptLevel::Info,
+            &title,
+            Some(&detail),
+            &["Install", "Later"],
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            let answer = answer.await.unwrap_or(1);
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.prompting = false;
+                if answer != 0 {
+                    return;
+                }
+                this.download_windows_update(feed, window, cx);
+            });
+        })
+        .detach();
+    }
+
+    #[cfg(target_os = "windows")]
+    fn download_windows_update(
+        &mut self,
+        feed: windows_update::Feed,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let dirty = std::iter::once(&self.project)
+            .chain(self.parked.iter())
+            .flat_map(|p| p.documents.values())
+            .filter(|d| d.dirty)
+            .count();
+        if dirty > 0 {
+            self.inform(
+                "Updates",
+                "Save your files before installing the update.",
+                cx,
+            );
+            return;
+        }
+        if self.saving || self.prompting || self.project_loading {
+            return;
+        }
+        self.status("Updates", "Downloading the installer.", cx);
+        let task = cx
+            .background_executor()
+            .spawn(async move { windows_update::download_installer(&feed) });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            let _ = this.update_in(cx, |this, window, cx| match result {
+                Ok(path) => {
+                    if let Err(error) = windows_update::start_installer(&path) {
+                        this.error(format!("Could not start the installer: {error}"), cx);
+                        return;
+                    }
+                    this.perform(Next::Quit, window, cx);
+                }
+                Err(error) => this.error(format!("Could not download the update: {error}"), cx),
+            });
+        })
+        .detach();
     }
 
     fn show_about(&mut self, cx: &mut Context<Self>) {
@@ -10718,7 +10870,9 @@ impl Render for Folio {
                 }),
             )
             .on_action(cx.listener(|this, _: &OpenAbout, _, cx| this.show_about(cx)))
-            .on_action(cx.listener(|this, _: &CheckForUpdates, _, cx| this.check_for_updates(cx)))
+            .on_action(cx.listener(|this, _: &CheckForUpdates, window, cx| {
+                this.check_for_updates(window, cx)
+            }))
             .on_action(cx.listener(|this, _: &Run, window, cx| this.run_or_stop(None, window, cx)))
             .on_action(cx.listener(|this, _: &Rerun, window, cx| this.rerun(window, cx)))
             .on_action(cx.listener(|this, _: &StopRun, window, cx| this.stop_run(window, cx)))

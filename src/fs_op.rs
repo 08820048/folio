@@ -172,29 +172,59 @@ fn exclusive_rename(source: &Path, destination: &Path) -> io::Result<()> {
 }
 
 fn same_identity(source: &Path, destination: &Path) -> bool {
-    let Ok(source) = fs::symlink_metadata(source) else {
+    let Ok(source_meta) = fs::symlink_metadata(source) else {
         return false;
     };
-    let Ok(destination) = fs::symlink_metadata(destination) else {
+    let Ok(destination_meta) = fs::symlink_metadata(destination) else {
         return false;
     };
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        source.dev() == destination.dev() && source.ino() == destination.ino()
+        source_meta.dev() == destination_meta.dev() && source_meta.ino() == destination_meta.ino()
     }
     #[cfg(windows)]
     {
-        use std::os::windows::fs::MetadataExt;
-        source.volume_serial_number() == destination.volume_serial_number()
-            && source.file_index() == destination.file_index()
-            && source.volume_serial_number().is_some()
-            && source.file_index().is_some()
+        let _ = (source_meta, destination_meta);
+        // `MetadataExt::file_index` is still nightly (`windows_by_handle`).
+        // On a case-insensitive volume two paths that match ignoring case
+        // are the same directory entry, which is the rename this guards.
+        same_path_ignore_case(source, destination)
     }
     #[cfg(not(any(unix, windows)))]
     {
-        let _ = (source, destination);
+        let _ = (source, destination, source_meta, destination_meta);
         false
+    }
+}
+
+/// Windows file names use `CompareStringOrdinal` ignore-case, the same
+/// rule NTFS uses. Lengths are passed in, so the buffers need no NUL.
+#[cfg(windows)]
+fn same_path_ignore_case(source: &Path, destination: &Path) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    let Ok(source) = std::path::absolute(source) else {
+        return false;
+    };
+    let Ok(destination) = std::path::absolute(destination) else {
+        return false;
+    };
+    let a: Vec<u16> = source.as_os_str().encode_wide().collect();
+    let b: Vec<u16> = destination.as_os_str().encode_wide().collect();
+    const CSTR_EQUAL: i32 = 2;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn CompareStringOrdinal(
+            string1: *const u16,
+            count1: i32,
+            string2: *const u16,
+            count2: i32,
+            ignore_case: i32,
+        ) -> i32;
+    }
+    unsafe {
+        CompareStringOrdinal(a.as_ptr(), a.len() as i32, b.as_ptr(), b.len() as i32, 1)
+            == CSTR_EQUAL
     }
 }
 
@@ -495,5 +525,21 @@ mod safety_tests {
         assert_eq!(fs::read_to_string(copied.join("inside.txt")).unwrap(), "ok");
         assert_eq!(fs::read_link(copied.join("link.txt")).unwrap(), outside);
         assert!(!outside.exists());
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    #[test]
+    fn case_only_rename_is_the_same_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lower = tmp.path().join("case.txt");
+        fs::write(&lower, "same").unwrap();
+        assert!(same_identity(&lower, &tmp.path().join("CASE.txt")));
+        let renamed = rename(&lower, "CASE.txt").unwrap();
+        assert_eq!(fs::read_to_string(&renamed).unwrap(), "same");
+        assert!(same_identity(&renamed, &tmp.path().join("case.txt")));
     }
 }

@@ -20,4 +20,5 @@ pub mod terminal_keys;
 pub mod terminal_mouse;
 pub mod tree;
 pub mod watch;
+pub mod windows_update;
 pub mod workspace;

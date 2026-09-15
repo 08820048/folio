@@ -88,7 +88,12 @@ jobs:
           }
           put "$EXE_KEY" "public, max-age=31536000, immutable"
           put "$LATEST_KEY" "no-cache"
+          npx --yes wrangler@4.127.1 r2 object put "$R2_BUCKET/$FEED_KEY" \
+            --remote \
+            --file="$FEED_PATH" \
+            --content-type="application/json; charset=utf-8" \
+            --cache-control="no-cache"
           printf '\nPublished Folio %s (build %s) for Windows\n' "$VERSION" "$BUILD"
           printf '  Exe     https://pub-307aebc4dfa4468d80e05e193c8f9c5b.r2.dev/%s\n' "$EXE_KEY"
           printf '  Latest  https://pub-307aebc4dfa4468d80e05e193c8f9c5b.r2.dev/%s\n' "$LATEST_KEY"
-          printf 'No GitHub Release was created. macOS is still ./scripts/release.sh.\n'
+          printf '  Feed    https://pub-307aebc4dfa4468d80e05e193c8f9c5b.r2.dev/%s\n' "$FEED_KEY"

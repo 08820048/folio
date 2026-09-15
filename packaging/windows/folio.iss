@@ -34,6 +34,8 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0
 UninstallDisplayIcon={app}\{#MyAppExeName}
+CloseApplications=yes
+CloseApplicationsFilter=Folio.exe
 SetupIconFile={#FolioRoot}\target\folio.ico
 
 [Languages]
@@ -52,4 +54,4 @@ Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\{#MyAppExeName}"; Description: "Launch Folio"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#MyAppExeName}"; Description: "Launch Folio"; Flags: nowait postinstall

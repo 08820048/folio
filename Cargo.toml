@@ -95,6 +95,10 @@ gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", 
 rustix = { version = "1", features = ["fs", "process"] }
 libc = "0.2"
 
+[target.'cfg(windows)'.dependencies]
+ureq = { version = "2.12", default-features = false, features = ["tls"] }
+sha2 = "0.10"
+
 [[bin]]
 name = "folio"
 path = "src/main.rs"

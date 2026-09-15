@@ -73,16 +73,28 @@ if ($LASTEXITCODE -ne 0) {
     throw "ISCC failed"
 }
 
+$publicBase = Read-ReleaseVar "PUBLIC_BASE"
 $exeName = "Folio-$version-$build-windows-x64.exe"
 $exePath = Join-Path $artifacts $exeName
 if (-not (Test-Path -LiteralPath $exePath)) {
     throw "Missing installer $exePath"
 }
 
+$sha256 = (Get-FileHash -LiteralPath $exePath -Algorithm SHA256).Hash.ToLowerInvariant()
+$feedPath = Join-Path $artifacts "windows-appcast.json"
+$feed = @{
+    version = $version
+    build   = [int]$build
+    url     = "$publicBase/$exeName"
+    sha256  = $sha256
+} | ConvertTo-Json -Compress
+[System.IO.File]::WriteAllText($feedPath, $feed)
+
 Write-Host "Windows installer $exePath"
 
 if ($env:GITHUB_ENV) {
     $unixExe = $exePath.Replace('\', '/')
+    $unixFeed = $feedPath.Replace('\', '/')
     $lines = @(
         "VERSION=$version"
         "BUILD=$build"
@@ -91,6 +103,8 @@ if ($env:GITHUB_ENV) {
         "EXE_KEY=$exeName"
         "EXE_PATH=$unixExe"
         "LATEST_KEY=Folio-latest-windows.exe"
+        "FEED_KEY=windows-appcast.json"
+        "FEED_PATH=$unixFeed"
     )
     Add-Content -LiteralPath $env:GITHUB_ENV -Value $lines -Encoding utf8NoBOM
 }

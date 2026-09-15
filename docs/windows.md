@@ -59,9 +59,12 @@ Inno Setup installer, and uploads:
 ```text
 https://pub-307aebc4dfa4468d80e05e193c8f9c5b.r2.dev/Folio-<version>-<build>-windows-x64.exe
 https://pub-307aebc4dfa4468d80e05e193c8f9c5b.r2.dev/Folio-latest-windows.exe
+https://pub-307aebc4dfa4468d80e05e193c8f9c5b.r2.dev/windows-appcast.json
 ```
 
-No GitHub Release is created. Sparkle does not apply.
+No GitHub Release is created. Sparkle does not apply. Installed copies
+check `windows-appcast.json` on launch and from **Check for Updates…**,
+download the new installer, and run it silently.
 
 The workflow needs one repository secret:
 
@@ -82,6 +85,5 @@ published an artifact). Do not overwrite
 - Title bar / window-chrome pass on Windows 11 DPI
 - IME candidate window position
 - End-to-end of trash, Explorer, the terminal, and Run
-- An updater in place of Sparkle
 
 Until those land, the site keeps the Windows button disabled.
