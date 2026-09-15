@@ -7,8 +7,10 @@
 //! `icons/<name>.svg` paths, everything else falls through untouched.
 //!
 //! Keep these in Lucide, matching the rule in AGENTS.md. The vendored files are
-//! ISC licensed; see `assets/icons/LICENSE.txt`.
+//! ISC licensed; see `assets/icons/LICENSE.txt`. The one sanctioned exception
+//! is the file-type logos in `crate::file_icons`, which are served here too.
 
+use crate::file_icons::FILE_TYPE_ICONS;
 use gpui::{AssetSource, Result, SharedString};
 use gpui_component::IconNamed;
 use std::borrow::Cow;
@@ -71,9 +73,13 @@ const ICONS: &[(&str, &[u8])] = &[
 /// The application's asset source.
 pub struct Assets;
 
+fn vendored() -> impl Iterator<Item = &'static (&'static str, &'static [u8])> {
+    ICONS.iter().chain(FILE_TYPE_ICONS.iter())
+}
+
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
-        if let Some((_, bytes)) = ICONS.iter().find(|(name, _)| *name == path) {
+        if let Some((_, bytes)) = vendored().find(|(name, _)| *name == path) {
             return Ok(Some(Cow::Borrowed(bytes)));
         }
         gpui_component_assets::Assets.load(path)
@@ -82,8 +88,7 @@ impl AssetSource for Assets {
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
         let mut items = gpui_component_assets::Assets.list(path)?;
         items.extend(
-            ICONS
-                .iter()
+            vendored()
                 .filter(|(name, _)| name.starts_with(path))
                 .map(|(name, _)| SharedString::from(*name)),
         );
@@ -98,7 +103,7 @@ mod tests {
     #[test]
     fn vendored_icons_resolve_and_the_bundled_set_still_loads() {
         let assets = Assets;
-        for (path, _) in ICONS {
+        for (path, _) in vendored() {
             let loaded = assets.load(path).unwrap();
             assert!(loaded.is_some(), "`{path}` is declared but did not load");
         }
@@ -127,7 +132,7 @@ mod tests {
     /// the vendored bytes really rasterize.
     #[test]
     fn vendored_icons_are_renderable_svgs() {
-        for (path, bytes) in ICONS {
+        for (path, bytes) in vendored() {
             let rendered =
                 gpui::SvgRenderer::new(std::sync::Arc::new(())).render_single_frame(bytes, 1.);
             assert!(rendered.is_ok(), "`{path}` did not rasterize: {rendered:?}");

@@ -1,4 +1,5 @@
 use crate::assets::FolioIcon;
+use crate::file_icons;
 use crate::preview::{self, Content};
 use crate::syntax;
 use crate::terminal_view::{StopStep, TerminalBusy, TerminalView};
@@ -8566,15 +8567,23 @@ impl Folio {
                             .and_then(|w| path.strip_prefix(&w.root).ok())
                             .and_then(|p| this.project.git_status.get(p.to_string_lossy().as_ref()))
                             .copied();
+                        let muted = cx.theme().muted_foreground;
                         let icon = if row.entry.kind == EntryKind::Directory {
-                            if this.project.expanded.contains(&path) {
+                            Icon::new(if this.project.expanded.contains(&path) {
                                 IconName::FolderOpen
                             } else {
                                 IconName::Folder
-                            }
+                            })
+                            .text_color(muted)
                         } else {
-                            IconName::File
-                        };
+                            match file_icons::file_icon(&row.entry.name) {
+                                Some(kind) => Icon::new(kind).text_color(
+                                    kind.tint(cx.theme().is_dark()).unwrap_or(muted),
+                                ),
+                                None => Icon::new(IconName::File).text_color(muted),
+                            }
+                        }
+                        .small();
                         let focus = this
                             .tree_hover_row
                             .filter(|&ix| ix < this.project.rows.len())
@@ -8667,11 +8676,7 @@ impl Folio {
                                 }),
                             )
                             .children(guides)
-                            .child(
-                                Icon::new(icon)
-                                    .small()
-                                    .text_color(cx.theme().muted_foreground),
-                            )
+                            .child(icon)
                             .child(div().flex_1().min_w_0().truncate().child(row.entry.name))
                             .when_some(status, |el, status| {
                                 el.child(Icon::new(IconName::Asterisk).xsmall().text_color(

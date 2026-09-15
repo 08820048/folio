@@ -2,6 +2,7 @@
 
 mod app;
 mod assets;
+mod file_icons;
 mod preview;
 mod sparkle;
 mod syntax;
