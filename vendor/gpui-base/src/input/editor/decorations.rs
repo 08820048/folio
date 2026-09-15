@@ -1,6 +1,6 @@
-use std::ops::Range;
+use std::{ops::Range, rc::Rc};
 
-use gpui::{App, Context, HighlightStyle, WeakEntity};
+use gpui::{App, Context, HighlightStyle, WeakEntity, Window};
 use ropey::Rope;
 use sum_tree::Bias;
 
@@ -253,6 +253,30 @@ impl InputBaseState {
             self.bracket_pairs = pairs;
             cx.notify();
         }
+    }
+
+    /// Lines that show a run icon in the gutter, and what a click does.
+    pub fn set_runnables(
+        &mut self,
+        lines: Vec<usize>,
+        on_click: Option<Rc<dyn Fn(usize, &mut Window, &mut App)>>,
+        icon: Option<Rc<dyn Fn(&App) -> gpui::AnyElement>>,
+        cx: &mut Context<Self>,
+    ) {
+        let mut lines = lines;
+        lines.sort_unstable();
+        lines.dedup();
+        let changed = self.runnable_lines != lines;
+        self.runnable_lines = lines;
+        self.on_runnable = on_click;
+        self.runnable_icon = icon;
+        if changed {
+            cx.notify();
+        }
+    }
+
+    pub fn runnable_lines(&self) -> &[usize] {
+        &self.runnable_lines
     }
 }
 

@@ -47,7 +47,8 @@ pub fn pairs_bytes(bytes: &[u8]) -> Vec<Pair> {
             b'/' if bytes.get(i + 1) == Some(&b'/') => i = skip_line(bytes, i),
             b'/' if bytes.get(i + 1) == Some(&b'*') => i = skip_block(bytes, i),
             b'r' | b'b' | b'c' | b'f'
-                if !is_ident(prev) && let Some(end) = raw_string_start(bytes, i) =>
+                if !is_ident(prev)
+                    && let Some(end) = raw_string_start(bytes, i) =>
             {
                 i = skip_string(bytes, end.0, b'"', end.1);
             }
@@ -71,10 +72,7 @@ pub fn pairs_bytes(bytes: &[u8]) -> Vec<Pair> {
                         *depth -= 1;
                     }
                 }
-                if stack
-                    .last()
-                    .is_some_and(|(open, _, _)| mates(*open, close))
-                {
+                if stack.last().is_some_and(|(open, _, _)| mates(*open, close)) {
                     let (_, open, depth) = stack.pop().expect("checked");
                     out.push(Pair {
                         open,
@@ -122,10 +120,7 @@ pub fn around_offsets(pairs: &[(usize, usize)], offset: usize) -> Option<(usize,
 }
 
 fn mates(open: u8, close: u8) -> bool {
-    matches!(
-        (open, close),
-        (b'(', b')') | (b'[', b']') | (b'{', b'}')
-    )
+    matches!((open, close), (b'(', b')') | (b'[', b']') | (b'{', b'}'))
 }
 
 fn is_ident(b: u8) -> bool {
@@ -166,7 +161,9 @@ fn skip_string(bytes: &[u8], start: usize, quote: u8, hashes: usize) -> usize {
 }
 
 fn trailing_hashes(bytes: &[u8], start: usize, hashes: usize) -> bool {
-    bytes.get(start..start + hashes).is_some_and(|slice| slice.iter().all(|b| *b == b'#'))
+    bytes
+        .get(start..start + hashes)
+        .is_some_and(|slice| slice.iter().all(|b| *b == b'#'))
 }
 
 /// `'...'` on one line is a string; `'static` and `'a` are not.
@@ -326,8 +323,7 @@ mod tests {
         assert_eq!(around(&found, 6).map(|p| (p.open, p.close)), Some((0, 5)));
         assert_eq!(around(&found, 4).map(|p| (p.open, p.close)), Some((2, 4)));
         assert!(around(&pairs("abc"), 1).is_none());
-        let offsets: Vec<(usize, usize)> =
-            found.iter().map(|p| (p.open, p.close)).collect();
+        let offsets: Vec<(usize, usize)> = found.iter().map(|p| (p.open, p.close)).collect();
         assert_eq!(around_offsets(&offsets, 5), Some((0, 5)));
         assert_eq!(around_offsets(&offsets, 4), Some((2, 4)));
         assert_eq!(around_offsets(&offsets, 1), Some((0, 5)));

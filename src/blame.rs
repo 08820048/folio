@@ -71,11 +71,13 @@ pub fn run(path: &Path, text: &str) -> io::Result<Blame> {
     contents.flush()?;
 
     crate::git::check_lines(text)?;
-    let output = crate::git::output(crate::git::command(parent)?
-        .args(["blame", "--no-textconv", "--porcelain", "--contents"])
-        .arg(contents.path())
-        .arg("--")
-        .arg(name))?;
+    let output = crate::git::output(
+        crate::git::command(parent)?
+            .args(["blame", "--no-textconv", "--porcelain", "--contents"])
+            .arg(contents.path())
+            .arg("--")
+            .arg(name),
+    )?;
     if !output.status.success() {
         let message = String::from_utf8_lossy(&output.stderr).trim().to_string();
         return Err(io::Error::other(if message.is_empty() {
@@ -86,7 +88,13 @@ pub fn run(path: &Path, text: &str) -> io::Result<Blame> {
     }
     let text = String::from_utf8_lossy(&output.stdout);
     // Porcelain carries metadata as well as source lines; cap parsed records separately.
-    if text.lines().filter(|line| line.starts_with('\t')).take(crate::git::LINE_LIMIT + 1).count() > crate::git::LINE_LIMIT {
+    if text
+        .lines()
+        .filter(|line| line.starts_with('\t'))
+        .take(crate::git::LINE_LIMIT + 1)
+        .count()
+        > crate::git::LINE_LIMIT
+    {
         return Err(io::Error::other("Blame preview exceeds 100,000 lines"));
     }
     Ok(parse(&text))

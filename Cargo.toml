@@ -93,6 +93,7 @@ gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", 
 
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1", features = ["fs", "process"] }
+libc = "0.2"
 
 [[bin]]
 name = "folio"

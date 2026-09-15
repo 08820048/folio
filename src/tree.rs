@@ -104,8 +104,15 @@ mod perf_tests {
                 fs::write(folder.join(format!("f{j}.rs")), "fn x() {}\n").unwrap();
             }
         }
-        fs::write(root.join("big.rs"), format!("// {}\n", "a".repeat(1024 * 1024))).unwrap();
-        let ignored: Vec<String> = DEFAULT_IGNORED.iter().map(|name| (*name).to_string()).collect();
+        fs::write(
+            root.join("big.rs"),
+            format!("// {}\n", "a".repeat(1024 * 1024)),
+        )
+        .unwrap();
+        let ignored: Vec<String> = DEFAULT_IGNORED
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect();
         let started = Instant::now();
         let files = index(root, &ignored).unwrap();
         let index_ms = started.elapsed().as_secs_f64() * 1000.0;

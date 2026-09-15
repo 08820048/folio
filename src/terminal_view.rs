@@ -9,14 +9,20 @@
 //! events every few frames so output arrives while the user works
 //! elsewhere.
 
-use std::{cell::RefCell, ops::Range, path::Path, rc::Rc, time::Duration};
+use std::{
+    cell::RefCell,
+    ops::Range,
+    path::Path,
+    rc::Rc,
+    time::{Duration, Instant},
+};
 
 use folio::terminal::{self, Color, GridPoint, SelectionKind, Terminal, TerminalEvent};
 use folio::terminal_keys::{Key, Modifiers, encode};
 use folio::terminal_mouse::{self, Button};
 use gpui::{
-    App, Bounds, ClipboardItem, ContentMask, Context, Element, ElementId, Entity, FocusHandle,
-    Focusable, Font, FontStyle, FontWeight, GlobalElementId, Hsla, InputHandler,
+    App, Bounds, ClipboardItem, ContentMask, Context, Element, ElementId, Entity, EventEmitter,
+    FocusHandle, Focusable, Font, FontStyle, FontWeight, GlobalElementId, Hsla, InputHandler,
     InspectorElementId, IntoElement, KeyDownEvent, Keystroke, LayoutId, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Overflow, ParentElement, Pixels, Point, Render,
     ScrollWheelEvent, SharedString, Style, Styled, TextAlign, TextRun, UTF16Selection,
@@ -82,6 +88,26 @@ impl TermColors {
     }
 }
 
+/// The foreground job started or ended. Folio's Play control follows this
+/// so a running command is Stop, not another typed line.
+pub struct TerminalBusy;
+
+/// What one press of Stop did. Each press while the command is still up
+/// goes one step further.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StopStep {
+    /// Ctrl-C, which most programs take as "finish up and exit".
+    Interrupt,
+    /// SIGTERM to the job, for a program that trapped or never saw Ctrl-C.
+    Terminate,
+    /// SIGKILL.
+    Kill,
+}
+
+/// Two presses closer than this are one impatient press, not a request to
+/// escalate.
+const STOP_ESCALATE_AFTER: Duration = Duration::from_millis(600);
+
 /// One terminal, as the dock renders it. Dropping the view drops the child.
 pub struct TerminalView {
     terminal: Option<Terminal>,
@@ -107,6 +133,14 @@ pub struct TerminalView {
     hovered_link: bool,
     /// Text the IME has marked but not yet committed.
     marked_text: Option<String>,
+    /// A Folio run owns the tty until the command exits.
+    busy: bool,
+    /// A Run tab's child is the command itself, not a login shell.
+    is_run: bool,
+    /// How many times Stop has been pressed on the current command, and
+    /// when last; the next press escalates.
+    stop_presses: u8,
+    last_stop: Option<Instant>,
 }
 
 impl TerminalView {
@@ -117,9 +151,46 @@ impl TerminalView {
         rows: usize,
         cx: &mut Context<Self>,
     ) -> Self {
+        Self::from_spawn(
+            working_directory,
+            terminal::Shell::user_default(),
+            columns,
+            rows,
+            false,
+            cx,
+        )
+    }
+
+    /// Start a command as the pty child, like Zed's task terminal: when
+    /// the command exits, this tab is done, and no login prompt follows.
+    pub fn new_run(
+        working_directory: &Path,
+        command: &str,
+        columns: usize,
+        rows: usize,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::from_spawn(
+            working_directory,
+            Some(terminal::Shell::for_command(command)),
+            columns,
+            rows,
+            true,
+            cx,
+        )
+    }
+
+    fn from_spawn(
+        working_directory: &Path,
+        shell: Option<terminal::Shell>,
+        columns: usize,
+        rows: usize,
+        is_run: bool,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let spawn = Terminal::spawn(terminal::Spawn {
             working_directory: Some(working_directory),
-            shell: terminal::Shell::user_default(),
+            shell,
             columns,
             rows,
             scrollback: 10_000,
@@ -128,27 +199,15 @@ impl TerminalView {
             Ok(terminal) => (Some(terminal), None),
             Err(error) => (None, Some(error.to_string())),
         };
-        cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(30))
-                    .await;
-                let Ok(()) = this.update(cx, |view, cx| {
-                    if view.poll() {
-                        cx.notify();
-                    }
-                }) else {
-                    // The view is gone; so is the poll.
-                    return;
-                };
-            }
-        })
-        .detach();
+        // A tab whose child never started is already over: it must not
+        // sit on "Stop" waiting for an exit that cannot come.
+        let spawned = terminal.is_some();
+        Self::start_poll(cx);
         Self {
             terminal,
             error,
             title: None,
-            exited: false,
+            exited: !spawned,
             exit_code: None,
             focus: cx.focus_handle(),
             scroll_px: px(0.),
@@ -158,12 +217,84 @@ impl TerminalView {
             grid_bounds: Rc::new(RefCell::new(None)),
             marked_text: None,
             hovered_link: false,
+            busy: is_run && spawned,
+            is_run,
+            stop_presses: 0,
+            last_stop: None,
         }
+    }
+
+    fn start_poll(cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(30))
+                    .await;
+                let Ok(()) = this.update(cx, |view, cx| {
+                    if view.poll(cx) {
+                        cx.notify();
+                    }
+                }) else {
+                    return;
+                };
+            }
+        })
+        .detach();
+    }
+
+    /// Replace this tab's child with a fresh command. The previous grid
+    /// goes away with the old pty.
+    pub fn respawn_command(
+        &mut self,
+        working_directory: &Path,
+        command: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let (columns, rows) = self
+            .terminal
+            .as_ref()
+            .map(|terminal| terminal.size())
+            .unwrap_or((80, 24));
+        let spawn = Terminal::spawn(terminal::Spawn {
+            working_directory: Some(working_directory),
+            shell: Some(terminal::Shell::for_command(command)),
+            columns,
+            rows,
+            scrollback: 10_000,
+        });
+        // The old grid, and everything the mouse and the IME had going
+        // against it, is gone with the old pty.
+        self.title = None;
+        self.exit_code = None;
+        self.scroll_px = px(0.);
+        self.selecting = None;
+        self.selection_anchor = None;
+        self.hovered_link = false;
+        self.marked_text = None;
+        self.stop_presses = 0;
+        self.last_stop = None;
+        self.is_run = true;
+        match spawn {
+            Ok(terminal) => {
+                self.terminal = Some(terminal);
+                self.error = None;
+                self.exited = false;
+                self.busy = true;
+            }
+            Err(error) => {
+                self.terminal = None;
+                self.error = Some(error.to_string());
+                self.exited = true;
+                self.busy = false;
+            }
+        }
+        cx.emit(TerminalBusy);
+        cx.notify();
     }
 
     /// Drain the backend's events into view state; whether anything the
     /// user can see changed.
-    fn poll(&mut self) -> bool {
+    fn poll(&mut self, cx: &mut Context<Self>) -> bool {
         let Some(terminal) = self.terminal.as_mut() else {
             return false;
         };
@@ -185,6 +316,16 @@ impl TerminalView {
         if terminal.exit_code().is_some() && self.exit_code.is_none() {
             self.exit_code = terminal.exit_code();
             changed = true;
+        }
+        let busy = self.is_run && !self.exited;
+        if busy != self.busy {
+            self.busy = busy;
+            if !busy {
+                self.stop_presses = 0;
+                self.last_stop = None;
+            }
+            changed = true;
+            cx.emit(TerminalBusy);
         }
         changed
     }
@@ -224,6 +365,15 @@ impl TerminalView {
     /// The title the child set, or none.
     pub fn title(&self) -> Option<&str> {
         self.title.as_deref()
+    }
+
+    /// The grid as plain text, for tests that watch what the child printed.
+    #[cfg(all(test, feature = "desktop-tests"))]
+    pub fn snapshot_text(&self) -> String {
+        self.terminal
+            .as_ref()
+            .map(|terminal| terminal.snapshot().text())
+            .unwrap_or_default()
     }
 
     /// Whether the child is gone, and its exit code if it is known.
@@ -424,6 +574,44 @@ impl TerminalView {
         }
     }
 
+    /// Whether a foreground job owns the tty. Play follows this.
+    pub fn is_busy(&self) -> bool {
+        self.busy
+    }
+
+    /// This tab is a Run session, not the user's login shell.
+    pub fn is_run(&self) -> bool {
+        self.is_run
+    }
+
+    /// Stop the running command. The first press is Ctrl-C; a program that
+    /// ignores it — a TUI in raw mode, a trap — gets SIGTERM on the next
+    /// press and SIGKILL after that. The user decides when to stop, and
+    /// how hard.
+    pub fn stop(&mut self) -> StopStep {
+        let now = Instant::now();
+        let repeat = self
+            .last_stop
+            .is_some_and(|at| now.duration_since(at) < STOP_ESCALATE_AFTER);
+        if !repeat {
+            self.stop_presses = self.stop_presses.saturating_add(1);
+        }
+        self.last_stop = Some(now);
+        let step = match self.stop_presses {
+            0 | 1 => StopStep::Interrupt,
+            2 => StopStep::Terminate,
+            _ => StopStep::Kill,
+        };
+        if let Some(terminal) = self.terminal.as_ref() {
+            match step {
+                StopStep::Interrupt => terminal.interrupt(),
+                StopStep::Terminate => terminal.terminate(),
+                StopStep::Kill => terminal.kill(),
+            }
+        }
+        step
+    }
+
     /// Whether the IME is composing. An empty mark is not composing —
     /// leaving it set would keep macOS sending every later key, so
     /// nothing reaches the child and the caret has nowhere to sit.
@@ -462,6 +650,8 @@ impl Focusable for TerminalView {
         self.focus.clone()
     }
 }
+
+impl EventEmitter<TerminalBusy> for TerminalView {}
 
 /// A keystroke as terminal input. Keys the terminal has no byte for come
 /// back as `None` and keep their meaning further out.
@@ -945,12 +1135,13 @@ fn layout_cells(
                 font,
                 color: if on_cursor { colors.cursor_text } else { fg },
                 background_color: None,
-                underline: (cell.attrs.contains(terminal::Attrs::UNDERLINE) || linked)
-                    .then(|| UnderlineStyle {
+                underline: (cell.attrs.contains(terminal::Attrs::UNDERLINE) || linked).then(|| {
+                    UnderlineStyle {
                         color: Some(if on_cursor { colors.cursor_text } else { fg }),
                         thickness: px(1.),
                         wavy: false,
-                    }),
+                    }
+                }),
                 strikethrough: cell
                     .attrs
                     .contains(terminal::Attrs::STRIKETHROUGH)

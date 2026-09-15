@@ -351,6 +351,10 @@ pub struct InputBaseState {
     /// Matched `()` / `[]` / `{}` pairs as `(open, close)` UTF-8 offsets.
     /// The renderer finds the pair under the caret and draws it.
     pub(super) bracket_pairs: Vec<(usize, usize)>,
+    /// 0-based buffer lines that can be run from the gutter.
+    pub(super) runnable_lines: Vec<usize>,
+    pub(super) on_runnable: Option<Rc<dyn Fn(usize, &mut Window, &mut App)>>,
+    pub(super) runnable_icon: Option<Rc<dyn Fn(&App) -> gpui::AnyElement>>,
     pub(super) editor_style: InputEditorStyle,
     /// Face this view paints with. A parent `.font_family()` does not cross
     /// the entity boundary, so a code editor has to be told its own face.
@@ -643,6 +647,9 @@ impl InputBaseState {
             mask_pattern_set: false,
             decorations: DecorationCollections::default(),
             bracket_pairs: Vec::new(),
+            runnable_lines: Vec::new(),
+            on_runnable: None,
+            runnable_icon: None,
             editor_style: InputEditorStyle::default(),
             preferred_font: None,
             preferred_font_size: None,

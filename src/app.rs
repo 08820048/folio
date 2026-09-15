@@ -1,11 +1,11 @@
 use crate::assets::FolioIcon;
-use crate::syntax;
 use crate::preview::{self, Content};
-use crate::terminal_view::TerminalView;
+use crate::syntax;
+use crate::terminal_view::{StopStep, TerminalBusy, TerminalView};
 use folio::{
     blame, brackets, buffer, diff, editorconfig, fs_op, git,
     recent::{self, RecentProject},
-    search, session,
+    run, search, session,
     settings::{self, Settings},
     tree::{self, Entry, EntryKind},
     watch,
@@ -16,8 +16,8 @@ use gpui_component::{
     ActiveTheme, Disableable, Icon, IconName, Root, Sizable, Theme, TitleBar,
     button::{Button, ButtonVariants},
     input::{
-        self, EditorState, Input, InputBaseState, InputEvent, InputState, Position, Rope, TabSize,
-        TextDecoration, TextDecorationCollection,
+        self, EditorState, Input, InputBaseState, InputEvent, InputState, Position, Rope, RopeExt,
+        TabSize, TextDecoration, TextDecorationCollection,
     },
     select::{SearchableVec, Select, SelectEvent, SelectState},
     text::{TextView, TextViewStyle},
@@ -28,13 +28,13 @@ use std::{
     io,
     ops::Range,
     path::{Path, PathBuf},
+    rc::Rc,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-
 
 /// Process start, for `FOLIO_PERF=1` first-frame timing.
 static LAUNCH: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
@@ -154,6 +154,15 @@ const TREE_ROW_PAD: f32 = 12.;
 const PROJECT_HEADER_HEIGHT: f32 = 42.;
 /// Vertical padding on the file list (`.p_1()` is 4px each side).
 const TREE_LIST_PAD: f32 = 8.;
+
+fn run_stop_color(cx: &App) -> Hsla {
+    rgb(if cx.theme().is_dark() {
+        0xC98982
+    } else {
+        0xA35B52
+    })
+    .into()
+}
 
 /// The frame the rounded workspace sits on, so the white card reads as a
 /// surface rather than disappearing into the window.
@@ -360,10 +369,7 @@ mod tree_guide_tests {
         let three = expanded_project_max_height(3);
         assert_eq!(three - one, TREE_ROW_HEIGHT * 2.);
         assert!(one > PROJECT_HEADER_HEIGHT);
-        assert!(
-            three < 200.,
-            "a short tree must not fill a typical sidebar"
-        );
+        assert!(three < 200., "a short tree must not fill a typical sidebar");
     }
 }
 
@@ -472,6 +478,9 @@ actions!(
         CopyFilePath,
         CopyRelativeFilePath,
         CheckForUpdates,
+        Run,
+        Rerun,
+        StopRun,
         ToggleComment,
         ToggleBlockComment,
         DuplicateLines,
@@ -523,6 +532,10 @@ struct Document {
     large: bool,
     /// Markdown opens rendered. Source is the same editor.
     preview: bool,
+    /// The title-bar Play is shown when this file has a command. Deciding
+    /// that looks at the filesystem (`Cargo.toml`, `go.mod`), so it is
+    /// answered once per document, not per keystroke; `None` is "not yet".
+    can_run: Option<bool>,
     brackets: BracketPaint,
     _subscription: Subscription,
 }
@@ -1156,9 +1169,11 @@ impl Project {
     }
 
     fn showing(&self, path: &Path) -> bool {
-        self.panes
-            .iter()
-            .any(|pane| pane.active.as_ref().is_some_and(|active| active.as_path() == path))
+        self.panes.iter().any(|pane| {
+            pane.active
+                .as_ref()
+                .is_some_and(|active| active.as_path() == path)
+        })
     }
 
     /// Put this file on screen. If another column already has it, look there
@@ -1189,6 +1204,12 @@ enum DiskNotice {
 struct TerminalTabs {
     views: Vec<Entity<TerminalView>>,
     active: usize,
+    /// What `⇧⌘R` repeats. Kept whole, working directory included, so a
+    /// rerun does not depend on the file still being open.
+    last_run: Option<run::Command>,
+    /// Play in the title bar lives on Folio, so a busy flip has to notify
+    /// this window, not only the terminal view. One per view, in step.
+    _watches: Vec<Subscription>,
 }
 
 /// One floating status card. Drawn in Folio's own chrome — the same surface
@@ -1297,6 +1318,7 @@ pub struct Folio {
     terminal_open: bool,
     terminal_height: f32,
     resizing_terminal: bool,
+    run_after_save: Option<Option<usize>>,
     generation: u64,
     open_request: u64,
     query: Entity<InputState>,
@@ -1427,7 +1449,10 @@ impl Writes {
             }
         }
         if let Some(unsaved) = &self.unsaved {
-            let text = unsaved.iter().map(|(path, text)| (path.clone(), text.to_string())).collect();
+            let text = unsaved
+                .iter()
+                .map(|(path, text)| (path.clone(), text.to_string()))
+                .collect();
             if let Err(error) = session::save_unsaved(&self.unsaved_file, &text) {
                 errors.push(format!("Recovery: {error}"));
                 self.unsaved = None;
@@ -1614,6 +1639,7 @@ impl Folio {
             terminal_open: false,
             terminal_height: 260.,
             resizing_terminal: false,
+            run_after_save: None,
             generation: 0,
             open_request: 0,
             query,
@@ -1889,12 +1915,7 @@ impl Folio {
         self.split_in(SplitDirection::Right, window, cx);
     }
 
-    fn split_in(
-        &mut self,
-        direction: SplitDirection,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn split_in(&mut self, direction: SplitDirection, window: &mut Window, cx: &mut Context<Self>) {
         if self.project.workspace.is_none() {
             return;
         }
@@ -2157,12 +2178,7 @@ impl Folio {
         }
     }
 
-    fn set_markdown_preview(
-        &mut self,
-        preview: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn set_markdown_preview(&mut self, preview: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(path) = self.project.active().cloned() else {
             return;
         };
@@ -2182,7 +2198,11 @@ impl Folio {
         let Some(path) = self.project.active().cloned() else {
             return;
         };
-        let Some(preview) = self.project.documents.get(&path).map(|document| document.preview)
+        let Some(preview) = self
+            .project
+            .documents
+            .get(&path)
+            .map(|document| document.preview)
         else {
             return;
         };
@@ -2251,17 +2271,15 @@ impl Folio {
 
     /// Make an empty folder and open it. Fails rather than reuse a name that
     /// is already on disk — that is Open, not New.
-    fn create_empty_project(
-        &mut self,
-        path: PathBuf,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn create_empty_project(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         let Some(parent) = path.parent().map(Path::to_path_buf) else {
             self.error("Choose a folder to put the project in", cx);
             return;
         };
-        let Some(name) = path.file_name().map(|name| name.to_string_lossy().into_owned()) else {
+        let Some(name) = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+        else {
             self.error("Name cannot be empty", cx);
             return;
         };
@@ -2491,7 +2509,10 @@ impl Folio {
             return;
         };
         if let Some(project) = self.project_mut(project_id) {
-            if project.indexing { project.index_again = true; return; }
+            if project.indexing {
+                project.index_again = true;
+                return;
+            }
             project.indexing = true;
         }
         let ignored = self.settings.ignored.clone();
@@ -2547,7 +2568,10 @@ impl Folio {
             return;
         };
         if let Some(project) = self.project_mut(project_id) {
-            if project.git_running { project.git_again = true; return; }
+            if project.git_running {
+                project.git_again = true;
+                return;
+            }
             project.git_running = true;
         }
         let task = cx
@@ -2949,7 +2973,11 @@ impl Folio {
             .retain(|key, _| !key.starts_with(path));
         for pane in &mut self.project.panes {
             pane.tabs.retain(|tab| !tab.starts_with(path));
-            if pane.active.as_ref().is_some_and(|key| key.starts_with(path)) {
+            if pane
+                .active
+                .as_ref()
+                .is_some_and(|key| key.starts_with(path))
+            {
                 pane.active = None;
             }
         }
@@ -3000,7 +3028,10 @@ impl Folio {
     fn settle_documents(&mut self) {
         let mut orphans = Vec::new();
         for project in std::iter::once(&mut self.project).chain(self.parked.iter_mut()) {
-            let Some(root) = project.workspace.as_ref().map(|workspace| workspace.root.clone())
+            let Some(root) = project
+                .workspace
+                .as_ref()
+                .map(|workspace| workspace.root.clone())
             else {
                 continue;
             };
@@ -3022,7 +3053,9 @@ impl Folio {
                 }
             }
         }
-        for (path, document) in orphans {
+        for (path, mut document) in orphans {
+            // A new root can mean a different Cargo.toml above the file.
+            document.can_run = None;
             let home = std::iter::once(&mut self.project)
                 .chain(self.parked.iter_mut())
                 .find(|project| {
@@ -3069,8 +3102,11 @@ impl Folio {
     }
 
     fn move_entry(
-        &mut self, source: PathBuf, into: PathBuf,
-        window: &mut Window, cx: &mut Context<Self>,
+        &mut self,
+        source: PathBuf,
+        into: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
     ) {
         let from_parent = source.parent().map(Path::to_path_buf);
         let dest_dir = into.clone();
@@ -3083,7 +3119,11 @@ impl Folio {
             let _ = this.update_in(cx, |this, window, cx| {
                 match result {
                     Ok(dest) => {
-                        if this.clipboard.as_ref().is_some_and(|entry| entry.cut && entry.path == source) {
+                        if this
+                            .clipboard
+                            .as_ref()
+                            .is_some_and(|entry| entry.cut && entry.path == source)
+                        {
                             this.clipboard = None;
                         }
                         this.quiet_write(&dest);
@@ -3109,9 +3149,10 @@ impl Folio {
             .chain(self.parked.iter())
             .any(|project| {
                 project.directories.contains_key(path)
-                    || project.rows.iter().any(|row| {
-                        row.entry.path == path && row.entry.kind == EntryKind::Directory
-                    })
+                    || project
+                        .rows
+                        .iter()
+                        .any(|row| row.entry.path == path && row.entry.kind == EntryKind::Directory)
                     || project
                         .workspace
                         .as_ref()
@@ -3263,13 +3304,7 @@ impl Folio {
     /// not be relied on.
     ///
     /// Pinned tabs stay at the front of whichever pane they land in.
-    fn move_tab_to(
-        &mut self,
-        dragged: &Path,
-        to_pane: usize,
-        to: usize,
-        cx: &mut Context<Self>,
-    ) {
+    fn move_tab_to(&mut self, dragged: &Path, to_pane: usize, to: usize, cx: &mut Context<Self>) {
         self.tab_drop = None;
         if to_pane >= self.project.panes.len() {
             return;
@@ -3567,8 +3602,13 @@ impl Folio {
                     self.move_entry(clipboard.path, path, window, cx);
                 } else {
                     let into = path.clone();
-                    self.spawn_change(path, false,
-                        move || fs_op::paste(&clipboard.path, &into, false), window, cx);
+                    self.spawn_change(
+                        path,
+                        false,
+                        move || fs_op::paste(&clipboard.path, &into, false),
+                        window,
+                        cx,
+                    );
                 }
             }
             // Trashing is recoverable, so it only stops to warn about edits
@@ -3748,6 +3788,7 @@ impl Folio {
                         doc.dirty = editor.read(cx).is_modified(&doc.saved);
                     }
                     this.refresh_brackets(editor, cx);
+                    this.refresh_runnables(editor, cx);
                     this.update_title(window);
                     cx.notify();
                 }
@@ -3755,10 +3796,7 @@ impl Folio {
         )
     }
 
-    fn attach_brackets(
-        editor: &Entity<EditorState>,
-        cx: &mut Context<Self>,
-    ) -> BracketPaint {
+    fn attach_brackets(editor: &Entity<EditorState>, cx: &mut Context<Self>) -> BracketPaint {
         let rainbow = editor.update(cx, |state, cx| {
             state.create_decorations_collection(Vec::new(), cx)
         });
@@ -3802,6 +3840,290 @@ impl Folio {
             doc.brackets.rainbow.set(rainbow, cx);
         }
         editor.update(cx, |state, cx| state.set_bracket_pairs(offsets, cx));
+    }
+
+    fn can_run_active(&self, _: &App) -> bool {
+        self.project
+            .active()
+            .and_then(|path| self.project.documents.get(path))
+            .is_some_and(|doc| doc.can_run == Some(true))
+    }
+
+    fn set_document_can_run(&mut self, editor: &Entity<EditorState>, can_run: bool) {
+        if let Some(doc) = std::iter::once(&mut self.project)
+            .chain(self.parked.iter_mut())
+            .flat_map(|project| project.documents.values_mut())
+            .find(|doc| &doc.editor == editor)
+        {
+            doc.can_run = Some(can_run);
+        }
+    }
+
+    fn refresh_runnables(&mut self, editor: &Entity<EditorState>, cx: &mut Context<Self>) {
+        let Some((path, large, cached, root)) = std::iter::once(&self.project)
+            .chain(self.parked.iter())
+            .flat_map(|project| {
+                let root = project.workspace.as_ref().map(|w| w.root.clone());
+                project
+                    .documents
+                    .iter()
+                    .filter(|(_, doc)| &doc.editor == editor)
+                    .map(move |(path, doc)| (path.clone(), doc.large, doc.can_run, root.clone()))
+            })
+            .next()
+        else {
+            return;
+        };
+        if large || root.is_none() {
+            self.set_document_can_run(editor, false);
+            editor.update(cx, |state, cx| {
+                state.set_runnables(Vec::new(), None, None, cx)
+            });
+            return;
+        }
+        let root = root.unwrap();
+        let can_run = cached.unwrap_or_else(|| run::can_run(&root, &path));
+        if cached.is_none() {
+            self.set_document_can_run(editor, can_run);
+        }
+        if !can_run {
+            editor.update(cx, |state, cx| {
+                state.set_runnables(Vec::new(), None, None, cx)
+            });
+            return;
+        }
+        let text = editor.read(cx).snapshot().to_string();
+        let mut lines: Vec<usize> = run::find(&path, &text)
+            .iter()
+            .map(|runnable| runnable.line)
+            .collect();
+        lines.sort_unstable();
+        lines.dedup();
+        let folio = cx.entity().downgrade();
+        let on_click = Rc::new({
+            let folio = folio.clone();
+            move |line: usize, window: &mut Window, cx: &mut App| {
+                let _ = folio.update(cx, |this, cx| this.run_or_stop(Some(line), window, cx));
+            }
+        });
+        let icon = Rc::new(move |cx: &App| {
+            let busy = folio
+                .upgrade()
+                .is_some_and(|this| this.read(cx).run_is_busy(cx));
+            if busy {
+                Icon::new(IconName::Pause)
+                    .xsmall()
+                    .text_color(run_stop_color(cx))
+                    .into_any_element()
+            } else {
+                Icon::new(IconName::Play)
+                    .xsmall()
+                    .text_color(cx.theme().success)
+                    .into_any_element()
+            }
+        });
+        editor.update(cx, |state, cx| {
+            state.set_runnables(lines, Some(on_click), Some(icon), cx)
+        });
+    }
+
+    fn caret_line(&self, cx: &App) -> Option<usize> {
+        let path = self.project.active()?;
+        let doc = self.project.documents.get(path)?;
+        let offset = doc
+            .editor
+            .read(cx)
+            .base_state()
+            .read(cx)
+            .selected_ranges()
+            .last()?
+            .end;
+        Some(doc.editor.read(cx).snapshot().offset_to_point(offset).row)
+    }
+
+    fn run_is_busy(&self, cx: &App) -> bool {
+        self.run_terminal(cx)
+            .is_some_and(|view| view.read(cx).is_busy())
+    }
+
+    fn run_terminal_index(&self, cx: &App) -> Option<usize> {
+        let root = self.project.workspace.as_ref()?.root.clone();
+        self.terminals
+            .get(&root)?
+            .views
+            .iter()
+            .position(|view| view.read(cx).is_run())
+    }
+
+    fn run_terminal(&self, cx: &App) -> Option<&Entity<TerminalView>> {
+        let index = self.run_terminal_index(cx)?;
+        let root = self.project.workspace.as_ref()?.root.clone();
+        self.terminals.get(&root)?.views.get(index)
+    }
+
+    fn run_or_stop(&mut self, line: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
+        if self.run_is_busy(cx) {
+            self.stop_run(window, cx);
+            return;
+        }
+        self.run_code(line, window, cx);
+    }
+
+    /// Stop the Run tab's command, escalating with each press. Nothing to
+    /// stop leaves the drawer as it was.
+    fn stop_run(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(index) = self.run_terminal_index(cx) else {
+            return;
+        };
+        let Some(view) = self.run_terminal(cx).cloned() else {
+            return;
+        };
+        if !view.read(cx).is_busy() {
+            return;
+        }
+        self.terminal_open = true;
+        if let Some(tabs) = self
+            .project
+            .workspace
+            .as_ref()
+            .map(|w| w.root.clone())
+            .and_then(|root| self.terminals.get_mut(&root))
+        {
+            tabs.active = index;
+        }
+        let step = view.update(cx, |view, cx| {
+            view.focus_handle().focus(window, cx);
+            view.stop()
+        });
+        match step {
+            StopStep::Interrupt => {}
+            StopStep::Terminate => self.warn("Still running — sent SIGTERM", cx),
+            StopStep::Kill => self.warn("Still running — sent SIGKILL", cx),
+        }
+        cx.notify();
+    }
+
+    fn focus_run_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.terminal_open = true;
+        if let Some(index) = self.run_terminal_index(cx)
+            && let Some(tabs) = self
+                .project
+                .workspace
+                .as_ref()
+                .map(|w| w.root.clone())
+                .and_then(|root| self.terminals.get_mut(&root))
+        {
+            tabs.active = index;
+        }
+        if let Some(view) = self.run_terminal(cx).cloned() {
+            view.update(cx, |view, cx| view.focus_handle().focus(window, cx));
+        }
+        cx.notify();
+    }
+
+    fn run_code(&mut self, line: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
+        let line = line.or_else(|| self.caret_line(cx));
+        let Some(path) = self.project.active().cloned() else {
+            self.warn("Open a file to run", cx);
+            return;
+        };
+        if self
+            .project
+            .documents
+            .get(&path)
+            .is_some_and(|doc| doc.dirty)
+        {
+            self.run_after_save = Some(line);
+            self.save_documents(None, window, cx);
+            return;
+        }
+        self.start_run(line, window, cx);
+    }
+
+    fn rerun(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.run_is_busy(cx) {
+            self.focus_run_terminal(window, cx);
+            self.warn("Already running — stop it first", cx);
+            return;
+        }
+        let last = self
+            .project
+            .workspace
+            .as_ref()
+            .and_then(|workspace| self.terminals.get(&workspace.root))
+            .and_then(|tabs| tabs.last_run.clone());
+        if let Some(command) = last {
+            self.start_run_command(command, window, cx);
+        } else {
+            self.run_code(None, window, cx);
+        }
+    }
+
+    fn start_run(&mut self, line: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(root) = self.project.workspace.as_ref().map(|w| w.root.clone()) else {
+            return;
+        };
+        let Some(path) = self.project.active().cloned() else {
+            self.warn("Open a file to run", cx);
+            return;
+        };
+        let Some(doc) = self.project.documents.get(&path) else {
+            return;
+        };
+        let text = doc.editor.read(cx).snapshot().to_string();
+        let Some(command) = run::resolve(&root, &path, &text, line) else {
+            self.warn("Nothing to run in this file", cx);
+            return;
+        };
+        self.start_run_command(command, window, cx);
+    }
+
+    /// Start `command` in the project's Run tab, making one if there is
+    /// none. A tab whose command is still running is left alone.
+    fn start_run_command(
+        &mut self,
+        command: run::Command,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(root) = self.project.workspace.as_ref().map(|w| w.root.clone()) else {
+            return;
+        };
+        self.terminal_open = true;
+        if self.run_is_busy(cx) {
+            self.focus_run_terminal(window, cx);
+            self.warn("Already running — stop it first", cx);
+            return;
+        }
+        if let Some(index) = self.run_terminal_index(cx) {
+            let Some(view) = self.run_terminal(cx).cloned() else {
+                return;
+            };
+            view.update(cx, |view, cx| {
+                view.respawn_command(&command.cwd, &command.shell, cx);
+                view.focus_handle().focus(window, cx);
+            });
+            if let Some(tabs) = self.terminals.get_mut(&root) {
+                tabs.last_run = Some(command);
+                tabs.active = index;
+            }
+            cx.notify();
+            return;
+        }
+        let view = cx.new(|cx| TerminalView::new_run(&command.cwd, &command.shell, 80, 24, cx));
+        let watch = Self::watch_terminal(&view, cx);
+        view.update(cx, |view, cx| view.focus_handle().focus(window, cx));
+        let tabs = self.terminals.entry(root).or_insert(TerminalTabs {
+            views: vec![],
+            active: 0,
+            last_run: None,
+            _watches: vec![],
+        });
+        tabs.last_run = Some(command);
+        tabs.views.push(view);
+        tabs._watches.push(watch);
+        tabs.active = tabs.views.len() - 1;
+        cx.notify();
     }
 
     fn refresh_all_brackets(&mut self, cx: &mut Context<Self>) {
@@ -3991,12 +4313,7 @@ impl Folio {
                 .base_state()
                 .read(cx)
                 .is_composing()
-            || self
-                .clone_url
-                .read(cx)
-                .base_state()
-                .read(cx)
-                .is_composing()
+            || self.clone_url.read(cx).base_state().read(cx).is_composing()
     }
 
     fn editor_is_editable(&self, cx: &App) -> bool {
@@ -4431,9 +4748,10 @@ impl Folio {
     /// again whenever the file it is showing changes, so it follows a review
     /// rather than having to be reopened per file.
     fn load_diff(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (Some(path), Some(workspace)) =
-            (self.project.active().cloned(), self.project.workspace.clone())
-        else {
+        let (Some(path), Some(workspace)) = (
+            self.project.active().cloned(),
+            self.project.workspace.clone(),
+        ) else {
             self.project.diff = None;
             cx.notify();
             return;
@@ -4451,7 +4769,9 @@ impl Folio {
         });
         cx.notify();
         let task = cx.background_executor().spawn(async move {
-            let branch = find_branch.then(|| git::review_branch(&workspace.root)).flatten();
+            let branch = find_branch
+                .then(|| git::review_branch(&workspace.root))
+                .flatten();
             let base = branch.as_deref().unwrap_or(&base);
             let diff = diff::for_file_against(&workspace.root, &path, base)?;
             let new_text = buffer::read(&path).ok().map(Arc::<str>::from);
@@ -4483,7 +4803,9 @@ impl Folio {
                         view.error = None;
                         view.hunk = 0;
                         if this.project.id == project_id {
-                            if let Some(branch) = branch { this.diff_branch = Some(branch); }
+                            if let Some(branch) = branch {
+                                this.diff_branch = Some(branch);
+                            }
                         }
                     }
                     Err(error) => view.error = Some(error.to_string()),
@@ -4499,7 +4821,9 @@ impl Folio {
     fn recolor_diff(&mut self, cx: &mut Context<Self>) {
         let theme = cx.theme().highlight_theme.clone();
         for project in std::iter::once(&mut self.project).chain(self.parked.iter_mut()) {
-            let Some(view) = project.diff.as_mut().filter(|view| !view.loading) else { continue; };
+            let Some(view) = project.diff.as_mut().filter(|view| !view.loading) else {
+                continue;
+            };
             let project_id = project.id;
             let request = view.request;
             view.color_request += 1;
@@ -4509,20 +4833,34 @@ impl Folio {
             let new = view.new_text.clone();
             let theme = theme.clone();
             let task = cx.background_executor().spawn(async move {
-                let old = old.as_deref().map(|text| syntax::line_styles(&path, text, &theme)).unwrap_or_default();
-                let new = new.as_deref().map(|text| syntax::line_styles(&path, text, &theme)).unwrap_or_default();
+                let old = old
+                    .as_deref()
+                    .map(|text| syntax::line_styles(&path, text, &theme))
+                    .unwrap_or_default();
+                let new = new
+                    .as_deref()
+                    .map(|text| syntax::line_styles(&path, text, &theme))
+                    .unwrap_or_default();
                 (old, new)
             });
             cx.spawn(async move |this, cx| {
                 let (old, new) = task.await;
                 let _ = this.update(cx, |this, cx| {
-                    let Some(view) = this.project_mut(project_id).and_then(|project| project.diff.as_mut()) else { return; };
-                    if view.request != request || view.color_request != color_request { return; }
+                    let Some(view) = this
+                        .project_mut(project_id)
+                        .and_then(|project| project.diff.as_mut())
+                    else {
+                        return;
+                    };
+                    if view.request != request || view.color_request != color_request {
+                        return;
+                    }
                     view.old_styles = old;
                     view.new_styles = new;
                     cx.notify();
                 });
-            }).detach();
+            })
+            .detach();
         }
     }
 
@@ -4538,13 +4876,7 @@ impl Folio {
     }
 
     /// Open the tab one step left or right of the one this pane is showing.
-    fn step_tab(
-        &mut self,
-        pane: usize,
-        delta: isize,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn step_tab(&mut self, pane: usize, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(path) = self.tab_step_target(pane, delta) else {
             return;
         };
@@ -4553,12 +4885,7 @@ impl Folio {
     }
 
     /// The two arrows on the left of a tab strip: previous / next, no wrap.
-    fn render_tab_step(
-        &self,
-        pane: usize,
-        delta: isize,
-        cx: &Context<Self>,
-    ) -> AnyElement {
+    fn render_tab_step(&self, pane: usize, delta: isize, cx: &Context<Self>) -> AnyElement {
         let (icon, label) = if delta < 0 {
             (IconName::ChevronLeft, "Previous Tab")
         } else {
@@ -4636,8 +4963,8 @@ impl Folio {
                     .flat_map(|(index, path)| {
                         // A caret sits where the dragged tab would land, so the
                         // drop is not a guess.
-                        let caret = (self.tab_drop == Some((pane, index)))
-                            .then(|| Self::tab_caret(cx));
+                        let caret =
+                            (self.tab_drop == Some((pane, index))).then(|| Self::tab_caret(cx));
                         caret
                             .into_iter()
                             .chain(std::iter::once(self.render_tab(pane, index, path, cx)))
@@ -4690,12 +5017,7 @@ impl Folio {
                 MouseButton::Left,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                     this.project.focused = pane;
-                    this.open_menu(
-                        MenuTarget::Split { pane },
-                        event.position,
-                        window,
-                        cx,
-                    );
+                    this.open_menu(MenuTarget::Split { pane }, event.position, window, cx);
                     cx.stop_propagation();
                 }),
             )
@@ -5393,7 +5715,12 @@ impl Folio {
         let wrap = self.settings.soft_wrap;
         let editors: Vec<_> = std::iter::once(&self.project)
             .chain(self.parked.iter())
-            .flat_map(|project| project.documents.values().map(|document| document.editor.clone()))
+            .flat_map(|project| {
+                project
+                    .documents
+                    .values()
+                    .map(|document| document.editor.clone())
+            })
             .collect();
         for editor in editors {
             editor.update(cx, |state, cx| {
@@ -5581,8 +5908,7 @@ impl Folio {
                                 base.set_font(typeface, size);
                             });
                         });
-                        let subscription =
-                            Self::subscribe_document(&editor, window, cx);
+                        let subscription = Self::subscribe_document(&editor, window, cx);
                         let brackets = Self::attach_brackets(&editor, cx);
                         let jumping = this
                             .goto
@@ -5597,11 +5923,13 @@ impl Folio {
                                 dirty: false,
                                 large,
                                 preview,
+                                can_run: None,
                                 brackets,
                                 _subscription: subscription,
                             },
                         );
                         this.refresh_brackets(&editor, cx);
+                        this.refresh_runnables(&editor, cx);
                         this.apply_goto(&path, window, cx);
                         this.focus_open_file(&path, &editor, window, cx);
                         this.project.show_path(path.clone());
@@ -5656,6 +5984,7 @@ impl Folio {
             document.dirty = true;
         }
         self.refresh_brackets(&editor, cx);
+        self.refresh_runnables(&editor, cx);
         self.recovered += 1;
         true
     }
@@ -5766,13 +6095,16 @@ impl Folio {
                 }
                 this.update_title(window);
                 if errors.is_empty() {
-                    if let Some(next) = next {
+                    if let Some(line) = this.run_after_save.take() {
+                        this.start_run(line, window, cx);
+                    } else if let Some(next) = next {
                         this.request(next, window, cx);
                     } else {
                         this.toast("Saved", cx);
                         this.refresh_git(cx);
                     }
                 } else {
+                    this.run_after_save = None;
                     this.error(errors.join("\n"), cx);
                 }
                 cx.notify();
@@ -5993,7 +6325,9 @@ impl Folio {
                 // retried on the next tick rather than assumed done.
                 let _ = this.update(cx, |this, cx| {
                     if error != this.recovery_error {
-                        if let Some(error) = &error { this.error(error.clone(), cx); }
+                        if let Some(error) = &error {
+                            this.error(error.clone(), cx);
+                        }
                         this.recovery_error = error;
                     }
                     if let Some(session) = written.session {
@@ -6009,7 +6343,8 @@ impl Folio {
     }
 
     fn sync_disk_watch(&mut self) {
-        self.disk_watch.sync(&self.project_order, &self.settings.ignored);
+        self.disk_watch
+            .sync(&self.project_order, &self.settings.ignored);
     }
 
     /// Drain kernel events and apply them to the tree, git dots, and open
@@ -6052,14 +6387,27 @@ impl Folio {
         let ignored = self.settings.ignored.clone();
         let mut work = Vec::new();
         for project in std::iter::once(&self.project).chain(self.parked.iter()) {
-            let Some(workspace) = &project.workspace else { continue; };
-            let relevant: Vec<_> = paths.iter().filter(|(path, _)| path.starts_with(&workspace.root)).collect();
-            if relevant.is_empty() { continue; }
+            let Some(workspace) = &project.workspace else {
+                continue;
+            };
+            let relevant: Vec<_> = paths
+                .iter()
+                .filter(|(path, _)| path.starts_with(&workspace.root))
+                .collect();
+            if relevant.is_empty() {
+                continue;
+            }
             let full = paths.get(&workspace.root) == Some(&true);
             let cached = project.directories.keys().cloned().collect::<HashSet<_>>();
             let open = project.documents.keys().cloned().collect::<HashSet<_>>();
-            let mut batch = watch::batch(relevant.iter().map(|(path, _)| (*path).clone()),
-                &[], &self.quiet_writes, now, &cached, &open);
+            let mut batch = watch::batch(
+                relevant.iter().map(|(path, _)| (*path).clone()),
+                &[],
+                &self.quiet_writes,
+                now,
+                &cached,
+                &open,
+            );
             let structure = relevant.iter().any(|(path, changed)| {
                 **changed
                     && !watch::is_quiet(path, &self.quiet_writes, now)
@@ -6068,7 +6416,9 @@ impl Folio {
                         .strip_prefix(&workspace.root)
                         .is_ok_and(|relative| !watch::under_ignored(relative, &ignored))
             });
-            if !structure { batch.directories.clear(); }
+            if !structure {
+                batch.directories.clear();
+            }
             if full {
                 batch.directories = cached.into_iter().collect();
                 batch.files = open.into_iter().collect();
@@ -6078,12 +6428,21 @@ impl Folio {
         }
         let mut files = HashSet::new();
         for (project_id, batch, structure) in work {
-            for dir in batch.directories { self.reload_directory(dir, cx); }
-            if structure { self.reindex_project(project_id, cx); }
-            if batch.git { self.refresh_git_project(project_id, cx); }
+            for dir in batch.directories {
+                self.reload_directory(dir, cx);
+            }
+            if structure {
+                self.reindex_project(project_id, cx);
+            }
+            if batch.git {
+                self.refresh_git_project(project_id, cx);
+            }
             files.extend(batch.files);
         }
-        if files.is_empty() { cx.notify(); return; }
+        if files.is_empty() {
+            cx.notify();
+            return;
+        }
         let task = cx.background_executor().spawn(async move {
             files
                 .into_iter()
@@ -6185,6 +6544,7 @@ impl Folio {
         }
         editor.update(cx, |editor, cx| editor.set_value(text, window, cx));
         self.refresh_brackets(&editor, cx);
+        self.refresh_runnables(&editor, cx);
         if let Some(project) = self.project_mut(project_id) {
             if let Some(document) = project.documents.get_mut(path) {
                 document.dirty = document.editor.read(cx).is_modified(&document.saved);
@@ -6384,12 +6744,26 @@ impl Folio {
         let Some(root) = self.project.workspace.as_ref().map(|w| w.root.clone()) else {
             return;
         };
-        self.terminals
-            .entry(root.clone())
-            .or_insert_with(|| TerminalTabs {
-                views: vec![cx.new(|cx| TerminalView::new(&root, 80, 24, cx))],
+        if self.terminals.contains_key(&root) {
+            return;
+        }
+        let view = cx.new(|cx| TerminalView::new(&root, 80, 24, cx));
+        let watch = Self::watch_terminal(&view, cx);
+        self.terminals.insert(
+            root,
+            TerminalTabs {
+                views: vec![view],
                 active: 0,
-            });
+                last_run: None,
+                _watches: vec![watch],
+            },
+        );
+    }
+
+    fn watch_terminal(view: &Entity<TerminalView>, cx: &mut Context<Self>) -> Subscription {
+        cx.subscribe(view, |_, _, _: &TerminalBusy, cx| {
+            cx.notify();
+        })
     }
 
     /// A fresh terminal tab, focused and showing.
@@ -6400,11 +6774,15 @@ impl Folio {
         self.terminal_open = true;
         let view = cx.new(|cx| TerminalView::new(&root, 80, 24, cx));
         view.update(cx, |view, cx| view.focus_handle().focus(window, cx));
+        let watch = Self::watch_terminal(&view, cx);
         let tabs = self.terminals.entry(root).or_insert(TerminalTabs {
             views: vec![],
             active: 0,
+            last_run: None,
+            _watches: vec![],
         });
         tabs.views.push(view);
+        tabs._watches.push(watch);
         tabs.active = tabs.views.len() - 1;
         cx.notify();
     }
@@ -6429,6 +6807,9 @@ impl Folio {
                 return;
             }
             tabs.views.remove(index);
+            if index < tabs._watches.len() {
+                drop(tabs._watches.remove(index));
+            }
             if tabs.views.is_empty() {
                 true
             } else {
@@ -6590,7 +6971,12 @@ impl Folio {
         cx.notify();
     }
 
-    fn set_diff_against(&mut self, against: DiffAgainst, window: &mut Window, cx: &mut Context<Self>) {
+    fn set_diff_against(
+        &mut self,
+        against: DiffAgainst,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.diff_against = against;
         if against == DiffAgainst::Branch {
             self.diff_branch = None;
@@ -6650,11 +7036,14 @@ impl Folio {
             .iter()
             .map(|view| {
                 let view = view.read(cx);
-                match (view.title().map(str::to_string), view.exit()) {
-                    (Some(title), _) => title,
-                    (None, Some(Some(code))) => format!("Terminal · exited ({code})"),
-                    (None, Some(None)) => "Terminal · exited".to_string(),
-                    (None, None) => "Terminal".to_string(),
+                match (view.title().map(str::to_string), view.is_run(), view.exit()) {
+                    (Some(title), _, _) => title,
+                    (None, true, Some(Some(code))) => format!("Run · exited ({code})"),
+                    (None, true, Some(None)) => "Run · exited".to_string(),
+                    (None, true, None) => "Run".to_string(),
+                    (None, false, Some(Some(code))) => format!("Terminal · exited ({code})"),
+                    (None, false, Some(None)) => "Terminal · exited".to_string(),
+                    (None, false, None) => "Terminal".to_string(),
                 }
             })
             .collect();
@@ -7247,15 +7636,19 @@ impl Folio {
             .w(px(NOTICE_WIDTH))
             .child(card)
             .with_animation(
-                ("notice-slide", self.notice_id.saturating_mul(2) + u64::from(leaving)),
-                Animation::new(if leaving { NOTICE_LEAVE } else { NOTICE_ENTER })
-                    .with_easing(move |t| {
+                (
+                    "notice-slide",
+                    self.notice_id.saturating_mul(2) + u64::from(leaving),
+                ),
+                Animation::new(if leaving { NOTICE_LEAVE } else { NOTICE_ENTER }).with_easing(
+                    move |t| {
                         if leaving {
                             t * t * t
                         } else {
                             1. - (1. - t).powi(5)
                         }
-                    }),
+                    },
+                ),
                 move |this, delta| {
                     let offset = if leaving {
                         NOTICE_INSET - delta * slide
@@ -7566,7 +7959,9 @@ impl Folio {
                                         .py_4()
                                         .text_size(ui(13.))
                                         .text_color(cx.theme().muted_foreground)
-                                        .child("Open a folder, start a new one, or clone from GitHub."),
+                                        .child(
+                                            "Open a folder, start a new one, or clone from GitHub.",
+                                        ),
                                 )
                             })
                             .children(self.recent.iter().enumerate().map(|(i, item)| {
@@ -7854,7 +8249,13 @@ impl Folio {
                         range
                             .filter_map(|index| {
                                 let (path, kind) = files.get(index)?;
-                                Some(this.render_change_row(index, path, *kind, index == selected, cx))
+                                Some(this.render_change_row(
+                                    index,
+                                    path,
+                                    *kind,
+                                    index == selected,
+                                    cx,
+                                ))
                             })
                             .collect()
                     }),
@@ -7978,8 +8379,8 @@ impl Folio {
                         let drag_path = path.clone();
                         let drop_path = path.clone();
                         let menu_path = path.clone();
-                        let selected = this.project.showing(&path)
-                            || i == this.project.selected_row;
+                        let selected =
+                            this.project.showing(&path) || i == this.project.selected_row;
                         let status = this
                             .project
                             .workspace
@@ -8863,6 +9264,24 @@ impl Folio {
                                 .text_color(cx.theme().muted_foreground)
                                 .child("Loading…"),
                         )
+                    })
+                    .when(self.run_is_busy(cx), |el| {
+                        el.child(Self::icon_button(
+                            "stop",
+                            Icon::new(IconName::Pause).text_color(run_stop_color(cx)),
+                            "Stop",
+                            |this, window, cx| this.stop_run(window, cx),
+                            cx,
+                        ))
+                    })
+                    .when(!self.run_is_busy(cx) && self.can_run_active(cx), |el| {
+                        el.child(Self::icon_button(
+                            "run",
+                            Icon::new(IconName::Play).text_color(cx.theme().success),
+                            "Run",
+                            |this, window, cx| this.run_code(None, window, cx),
+                            cx,
+                        ))
                     }),
             )
             .into_any_element()
@@ -9085,16 +9504,14 @@ impl Folio {
         style.heading_base_font_size = px(15.);
         style.highlight_theme = cx.theme().highlight_theme.clone();
         style.is_dark = cx.theme().is_dark();
-        let mut view = TextView::markdown(
-            format!("markdown-preview:{}", path.to_string_lossy()),
-            text,
-        )
-        .selectable(true)
-        .scrollable(true)
-        .style(style)
-        .h_full()
-        .w_full()
-        .p_6();
+        let mut view =
+            TextView::markdown(format!("markdown-preview:{}", path.to_string_lossy()), text)
+                .selectable(true)
+                .scrollable(true)
+                .style(style)
+                .h_full()
+                .w_full()
+                .p_6();
         if path
             .extension()
             .is_some_and(|ext| ext.eq_ignore_ascii_case("mdx"))
@@ -9105,22 +9522,23 @@ impl Folio {
     }
 
     fn render_pane(&self, index: usize, _: &Window, cx: &mut Context<Self>) -> AnyElement {
-        let pane = self
-            .project
-            .panes
-            .get(index)
-            .cloned()
-            .unwrap_or_default();
+        let pane = self.project.panes.get(index).cloned().unwrap_or_default();
         let focused = self.project.focused == index;
-        let showing_diff = self.project.diff.as_ref().is_some_and(|diff| {
-            pane.active.as_ref() == Some(&diff.path)
-        });
+        let showing_diff = self
+            .project
+            .diff
+            .as_ref()
+            .is_some_and(|diff| pane.active.as_ref() == Some(&diff.path));
         let locked = pane
             .active
             .as_ref()
             .is_some_and(|path| self.project.read_only.contains(path));
         let doc = (!showing_diff)
-            .then(|| pane.active.as_ref().and_then(|path| self.project.documents.get(path)))
+            .then(|| {
+                pane.active
+                    .as_ref()
+                    .and_then(|path| self.project.documents.get(path))
+            })
             .flatten();
         let image = (!showing_diff)
             .then(|| {
@@ -9286,16 +9704,19 @@ impl Folio {
                                     )
                             })
                         })
-                        .when_some(blame.filter(|_| !doc.preview), |el, text| {
-                            el.child(
-                                div()
-                                    .px_4()
-                                    .py_1()
-                                    .text_size(ui(11.))
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(text),
-                            )
-                        })
+                        .when_some(
+                            blame.filter(|_| !doc.preview),
+                            |el, text| {
+                                el.child(
+                                    div()
+                                        .px_4()
+                                        .py_1()
+                                        .text_size(ui(11.))
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(text),
+                                )
+                            },
+                        )
                     })
                     .when_some(image, |el, (path, image)| {
                         el.child(
@@ -9494,7 +9915,12 @@ impl SettingsView {
         let mut make_select = |current: &Option<String>, code: bool| {
             let options = font_options(installed.clone(), current.as_deref(), code);
             let value = current.clone().unwrap_or_else(|| {
-                if code { "JetBrains Mono" } else { "System default" }.to_owned()
+                if code {
+                    "JetBrains Mono"
+                } else {
+                    "System default"
+                }
+                .to_owned()
             });
             cx.new(|cx| {
                 let mut select = SelectState::new(SearchableVec::new(options), None, window, cx)
@@ -10000,7 +10426,9 @@ impl SettingsView {
                         "Break long lines to the editor width. Off keeps a character grid.",
                         self.choice(
                             "soft-wrap",
-                            ("On", settings.soft_wrap, |settings| settings.soft_wrap = true),
+                            ("On", settings.soft_wrap, |settings| {
+                                settings.soft_wrap = true
+                            }),
                             ("Off", !settings.soft_wrap, |settings| {
                                 settings.soft_wrap = false
                             }),
@@ -10043,7 +10471,9 @@ impl SettingsView {
                             ("Spaces", !settings.hard_tabs, |settings| {
                                 settings.hard_tabs = false
                             }),
-                            ("Tabs", settings.hard_tabs, |settings| settings.hard_tabs = true),
+                            ("Tabs", settings.hard_tabs, |settings| {
+                                settings.hard_tabs = true
+                            }),
                             cx,
                         ),
                         cx,
@@ -10065,7 +10495,11 @@ impl Render for SettingsView {
         let settings = self.settings.clone();
         for (select, family, default) in [
             (&self.font_select, &settings.font_family, "System default"),
-            (&self.code_font_select, &settings.code_font_family, "JetBrains Mono"),
+            (
+                &self.code_font_select,
+                &settings.code_font_family,
+                "JetBrains Mono",
+            ),
         ] {
             let value = family.as_deref().unwrap_or(default);
             if select.read(cx).selected_value().map(String::as_str) != Some(value) {
@@ -10135,9 +10569,7 @@ impl Render for Folio {
                 if std::env::var_os("FOLIO_PERF_QUIT").is_some() {
                     // A short wait lets session restore log open-tree / open-file.
                     cx.spawn(async move |this, cx| {
-                        cx.background_executor()
-                            .timer(Duration::from_secs(2))
-                            .await;
+                        cx.background_executor().timer(Duration::from_secs(2)).await;
                         let _ = this.update(cx, |_, cx| cx.quit());
                     })
                     .detach();
@@ -10220,9 +10652,9 @@ impl Render for Folio {
             .on_action(cx.listener(|this, _: &OpenSettings, _, cx| this.show_settings(cx)))
             .on_action(cx.listener(|this, _: &ToggleDiff, window, cx| this.toggle_diff(window, cx)))
             .on_action(cx.listener(|this, _: &ToggleChanges, _, cx| this.toggle_changes_list(cx)))
-            .on_action(cx.listener(|this, _: &SplitEditor, window, cx| {
-                this.split_editor(window, cx)
-            }))
+            .on_action(
+                cx.listener(|this, _: &SplitEditor, window, cx| this.split_editor(window, cx)),
+            )
             .on_action(cx.listener(|this, _: &SplitEditorLeft, window, cx| {
                 this.split_in(SplitDirection::Left, window, cx)
             }))
@@ -10232,15 +10664,13 @@ impl Render for Folio {
             .on_action(cx.listener(|this, _: &SplitEditorDown, window, cx| {
                 this.split_in(SplitDirection::Down, window, cx)
             }))
-            .on_action(cx.listener(|this, _: &JoinEditor, window, cx| {
-                this.join_editor(window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &FocusLeftPane, window, cx| {
-                this.focus_pane(0, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &FocusRightPane, window, cx| {
-                this.focus_pane(1, window, cx)
-            }))
+            .on_action(cx.listener(|this, _: &JoinEditor, window, cx| this.join_editor(window, cx)))
+            .on_action(
+                cx.listener(|this, _: &FocusLeftPane, window, cx| this.focus_pane(0, window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &FocusRightPane, window, cx| this.focus_pane(1, window, cx)),
+            )
             .on_action(cx.listener(|this, _: &NextHunk, _, cx| this.move_hunk(true, cx)))
             .on_action(cx.listener(|this, _: &PrevHunk, _, cx| this.move_hunk(false, cx)))
             .on_action(cx.listener(|this, _: &NextChangeFile, window, cx| {
@@ -10255,35 +10685,44 @@ impl Render for Folio {
             .on_action(cx.listener(|this, _: &ToggleMarkdownPreview, window, cx| {
                 this.toggle_markdown_preview(window, cx)
             }))
-            .on_action(cx.listener(|this, _: &RevealInFinder, _, cx| {
-                this.reveal_active_file(cx)
-            }))
-            .on_action(cx.listener(|this, _: &OpenInTerminal, _, cx| {
-                this.open_terminal_for_active_file(cx)
-            }))
-            .on_action(cx.listener(|this, _: &CopyFilePath, _, cx| {
-                this.copy_active_path(false, cx)
-            }))
-            .on_action(cx.listener(|this, _: &CopyRelativeFilePath, _, cx| {
-                this.copy_active_path(true, cx)
-            }))
+            .on_action(cx.listener(|this, _: &RevealInFinder, _, cx| this.reveal_active_file(cx)))
+            .on_action(
+                cx.listener(|this, _: &OpenInTerminal, _, cx| {
+                    this.open_terminal_for_active_file(cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &CopyFilePath, _, cx| this.copy_active_path(false, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &CopyRelativeFilePath, _, cx| {
+                    this.copy_active_path(true, cx)
+                }),
+            )
             .on_action(cx.listener(|this, _: &OpenAbout, _, cx| this.show_about(cx)))
             .on_action(cx.listener(|this, _: &CheckForUpdates, _, cx| this.check_for_updates(cx)))
+            .on_action(cx.listener(|this, _: &Run, window, cx| this.run_or_stop(None, window, cx)))
+            .on_action(cx.listener(|this, _: &Rerun, window, cx| this.rerun(window, cx)))
+            .on_action(cx.listener(|this, _: &StopRun, window, cx| this.stop_run(window, cx)))
             .on_action(
                 cx.listener(|this, _: &ToggleComment, window, cx| this.toggle_comment(window, cx)),
             )
             .on_action(cx.listener(|this, _: &ToggleBlockComment, window, cx| {
                 this.toggle_block_comment(window, cx)
             }))
-            .on_action(cx.listener(|this, _: &DuplicateLines, window, cx| {
-                this.duplicate_lines(window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &MoveLinesUp, window, cx| {
-                this.move_lines(false, window, cx)
-            }))
-            .on_action(cx.listener(|this, _: &MoveLinesDown, window, cx| {
-                this.move_lines(true, window, cx)
-            }))
+            .on_action(
+                cx.listener(|this, _: &DuplicateLines, window, cx| {
+                    this.duplicate_lines(window, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &MoveLinesUp, window, cx| this.move_lines(false, window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &MoveLinesDown, window, cx| {
+                    this.move_lines(true, window, cx)
+                }),
+            )
             // The editor's own commands, bound only where the code editor has
             // the keyboard.
             .on_action(cx.listener(|this, _: &Fold, _, cx| {
@@ -10594,9 +11033,7 @@ impl Render for Folio {
                         self.render_launcher(cx)
                     }),
             )
-            .when(self.clone_open, |el| {
-                el.child(self.render_clone_prompt(cx))
-            })
+            .when(self.clone_open, |el| el.child(self.render_clone_prompt(cx)))
             .when_some(self.panel, |el, panel| {
                 el.child(self.render_panel(panel, cx))
             })
@@ -11611,7 +12048,9 @@ mod tests {
         });
 
         // A path that is not in the strip changes nothing.
-        view.update_in(cx, |app, _, cx| app.move_tab_to(&root.join("ghost.rs"), 0, 0, cx));
+        view.update_in(cx, |app, _, cx| {
+            app.move_tab_to(&root.join("ghost.rs"), 0, 0, cx)
+        });
         view.update_in(cx, |app, _, _| {
             assert_eq!(
                 app.project.tabs().to_vec(),
@@ -11747,7 +12186,10 @@ mod tests {
         });
         cx.run_until_parked();
         view.update_in(cx, |app, _, _| {
-            assert_eq!(app.project.tabs().to_vec(), vec![third.clone(), first.clone()]);
+            assert_eq!(
+                app.project.tabs().to_vec(),
+                vec![third.clone(), first.clone()]
+            );
         });
 
         // Locking a tab is view state: it flips the label and refuses edits,
@@ -11866,7 +12308,10 @@ mod tests {
         });
         cx.run_until_parked();
         view.update_in(cx, |app, window, cx| {
-            assert_eq!(app.project.tabs().to_vec(), vec![first.clone(), second.clone()]);
+            assert_eq!(
+                app.project.tabs().to_vec(),
+                vec![first.clone(), second.clone()]
+            );
             assert_eq!(app.project.active(), Some(&second));
             // The strip draws; the harness never draws on its own.
             let _ = app.render(window, cx);
@@ -11989,7 +12434,11 @@ mod tests {
             app.step_tab(0, -1, window, cx);
             assert_eq!(app.project.active(), Some(&first));
             app.step_tab(0, -1, window, cx);
-            assert_eq!(app.project.active(), Some(&first), "the first tab stays put");
+            assert_eq!(
+                app.project.active(),
+                Some(&first),
+                "the first tab stays put"
+            );
             app.step_tab(0, 1, window, cx);
             assert_eq!(app.project.active(), Some(&second));
             let _ = app.render(window, cx);
@@ -12421,6 +12870,145 @@ mod tests {
         });
     }
 
+    /// A Run tab: one per project, busy from spawn until the command exits,
+    /// reused by the next run, and never handed a second command while
+    /// the first is up. `⇧⌘R` repeats the whole command, directory included.
+    #[gpui::test]
+    fn the_run_tab_is_busy_until_the_command_exits(cx: &mut TestAppContext) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let sub = root.join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        cx.update(gpui_component::init);
+        let cx = cx.add_empty_window();
+        let view = cx.update(|window, cx| {
+            cx.new(|cx| {
+                let mut app = Folio::new(window, cx);
+                app.recent_task = None;
+                app.recent_file = root.join("recent.json");
+                app.settings_file = root.join("settings.json");
+                app.window_file = root.join("window.json");
+                app.settings = Settings::default();
+                app.applied_ignored = app.settings.ignored.clone();
+                app
+            })
+        });
+        view.update_in(cx, |app, window, cx| {
+            app.request(Next::Open(root.clone()), window, cx)
+        });
+        cx.run_until_parked();
+
+        // Real children on a real pty: the test executor's clock does not
+        // move them, so wait on wall time and let the poll run in between.
+        let settle = |cx: &mut VisualTestContext,
+                      view: &Entity<Folio>,
+                      until: &dyn Fn(&Folio, &App) -> bool| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                cx.executor().advance_clock(Duration::from_millis(50));
+                cx.run_until_parked();
+                if view.read_with(cx, |app, cx| until(app, cx)) {
+                    return;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the run never got there"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        };
+
+        let command = |shell: &str, cwd: &Path| run::Command {
+            label: "Run".into(),
+            shell: shell.into(),
+            cwd: cwd.to_path_buf(),
+        };
+
+        // Starting a run opens the drawer on a fresh Run tab that is busy.
+        view.update_in(cx, |app, window, cx| {
+            app.start_run_command(command("printf READY; sleep 30", &sub), window, cx);
+            assert!(app.terminal_open);
+            let tabs = &app.terminals[&root];
+            assert_eq!(tabs.views.len(), 1);
+            assert_eq!(tabs._watches.len(), 1);
+            assert!(tabs.views[0].read(cx).is_run());
+            assert!(app.run_is_busy(cx));
+            assert_eq!(
+                tabs.last_run.as_ref().map(|c| c.cwd.as_path()),
+                Some(sub.as_path())
+            );
+        });
+        settle(cx, &view, &|app, cx| {
+            app.run_terminal(cx)
+                .is_some_and(|view| view.read(cx).snapshot_text().contains("READY"))
+        });
+
+        // A second run while busy is refused: still one tab, still the
+        // same child, and the warning says why.
+        view.update_in(cx, |app, window, cx| {
+            app.start_run_command(command("printf SECOND", &root), window, cx);
+            assert_eq!(app.terminals[&root].views.len(), 1);
+            assert!(app.run_is_busy(cx));
+            assert!(
+                app.notice
+                    .as_ref()
+                    .is_some_and(|n| n.text.contains("Already running")),
+                "the refusal has to be said out loud"
+            );
+        });
+        // A first Stop is Ctrl-C, and the sleep dies of it.
+        view.update_in(cx, |app, window, cx| app.stop_run(window, cx));
+        settle(cx, &view, &|app, cx| !app.run_is_busy(cx));
+        view.update_in(cx, |app, _, cx| {
+            let tab = app.run_terminal(cx).unwrap().read(cx);
+            assert!(tab.is_run());
+            assert!(tab.exit().is_some(), "a stopped run is an exited tab");
+        });
+
+        // Stop with nothing running does not touch the drawer.
+        view.update_in(cx, |app, window, cx| {
+            app.terminal_open = false;
+            app.stop_run(window, cx);
+            assert!(!app.terminal_open);
+        });
+
+        // The next run reuses the tab and runs from its own directory.
+        view.update_in(cx, |app, window, cx| {
+            app.start_run_command(command("pwd; printf DONE", &sub), window, cx);
+            assert!(app.terminal_open);
+            assert_eq!(app.terminals[&root].views.len(), 1);
+            assert!(app.run_is_busy(cx));
+        });
+        settle(cx, &view, &|app, cx| !app.run_is_busy(cx));
+        view.update_in(cx, |app, _, cx| {
+            let text = app.run_terminal(cx).unwrap().read(cx).snapshot_text();
+            assert!(text.contains("DONE"), "{text}");
+            assert!(
+                text.contains("/sub"),
+                "the pty must start in the command's cwd: {text}"
+            );
+        });
+
+        // Rerun repeats the last command from the same directory.
+        view.update_in(cx, |app, window, cx| {
+            app.rerun(window, cx);
+            assert!(app.run_is_busy(cx));
+        });
+        settle(cx, &view, &|app, cx| !app.run_is_busy(cx));
+        view.update_in(cx, |app, _, cx| {
+            let text = app.run_terminal(cx).unwrap().read(cx).snapshot_text();
+            assert!(text.contains("DONE"), "{text}");
+        });
+
+        // Closing the Run tab drops its watch with it.
+        view.update_in(cx, |app, window, cx| {
+            let index = app.run_terminal_index(cx).unwrap();
+            app.close_terminal_tab(index, window, cx);
+            assert!(!app.terminals.contains_key(&root));
+        });
+        cx.run_until_parked();
+    }
+
     /// The icon rail and the file tree are two toggles. The title-bar
     /// button owns the rail; `⌘B` and the first rail icon own the tree.
     #[gpui::test]
@@ -12690,7 +13278,8 @@ mod tests {
                     .iter()
                     .find(|row| {
                         row.old
-                            .as_ref().is_some_and(|cell| cell.text == "let two = 2;")
+                            .as_ref()
+                            .is_some_and(|cell| cell.text == "let two = 2;")
                             && row
                                 .new
                                 .as_ref()
@@ -12919,7 +13508,9 @@ mod tests {
             app.request(Next::Open(root.clone()), window, cx)
         });
         cx.run_until_parked();
-        view.update_in(cx, |app, window, cx| app.open_file(file.clone(), window, cx));
+        view.update_in(cx, |app, window, cx| {
+            app.open_file(file.clone(), window, cx)
+        });
         cx.run_until_parked();
         view.update_in(cx, |app, _, cx| {
             let doc = &app.project.documents[&file];
@@ -12948,6 +13539,75 @@ mod tests {
             let pairs = doc.editor.read(cx).bracket_pairs(cx);
             assert_eq!(folio::brackets::around_offsets(&pairs, 8), Some((8, 10)));
             assert_eq!(folio::brackets::around_offsets(&pairs, 11), Some((8, 10)));
+        });
+    }
+
+    #[gpui::test]
+    fn rust_main_is_runnable_from_the_gutter(cx: &mut TestAppContext) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir(root.join("src")).unwrap();
+        let file = root.join("src/main.rs");
+        std::fs::write(&file, "fn main() {}\n#[test]\nfn adds() {}\n").unwrap();
+        cx.update(gpui_component::init);
+        let cx = cx.add_empty_window();
+        let view = cx.update(|window, cx| {
+            cx.new(|cx| {
+                let mut app = Folio::new(window, cx);
+                app.recent_task = None;
+                app.recent_file = root.join("recent.json");
+                app.settings_file = root.join("settings.json");
+                app.window_file = root.join("window.json");
+                app.settings = Settings::default();
+                app.applied_ignored = app.settings.ignored.clone();
+                app
+            })
+        });
+        view.update_in(cx, |app, window, cx| {
+            app.request(Next::Open(root.clone()), window, cx)
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |app, window, cx| {
+            app.open_file(file.clone(), window, cx)
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |app, _, cx| {
+            assert!(app.can_run_active(cx));
+            let doc = &app.project.documents[&file];
+            assert_eq!(doc.editor.read(cx).runnable_lines(cx), vec![0, 2]);
+            let text = doc.editor.read(cx).value();
+            let runnables = folio::run::find(&file, &text);
+            assert_eq!(runnables.len(), 2);
+            assert_eq!(runnables[0].name, "main");
+            assert_eq!(runnables[1].name, "adds");
+            let cmd = folio::run::resolve(&root, &file, &text, Some(2)).unwrap();
+            assert_eq!(cmd.shell, "cargo test adds -- --exact");
+            assert_eq!(
+                cmd.cwd, root,
+                "the Run tab starts in the crate, so the command never cds"
+            );
+        });
+        view.update_in(cx, |app, window, cx| {
+            assert!(app.apply_disk_text(&file, "fn helper() {}\n".into(), true, window, cx));
+        });
+        view.update_in(cx, |app, _, cx| {
+            assert!(
+                app.project.documents[&file]
+                    .editor
+                    .read(cx)
+                    .runnable_lines(cx)
+                    .is_empty(),
+                "set_value must rescan runnables, not keep the previous file's play icons"
+            );
+            assert!(
+                app.can_run_active(cx),
+                "a rust crate still runs via cargo run with no main in this file"
+            );
         });
     }
 
@@ -13821,7 +14481,9 @@ mod tests {
             app.request(Next::Open(root.clone()), window, cx)
         });
         cx.run_until_parked();
-        view.update_in(cx, |app, window, cx| app.open_file(note.clone(), window, cx));
+        view.update_in(cx, |app, window, cx| {
+            app.open_file(note.clone(), window, cx)
+        });
         cx.run_until_parked();
         view.update_in(cx, |app, window, cx| {
             let document = &app.project.documents[&note];
@@ -13850,8 +14512,20 @@ mod tests {
 
     #[test]
     fn font_choices_keep_bundled_fonts_first_and_custom_fonts_available() {
-        let options = font_options(vec!["Menlo".into(), "Fira Code".into(), "Menlo".into(), ".Hidden".into()], Some("Custom Mono"), true);
-        assert_eq!(&options[..3], &["JetBrains Mono", "Fira Code", "Source Code Pro"]);
+        let options = font_options(
+            vec![
+                "Menlo".into(),
+                "Fira Code".into(),
+                "Menlo".into(),
+                ".Hidden".into(),
+            ],
+            Some("Custom Mono"),
+            true,
+        );
+        assert_eq!(
+            &options[..3],
+            &["JetBrains Mono", "Fira Code", "Source Code Pro"]
+        );
         assert_eq!(&options[3..], &["Custom Mono", "Menlo"]);
         assert_eq!(font_options(vec![], None, false)[0], "System default");
     }
@@ -13888,13 +14562,18 @@ mod tests {
         });
         cx.run_until_parked();
 
-        view.update_in(cx, |app, window, cx| app.open_file(src.join("main.rs"), window, cx));
+        view.update_in(cx, |app, window, cx| {
+            app.open_file(src.join("main.rs"), window, cx)
+        });
         cx.run_until_parked();
         let open_editor = view.update_in(cx, |app, _, cx| {
-            app.project.documents[&src.join("main.rs")].editor.read(cx).base_state().clone()
+            app.project.documents[&src.join("main.rs")]
+                .editor
+                .read(cx)
+                .base_state()
+                .clone()
         });
         cx.update(|window, _| window.blur());
-
 
         // The settings form, wired to the app view the way the window wires it.
         let settings = view.update_in(cx, |app, window, cx| {
@@ -13956,8 +14635,10 @@ mod tests {
             });
             cx.run_until_parked();
             let stored = settings::load(&root.join("settings.json")).unwrap();
-            assert_eq!(stored.code_font_family.as_deref(),
-                (family != "JetBrains Mono").then_some(family));
+            assert_eq!(
+                stored.code_font_family.as_deref(),
+                (family != "JetBrains Mono").then_some(family)
+            );
             view.update_in(cx, |app, _, cx| {
                 assert_eq!(app.code_font().as_ref(), family);
                 assert_eq!(cx.theme().mono_font_family.as_ref(), family);
@@ -13968,9 +14649,21 @@ mod tests {
                 div().w(px(800.)).h(px(500.)).child(view.clone())
             });
             cx.update(|window, cx| {
-                assert_eq!(open_editor.read(cx).rendered_font().unwrap().family.as_ref(), family);
-                let actual = open_editor.read(cx).range_to_bounds(&(0..5))
-                    .expect("the open code must have been painted").size.width;
+                assert_eq!(
+                    open_editor
+                        .read(cx)
+                        .rendered_font()
+                        .unwrap()
+                        .family
+                        .as_ref(),
+                    family
+                );
+                let actual = open_editor
+                    .read(cx)
+                    .range_to_bounds(&(0..5))
+                    .expect("the open code must have been painted")
+                    .size
+                    .width;
                 let run = TextRun {
                     len: 5,
                     font: gpui::font(family),
@@ -13979,9 +14672,14 @@ mod tests {
                     underline: None,
                     strikethrough: None,
                 };
-                let expected = window.text_system().shape_line("// hi".into(), px(14.), &[run], None).width;
-                assert!((f32::from(actual - expected)).abs() < 0.1,
-                    "{family}: painted {actual:?}, expected {expected:?}");
+                let expected = window
+                    .text_system()
+                    .shape_line("// hi".into(), px(14.), &[run], None)
+                    .width;
+                assert!(
+                    (f32::from(actual - expected)).abs() < 0.1,
+                    "{family}: painted {actual:?}, expected {expected:?}"
+                );
             });
         }
 
@@ -13992,12 +14690,26 @@ mod tests {
             });
         });
         cx.run_until_parked();
-        assert_eq!(settings::load(&root.join("settings.json")).unwrap().font_family.as_deref(), Some("Source Code Pro"));
+        assert_eq!(
+            settings::load(&root.join("settings.json"))
+                .unwrap()
+                .font_family
+                .as_deref(),
+            Some("Source Code Pro")
+        );
         cx.draw(point(px(0.), px(0.)), size(px(800.), px(500.)), |_, _| {
             div().w(px(800.)).h(px(500.)).child(view.clone())
         });
         cx.update(|_, cx| {
-            assert_eq!(open_editor.read(cx).rendered_font().unwrap().family.as_ref(), "JetBrains Mono");
+            assert_eq!(
+                open_editor
+                    .read(cx)
+                    .rendered_font()
+                    .unwrap()
+                    .family
+                    .as_ref(),
+                "JetBrains Mono"
+            );
         });
         settings.update_in(cx, |view, window, cx| {
             view.font_select.update(cx, |select, cx| {
@@ -14012,7 +14724,8 @@ mod tests {
         cx.run_until_parked();
         // Settling an unrelated input must not overwrite the chosen font.
         settings.update_in(cx, |view, window, cx| {
-            view.ignore_query.update(cx, |input, cx| input.set_value("src, notes", window, cx));
+            view.ignore_query
+                .update(cx, |input, cx| input.set_value("src, notes", window, cx));
             view.commit_text(window, cx);
         });
         cx.run_until_parked();
@@ -14023,7 +14736,15 @@ mod tests {
         // Reopening the form restores the persisted selection.
         settings.update_in(cx, |view, window, cx| {
             let reopened = cx.new(|cx| SettingsView::new(view.folio.clone(), stored, window, cx));
-            assert_eq!(reopened.read(cx).code_font_select.read(cx).selected_value().map(String::as_str), Some("Fira Code"));
+            assert_eq!(
+                reopened
+                    .read(cx)
+                    .code_font_select
+                    .read(cx)
+                    .selected_value()
+                    .map(String::as_str),
+                Some("Fira Code")
+            );
         });
 
         // Both folders are ignored now, so the tree and the index agree that
@@ -14180,7 +14901,10 @@ mod tests {
             assert_eq!(app.clipboard.as_ref().map(|entry| entry.cut), Some(true));
             open_tree_menu(app, &root, false, window, cx);
             app.run_menu_item(MenuItem::Paste, window, cx);
-            assert!(app.clipboard.is_some(), "a cut remains pending until it lands");
+            assert!(
+                app.clipboard.is_some(),
+                "a cut remains pending until it lands"
+            );
         });
         cx.run_until_parked();
         let moved = root.join("笔记.md");
@@ -14476,7 +15200,9 @@ mod tests {
             app.request(Next::Open(root.clone()), window, cx)
         });
         cx.run_until_parked();
-        view.update_in(cx, |app, window, cx| app.open_file(file.clone(), window, cx));
+        view.update_in(cx, |app, window, cx| {
+            app.open_file(file.clone(), window, cx)
+        });
         cx.run_until_parked();
         view.update_in(cx, |app, window, cx| {
             app.project.documents[&file]
@@ -14484,7 +15210,9 @@ mod tests {
                 .read(cx)
                 .base_state()
                 .clone()
-                .update(cx, |base, cx| base.replace_all("fn moved() {}\n", window, cx));
+                .update(cx, |base, cx| {
+                    base.replace_all("fn moved() {}\n", window, cx)
+                });
             app.project.documents.get_mut(&file).unwrap().dirty = true;
             app.drop_tree_entry(file.clone(), src.clone(), window, cx);
         });
@@ -14505,9 +15233,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn composing_then_undo_or_escape_returns_to_the_buffer_before_pinyin(
-        cx: &mut TestAppContext,
-    ) {
+    fn composing_then_undo_or_escape_returns_to_the_buffer_before_pinyin(cx: &mut TestAppContext) {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().canonicalize().unwrap();
         let file = root.join("main.rs");
@@ -14530,7 +15256,9 @@ mod tests {
             app.request(Next::Open(root.clone()), window, cx)
         });
         cx.run_until_parked();
-        view.update_in(cx, |app, window, cx| app.open_file(file.clone(), window, cx));
+        view.update_in(cx, |app, window, cx| {
+            app.open_file(file.clone(), window, cx)
+        });
         cx.run_until_parked();
 
         view.update_in(cx, |app, window, cx| {
@@ -14687,11 +15415,17 @@ mod tests {
                 app
             })
         });
-        view.update_in(cx, |app, window, cx| app.request(Next::Open(a.clone()), window, cx));
+        view.update_in(cx, |app, window, cx| {
+            app.request(Next::Open(a.clone()), window, cx)
+        });
         cx.run_until_parked();
-        view.update_in(cx, |app, window, cx| app.open_file(file.clone(), window, cx));
+        view.update_in(cx, |app, window, cx| {
+            app.open_file(file.clone(), window, cx)
+        });
         cx.run_until_parked();
-        view.update_in(cx, |app, window, cx| app.request(Next::Open(b.clone()), window, cx));
+        view.update_in(cx, |app, window, cx| {
+            app.request(Next::Open(b.clone()), window, cx)
+        });
         cx.run_until_parked();
         view.update_in(cx, |app, window, cx| {
             app.drop_tree_entry(file.clone(), b.clone(), window, cx)
@@ -14708,7 +15442,9 @@ mod tests {
                 .read(cx)
                 .base_state()
                 .clone()
-                .update(cx, |base, cx| base.replace_all("fn after() {}\n", window, cx));
+                .update(cx, |base, cx| {
+                    base.replace_all("fn after() {}\n", window, cx)
+                });
         });
         cx.run_until_parked();
         view.update_in(cx, |app, _, cx| {

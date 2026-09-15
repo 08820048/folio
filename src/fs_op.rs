@@ -84,9 +84,13 @@ pub fn duplicate(source: &Path) -> io::Result<PathBuf> {
 pub fn paste(source: &Path, into: &Path, cut: bool) -> io::Result<PathBuf> {
     let kind = fs::symlink_metadata(source)?.file_type();
     if (!kind.is_dir() && !kind.is_file()) || !fs::symlink_metadata(into)?.is_dir() {
-        return Err(io::Error::other("Copy and move require regular files and folders"));
+        return Err(io::Error::other(
+            "Copy and move require regular files and folders",
+        ));
     }
-    let name = source.file_name().ok_or_else(|| io::Error::other("Invalid path"))?;
+    let name = source
+        .file_name()
+        .ok_or_else(|| io::Error::other("Invalid path"))?;
     let destination = into.join(name);
     if destination == source {
         return Err(io::Error::other("Source and destination are the same"));
@@ -144,7 +148,7 @@ fn rename_new(source: &Path, destination: &Path) -> io::Result<()> {
 fn exclusive_rename(source: &Path, destination: &Path) -> io::Result<()> {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
-        use rustix::fs::{renameat_with, CWD, RenameFlags};
+        use rustix::fs::{CWD, RenameFlags, renameat_with};
         renameat_with(CWD, source, CWD, destination, RenameFlags::NOREPLACE).map_err(Into::into)
     }
     #[cfg(target_os = "windows")]
@@ -270,7 +274,8 @@ fn copy(source: &Path, destination: &Path) -> io::Result<()> {
     } else if meta.is_file() {
         #[cfg(unix)]
         let mut input = fs::File::from(rustix::fs::open(
-            source, rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NOFOLLOW,
+            source,
+            rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NOFOLLOW,
             rustix::fs::Mode::empty(),
         )?);
         #[cfg(not(unix))]
@@ -278,7 +283,10 @@ fn copy(source: &Path, destination: &Path) -> io::Result<()> {
         if !input.metadata()?.is_file() {
             return Err(io::Error::other("Only regular files can be copied"));
         }
-        let mut output = fs::OpenOptions::new().write(true).create_new(true).open(destination)?;
+        let mut output = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(destination)?;
         io::copy(&mut input, &mut output)?;
         output.set_permissions(meta.permissions())?;
         output.sync_all()
@@ -430,7 +438,11 @@ mod safety_tests {
         // Covers distinct case variants on sensitive volumes; on insensitive
         // volumes the exclusive create must refuse the alias instead.
         let upper = root.join("A.txt");
-        if let Ok(mut file) = fs::OpenOptions::new().write(true).create_new(true).open(&upper) {
+        if let Ok(mut file) = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&upper)
+        {
             use std::io::Write;
             file.write_all(b"keep uppercase").unwrap();
             assert!(rename(&source, "A.txt").is_err());

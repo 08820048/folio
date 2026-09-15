@@ -47,6 +47,16 @@ pub struct Terminal {
     cell_size: (u16, u16),
     exited: bool,
     exit_code: Option<i32>,
+    /// Dup of the pty master, so the UI thread can ask the tty which
+    /// process group is in the foreground without going through
+    /// alacritty's event loop. An interactive shell gives each job its own
+    /// group, so `Child::id` alone would only ever name the shell.
+    #[cfg(unix)]
+    pty_master: Option<std::fs::File>,
+    /// The pty's direct child. It called `setsid`, so its pid is also its
+    /// process group.
+    #[cfg(unix)]
+    child_pid: Option<i32>,
 }
 
 /// What a terminal is spawned with. A `None` shell leaves the choice to the
@@ -82,6 +92,47 @@ impl Shell {
             program,
             args: args.iter().map(|arg| arg.to_string()).collect(),
         })
+    }
+
+    /// Run one command and exit, the way Zed's task terminal does. The
+    /// shell starts the same way the interactive tab's does — login and
+    /// interactive, so `.zprofile` and `.zshrc` both run and PATH has what
+    /// they add (brew, cargo, nvm, pyenv) — but `-c` means it does not stay
+    /// up afterwards to print a fresh prompt.
+    pub fn for_command(command: &str) -> Self {
+        #[cfg(windows)]
+        {
+            Self::for_command_in(
+                &std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".into()),
+                command,
+            )
+        }
+        #[cfg(not(windows))]
+        {
+            Self::for_command_in(
+                &std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into()),
+                command,
+            )
+        }
+    }
+
+    /// [`Self::for_command`] with the shell named, so the arguments each
+    /// shell wants can be checked without touching `$SHELL`.
+    pub fn for_command_in(program: &str, command: &str) -> Self {
+        // Split on both separators: a Windows path is still a Windows path
+        // when the string is looked at from elsewhere.
+        let name = program.rsplit(['/', '\\']).next();
+        let args = match name {
+            Some("cmd.exe") | Some("cmd") => vec!["/S".into(), "/C".into(), command.to_string()],
+            Some("zsh") | Some("bash") | Some("fish") => {
+                vec!["-l".into(), "-i".into(), "-c".into(), command.to_string()]
+            }
+            _ => vec!["-c".into(), command.to_string()],
+        };
+        Self {
+            program: program.to_string(),
+            args,
+        }
     }
 }
 
@@ -139,6 +190,10 @@ impl Terminal {
             },
             0,
         )?;
+        #[cfg(unix)]
+        let pty_master = pty.file().try_clone().ok();
+        #[cfg(unix)]
+        let child_pid = i32::try_from(pty.child().id()).ok();
         let event_loop = EventLoop::new(term.clone(), listener, pty, true, false)?;
         let channel = event_loop.channel();
         event_loop.spawn();
@@ -150,12 +205,68 @@ impl Terminal {
             cell_size: (8, 16),
             exited: false,
             exit_code: None,
+            #[cfg(unix)]
+            pty_master,
+            #[cfg(unix)]
+            child_pid,
         })
     }
 
     /// Send bytes to the child, as if typed.
     pub fn write(&self, bytes: &[u8]) {
         Notifier(self.channel.clone()).notify(bytes.to_vec());
+    }
+
+    /// Ctrl-C, as if typed: the tty turns it into SIGINT for the foreground
+    /// group. A program in raw mode sees the byte instead and may ignore
+    /// it; [`Self::terminate`] and [`Self::kill`] are the next steps.
+    pub fn interrupt(&self) {
+        self.write(b"\x03");
+    }
+
+    /// SIGTERM the foreground job and the pty's child, for a program that
+    /// swallowed Ctrl-C. Both groups are signalled: an interactive shell
+    /// puts its job in a group of its own, so the child's alone would only
+    /// reach the shell.
+    pub fn terminate(&self) {
+        #[cfg(unix)]
+        self.signal_groups(libc::SIGTERM);
+    }
+
+    /// SIGKILL the same groups; nothing survives this.
+    pub fn kill(&self) {
+        #[cfg(unix)]
+        self.signal_groups(libc::SIGKILL);
+    }
+
+    #[cfg(unix)]
+    fn signal_groups(&self, signal: i32) {
+        let mut groups: Vec<i32> = self.foreground_pgrp().into_iter().collect();
+        if let Some(pid) = self.child_pid
+            && !groups.contains(&pid)
+        {
+            groups.push(pid);
+        }
+        for group in groups {
+            // SAFETY: killpg only sends a signal; a stale group id fails
+            // with ESRCH rather than reaching anything else, and the pty's
+            // child is ours to signal.
+            unsafe {
+                libc::killpg(group, signal);
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn foreground_pgrp(&self) -> Option<i32> {
+        use std::os::fd::AsRawFd;
+        let fd = self.pty_master.as_ref()?.as_raw_fd();
+        // rustix's tcgetpgrp panics in debug on macOS when the ioctl
+        // returns 0, which a pty can do before the session is set.
+        // SAFETY: `fd` is an open pty master this terminal owns. tcgetpgrp
+        // only reads the foreground group; it does not close or take the fd.
+        let pid = unsafe { libc::tcgetpgrp(fd) };
+        (pid > 0).then_some(pid)
     }
 
     /// Resize the grid and the pty. The cell metrics are what the child
@@ -686,7 +797,10 @@ fn is_url_byte(b: u8) -> bool {
 }
 
 fn is_trailing_url_punct(b: u8) -> bool {
-    matches!(b, b'.' | b',' | b';' | b':' | b'?' | b'!' | b')' | b']' | b'}')
+    matches!(
+        b,
+        b'.' | b',' | b';' | b':' | b'?' | b'!' | b')' | b']' | b'}'
+    )
 }
 
 /// Whether a URI is safe to hand to the system browser.
@@ -985,5 +1099,73 @@ mod tests {
             snapshot.text().contains("got:hi")
         });
         assert!(snapshot.text().contains("got:hi"));
+    }
+
+    #[test]
+    fn a_run_shell_is_a_login_shell_that_exits_after_the_command() {
+        let zsh = Shell::for_command_in("/bin/zsh", "cargo run");
+        assert_eq!(zsh.program, "/bin/zsh");
+        assert_eq!(zsh.args, ["-l", "-i", "-c", "cargo run"]);
+        let bash = Shell::for_command_in("/usr/local/bin/bash", "x");
+        assert_eq!(bash.args, ["-l", "-i", "-c", "x"]);
+        let fish = Shell::for_command_in("/opt/homebrew/bin/fish", "x");
+        assert_eq!(fish.args, ["-l", "-i", "-c", "x"]);
+        // `sh` has no rc files worth loading and rejects `-l -i -c` on some
+        // systems; plain `-c` is the whole story.
+        let sh = Shell::for_command_in("/bin/sh", "x");
+        assert_eq!(sh.args, ["-c", "x"]);
+        let cmd = Shell::for_command_in(r"C:\Windows\System32\cmd.exe", "x");
+        assert_eq!(cmd.args, ["/S", "/C", "x"]);
+    }
+
+    /// A program that traps Ctrl-C keeps running; SIGTERM to its group is
+    /// what ends it. The shell that started it goes with it.
+    #[cfg(unix)]
+    #[test]
+    fn terminate_reaches_a_job_that_ignores_ctrl_c() {
+        let mut terminal = Terminal::spawn(Spawn {
+            working_directory: None,
+            shell: Some(Shell {
+                program: "/bin/sh".into(),
+                args: vec![
+                    "-c".into(),
+                    "trap '' INT; printf READY; sleep 60; printf DONE".into(),
+                ],
+            }),
+            columns: 40,
+            rows: 10,
+            scrollback: 100,
+        })
+        .unwrap();
+        wait_for(&mut terminal, |_, snapshot| {
+            snapshot.text().contains("READY")
+        });
+        terminal.interrupt();
+        std::thread::sleep(Duration::from_millis(200));
+        terminal.take_events();
+        assert!(
+            !terminal.exited(),
+            "Ctrl-C was trapped, the job should still be up:\n{}",
+            terminal.snapshot().text()
+        );
+        terminal.terminate();
+        wait_for(&mut terminal, |terminal, _| terminal.exited());
+        assert!(!terminal.snapshot().text().contains("DONE"));
+    }
+
+    #[test]
+    fn a_run_command_exits_when_the_child_does() {
+        let mut terminal = Terminal::spawn(Spawn {
+            working_directory: None,
+            shell: Some(Shell::for_command("printf 'hello-run'")),
+            columns: 40,
+            rows: 10,
+            scrollback: 100,
+        })
+        .unwrap();
+        wait_for(&mut terminal, |_, snapshot| {
+            snapshot.text().contains("hello-run")
+        });
+        wait_for(&mut terminal, |terminal, _| terminal.exited());
     }
 }

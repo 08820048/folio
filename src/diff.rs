@@ -64,10 +64,22 @@ pub fn for_file_against(root: &Path, path: &Path, base: &str) -> io::Result<Diff
             untracked: true,
         });
     }
-    if base.starts_with('-') { return Err(io::Error::other("Invalid diff base")); }
-    let output = git::output(git::command(root)?
-        .args(["diff", "--no-ext-diff", "--no-textconv", "--no-color", "--unified=3", base, "--"])
-        .arg(relative));
+    if base.starts_with('-') {
+        return Err(io::Error::other("Invalid diff base"));
+    }
+    let output = git::output(
+        git::command(root)?
+            .args([
+                "diff",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-color",
+                "--unified=3",
+                base,
+                "--",
+            ])
+            .arg(relative),
+    );
     match output {
         Ok(output) if output.status.success() => Ok(Diff {
             lines: {
@@ -90,7 +102,11 @@ pub fn for_file_against(root: &Path, path: &Path, base: &str) -> io::Result<Diff
 /// `git diff HEAD` says nothing at all about an untracked file — which reads
 /// exactly like a file with no changes.
 fn is_untracked(root: &Path, relative: &Path) -> io::Result<bool> {
-    let output = git::output(git::command(root)?.args(["status", "--porcelain=v1", "-z", "--"]).arg(relative));
+    let output = git::output(
+        git::command(root)?
+            .args(["status", "--porcelain=v1", "-z", "--"])
+            .arg(relative),
+    );
     match output {
         Ok(output) if output.status.success() => Ok(output.stdout.starts_with(b"??")),
         Ok(_) => Ok(false),
@@ -371,8 +387,14 @@ index 1111111..2222222 100644
         let lines = parse("@@ -1,3 +1,3 @@\n one\n-old\n+new\n two\n");
         let rows = split_rows(&lines);
         assert_eq!(rows[0].hunk.as_deref(), Some("@@ -1,3 +1,3 @@"));
-        assert_eq!(rows[1].old.as_ref().map(|cell| cell.text.as_str()), Some("one"));
-        assert_eq!(rows[1].new.as_ref().map(|cell| cell.text.as_str()), Some("one"));
+        assert_eq!(
+            rows[1].old.as_ref().map(|cell| cell.text.as_str()),
+            Some("one")
+        );
+        assert_eq!(
+            rows[1].new.as_ref().map(|cell| cell.text.as_str()),
+            Some("one")
+        );
         assert_eq!(rows[2].old.as_ref().unwrap().text, "old");
         assert_eq!(rows[2].new.as_ref().unwrap().text, "new");
         assert_eq!(rows[2].old.as_ref().unwrap().change, Change::Removed);

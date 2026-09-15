@@ -46,6 +46,8 @@ fn main() {
                 // The dock, like the sidebar a toggle: hiding it keeps the
                 // child running.
                 KeyBinding::new(&format!("{modifier}-j"), ToggleTerminal, Some("Folio")),
+                KeyBinding::new(&format!("{modifier}-r"), Run, Some("Folio")),
+                KeyBinding::new(&format!("{modifier}-shift-r"), Rerun, Some("Folio")),
                 // These three answer only while the terminal holds the
                 // keyboard; elsewhere ⌘C and ⌘V stay the editor's, and ⌘W
                 // keeps closing the project.
@@ -69,14 +71,22 @@ fn main() {
                 KeyBinding::new("f7", NextHunk, Some("Folio")),
                 KeyBinding::new("shift-f7", PrevHunk, Some("Folio")),
                 KeyBinding::new(&format!("{modifier}-\\"), SplitEditor, Some("Folio")),
-                KeyBinding::new(&format!("{modifier}-alt-left"), FocusLeftPane, Some("Folio")),
+                KeyBinding::new(
+                    &format!("{modifier}-alt-left"),
+                    FocusLeftPane,
+                    Some("Folio"),
+                ),
                 KeyBinding::new(
                     &format!("{modifier}-alt-right"),
                     FocusRightPane,
                     Some("Folio"),
                 ),
                 KeyBinding::new(&format!("{modifier}-alt-up"), FocusLeftPane, Some("Folio")),
-                KeyBinding::new(&format!("{modifier}-alt-down"), FocusRightPane, Some("Folio")),
+                KeyBinding::new(
+                    &format!("{modifier}-alt-down"),
+                    FocusRightPane,
+                    Some("Folio"),
+                ),
                 KeyBinding::new(&format!("{modifier}-alt-b"), ToggleBlame, Some("Folio")),
                 KeyBinding::new(
                     &format!("{modifier}-shift-v"),
@@ -184,6 +194,11 @@ fn main() {
                     MenuItem::action("Replace in Project…", ProjectReplace),
                     MenuItem::separator(),
                     MenuItem::action("Save", Save),
+                    MenuItem::separator(),
+                    MenuItem::action("Run", Run),
+                    MenuItem::action("Run Again", Rerun),
+                    MenuItem::action("Stop", StopRun),
+                    MenuItem::separator(),
                     MenuItem::action("Close Project", CloseProject),
                 ]),
                 Menu::new("Edit").items([

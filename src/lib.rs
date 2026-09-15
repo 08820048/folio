@@ -8,6 +8,7 @@ pub mod editorconfig;
 pub mod fs_op;
 pub mod git;
 pub mod recent;
+pub mod run;
 pub mod search;
 pub mod session;
 pub mod settings;

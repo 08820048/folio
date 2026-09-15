@@ -77,23 +77,44 @@ impl DiskWatch {
 }
 
 /// The bool distinguishes tree changes from ordinary content/metadata writes.
-fn collect_event(queue: &mut HashMap<PathBuf, bool>, event: Event, roots: &[PathBuf], ignored: &[String]) {
+fn collect_event(
+    queue: &mut HashMap<PathBuf, bool>,
+    event: Event,
+    roots: &[PathBuf],
+    ignored: &[String],
+) {
     use notify::{EventKind, event::ModifyKind};
-    if matches!(event.kind, EventKind::Access(_)) { return; }
+    if matches!(event.kind, EventKind::Access(_)) {
+        return;
+    }
     if event.need_rescan() || queue.len() >= 4096 {
         // Bound event bursts without dropping work: a root means a full refresh.
         queue.clear();
         queue.extend(roots.iter().cloned().map(|root| (root, true)));
         return;
     }
-    let structure = !matches!(event.kind, EventKind::Modify(ModifyKind::Data(_) | ModifyKind::Metadata(_)));
+    let structure = !matches!(
+        event.kind,
+        EventKind::Modify(ModifyKind::Data(_) | ModifyKind::Metadata(_))
+    );
     for path in event.paths {
-        let Some(root) = roots.iter().filter(|root| path.starts_with(root)).max_by_key(|root| root.components().count()) else { continue; };
+        let Some(root) = roots
+            .iter()
+            .filter(|root| path.starts_with(root))
+            .max_by_key(|root| root.components().count())
+        else {
+            continue;
+        };
         let relative = path.strip_prefix(root).unwrap();
         let git = is_git_metadata(relative);
-        if !git && under_ignored(relative, ignored) { continue; }
+        if !git && under_ignored(relative, ignored) {
+            continue;
+        }
         let path = if git { root.join(".git") } else { path };
-        queue.entry(path).and_modify(|changed| *changed |= structure).or_insert(structure);
+        queue
+            .entry(path)
+            .and_modify(|changed| *changed |= structure)
+            .or_insert(structure);
         if queue.len() >= 4096 {
             queue.clear();
             queue.extend(roots.iter().cloned().map(|root| (root, true)));
@@ -184,28 +205,59 @@ mod tests {
 
     #[test]
     fn event_bursts_are_filtered_coalesced_and_bounded() {
-        use notify::{EventKind, event::{AccessKind, CreateKind, DataChange, ModifyKind}};
+        use notify::{
+            EventKind,
+            event::{AccessKind, CreateKind, DataChange, ModifyKind},
+        };
         let root = PathBuf::from("/repo");
         let roots = [root.clone()];
         let mut queue = HashMap::new();
         for (kind, path) in [
             (EventKind::Access(AccessKind::Read), "src/read.rs"),
-            (EventKind::Create(CreateKind::File), "node_modules/pkg/index.js"),
-            (EventKind::Modify(ModifyKind::Data(DataChange::Content)), "src/main.rs"),
-            (EventKind::Modify(ModifyKind::Data(DataChange::Content)), ".git/HEAD"),
+            (
+                EventKind::Create(CreateKind::File),
+                "node_modules/pkg/index.js",
+            ),
+            (
+                EventKind::Modify(ModifyKind::Data(DataChange::Content)),
+                "src/main.rs",
+            ),
+            (
+                EventKind::Modify(ModifyKind::Data(DataChange::Content)),
+                ".git/HEAD",
+            ),
         ] {
-            collect_event(&mut queue, Event::new(kind).add_path(root.join(path)), &roots, &ignored());
+            collect_event(
+                &mut queue,
+                Event::new(kind).add_path(root.join(path)),
+                &roots,
+                &ignored(),
+            );
         }
         assert_eq!(queue.len(), 2);
         assert_eq!(queue[&root.join("src/main.rs")], false);
         assert!(queue.contains_key(&root.join(".git")));
-        collect_event(&mut queue, Event::new(EventKind::Create(CreateKind::File)).add_path(root.join("src/main.rs")), &roots, &ignored());
+        collect_event(
+            &mut queue,
+            Event::new(EventKind::Create(CreateKind::File)).add_path(root.join("src/main.rs")),
+            &roots,
+            &ignored(),
+        );
         assert!(queue[&root.join("src/main.rs")]);
         for n in 0..10_000 {
-            collect_event(&mut queue, Event::new(EventKind::Create(CreateKind::File)).add_path(root.join(n.to_string())), &roots, &ignored());
+            collect_event(
+                &mut queue,
+                Event::new(EventKind::Create(CreateKind::File)).add_path(root.join(n.to_string())),
+                &roots,
+                &ignored(),
+            );
             assert!(queue.len() <= 4096);
         }
-        assert_eq!(queue.get(&root), Some(&true), "overflow must request a complete refresh");
+        assert_eq!(
+            queue.get(&root),
+            Some(&true),
+            "overflow must request a complete refresh"
+        );
     }
 
     fn ignored() -> Vec<String> {

@@ -65,6 +65,9 @@ pub(super) const RIGHT_MARGIN: Pixels = px(10.);
 pub(super) const LINE_NUMBER_RIGHT_MARGIN: Pixels = px(10.);
 const FOLD_ICON_WIDTH: Pixels = px(14.);
 const FOLD_ICON_HITBOX_WIDTH: Pixels = px(18.);
+const RUN_ICON_WIDTH: Pixels = px(12.);
+const RUN_ICON_HITBOX_WIDTH: Pixels = px(16.);
+const RUN_PLAY_SVG: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="6 3 20 12 6 21 6 3"/></svg>"#;
 const MAX_HIGHLIGHT_LINE_LENGTH: usize = 10_000;
 const FOLD_CHEVRON_RIGHT_SVG: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>"#;
 const FOLD_CHEVRON_DOWN_SVG: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>"#;
@@ -399,6 +402,10 @@ struct FoldIconLayout {
     line_number_hitbox: Hitbox,
     /// List of (display_row, is_folded, icon_element) pairs for each fold candidate
     icons: Vec<(usize, bool, gpui::AnyElement)>,
+}
+
+struct RunnableIconLayout {
+    icons: Vec<gpui::AnyElement>,
 }
 
 pub(super) struct TextElement {
@@ -1095,6 +1102,9 @@ impl TextElement {
             // Add extra space for fold icons
             line_number_width += FOLD_ICON_HITBOX_WIDTH
         }
+        if !state.runnable_lines.is_empty() {
+            line_number_width += RUN_ICON_HITBOX_WIDTH
+        }
 
         (line_number_width, line_number_len)
     }
@@ -1413,6 +1423,120 @@ impl TextElement {
         }
     }
 
+    fn layout_run_icons(
+        &self,
+        origin_x: Pixels,
+        bounds: &Bounds<Pixels>,
+        last_layout: &LastLayout,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> RunnableIconLayout {
+        if last_layout.runnable_gutter == px(0.) {
+            return RunnableIconLayout { icons: Vec::new() };
+        }
+        struct RunInfo {
+            buffer_line: usize,
+            offset_y: Pixels,
+        }
+        let infos: Vec<RunInfo> = {
+            let state = self.state.read(cx);
+            if state.runnable_lines.is_empty() {
+                return RunnableIconLayout { icons: Vec::new() };
+            }
+            let mut offset_y = last_layout.visible_top;
+            let mut infos = Vec::new();
+            for (line, &buffer_line) in last_layout
+                .lines
+                .iter()
+                .zip(last_layout.visible_buffer_lines.iter())
+            {
+                if state.runnable_lines.binary_search(&buffer_line).is_ok() {
+                    infos.push(RunInfo {
+                        buffer_line,
+                        offset_y,
+                    });
+                }
+                offset_y += line.wrapped_lines.len() * last_layout.line_height;
+            }
+            infos
+        };
+        let line_height = last_layout.line_height;
+        let icon_origin = point(
+            (RUN_ICON_HITBOX_WIDTH - RUN_ICON_WIDTH).half(),
+            (line_height - RUN_ICON_WIDTH).half(),
+        );
+        let mut icons = Vec::with_capacity(infos.len());
+        for info in infos {
+            let icon_bounds = Bounds::new(
+                point(
+                    origin_x + icon_origin.x,
+                    bounds.origin.y + icon_origin.y + info.offset_y,
+                ),
+                size(RUN_ICON_HITBOX_WIDTH, line_height),
+            );
+            let child = self
+                .state
+                .read(cx)
+                .runnable_icon
+                .as_ref()
+                .map(|render| render(cx))
+                .unwrap_or_else(|| {
+                    gpui::canvas(
+                        |_, _, _| {},
+                        move |bounds, _, window, cx| {
+                            let color = window.text_style().color;
+                            let _ = window.paint_svg(
+                                bounds,
+                                "input-run-play".into(),
+                                Some(RUN_PLAY_SVG),
+                                gpui::TransformationMatrix::default(),
+                                color,
+                                cx,
+                            );
+                        },
+                    )
+                    .size(RUN_ICON_WIDTH)
+                    .into_any_element()
+                });
+            let buffer_line = info.buffer_line;
+            let mut icon = gpui::div()
+                .id(("run", buffer_line))
+                .size(RUN_ICON_WIDTH)
+                .cursor_pointer()
+                .child(child)
+                .on_mouse_down(MouseButton::Left, {
+                    let state = self.state.clone();
+                    move |_, window: &mut Window, cx: &mut App| {
+                        cx.stop_propagation();
+                        let Some(on_click) = state.read(cx).on_runnable.clone() else {
+                            return;
+                        };
+                        on_click(buffer_line, window, cx);
+                    }
+                })
+                .into_any_element();
+            icon.prepaint_as_root(
+                icon_bounds.origin,
+                icon_bounds.size.into(),
+                window,
+                cx,
+            );
+            icons.push(icon);
+        }
+        RunnableIconLayout { icons }
+    }
+
+    fn paint_run_icons(
+        &mut self,
+        layout: &mut RunnableIconLayout,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        for icon in layout.icons.iter_mut() {
+            icon.paint(window, cx);
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn layout_lines(
         state: &InputBaseState,
@@ -1690,6 +1814,7 @@ pub(super) struct PrepaintState {
     bounds: Bounds<Pixels>,
     /// Fold icon layout data
     fold_icon_layout: FoldIconLayout,
+    runnable_icon_layout: RunnableIconLayout,
     // Inline completion rendering data
     /// Shaped ghost lines to paint after cursor row (completion lines 2+)
     ghost_lines: Vec<ShapedLine>,
@@ -1926,6 +2051,11 @@ impl Element for TextElement {
             wrap_width,
             wrapping_indent,
             line_number_width,
+            runnable_gutter: if state.runnable_lines.is_empty() {
+                px(0.)
+            } else {
+                RUN_ICON_HITBOX_WIDTH
+            },
             lines: Rc::new(vec![]),
             cursor_bounds: None,
             text_align: state.text_align,
@@ -2181,6 +2311,8 @@ impl Element for TextElement {
             )));
         let fold_icon_layout =
             self.layout_fold_icons(original_x, &bounds, &last_layout, window, cx);
+        let runnable_icon_layout =
+            self.layout_run_icons(original_x, &bounds, &last_layout, window, cx);
 
         PrepaintState {
             bounds,
@@ -2199,6 +2331,7 @@ impl Element for TextElement {
             document_color_paths,
             indent_guides_path,
             fold_icon_layout,
+            runnable_icon_layout,
             ghost_first_line,
             ghost_lines,
             ghost_lines_height,
@@ -2429,7 +2562,10 @@ impl Element for TextElement {
                 .iter()
                 .zip(prepaint.last_layout.visible_buffer_lines.iter())
             {
-                let p = point(input_bounds.origin.x, origin.y + offset_y);
+                let p = point(
+                    input_bounds.origin.x + prepaint.last_layout.runnable_gutter,
+                    origin.y + offset_y,
+                );
                 let is_active = prepaint.current_row == Some(buffer_line);
 
                 let height = line_height * lines.len() as f32;
@@ -2465,6 +2601,7 @@ impl Element for TextElement {
             window,
             cx,
         );
+        self.paint_run_icons(&mut prepaint.runnable_icon_layout, window, cx);
 
         self.state.update(cx, |state, cx| {
             state.last_layout = Some(prepaint.last_layout.clone());

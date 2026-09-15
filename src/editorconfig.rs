@@ -14,8 +14,8 @@
 //! `root` is true ending the search upward.
 
 use std::{
-    io::Read,
     fs,
+    io::Read,
     path::{Path, PathBuf},
 };
 
@@ -138,7 +138,11 @@ impl Config {
                 let mut depth = 0usize;
                 let patterns = section
                     .split(|c| {
-                        match c { '{' | '[' => depth += 1, '}' | ']' => depth = depth.saturating_sub(1), _ => {} }
+                        match c {
+                            '{' | '[' => depth += 1,
+                            '}' | ']' => depth = depth.saturating_sub(1),
+                            _ => {}
+                        }
                         c == ',' && depth == 0
                     })
                     .map(|pattern| pattern.trim().to_string())
@@ -243,31 +247,55 @@ fn read_config(path: &Path) -> Option<String> {
 }
 
 fn matches(pattern: &str, path: &str) -> bool {
-    if pattern.len() > 4096 { return false; }
+    if pattern.len() > 4096 {
+        return false;
+    }
     let mut expression = String::from(r"\A(?:");
-    if !glob_expression(pattern, &mut expression, 0) { return false; }
+    if !glob_expression(pattern, &mut expression, 0) {
+        return false;
+    }
     expression.push_str(r")\z");
-    regex::RegexBuilder::new(&expression).size_limit(1024 * 1024)
-        .build().is_ok_and(|matcher| matcher.is_match(path))
+    regex::RegexBuilder::new(&expression)
+        .size_limit(1024 * 1024)
+        .build()
+        .is_ok_and(|matcher| matcher.is_match(path))
 }
 
 /// Translate to the existing non-backtracking engine. Brace alternatives stay
 /// alternatives instead of being expanded into an exponential list of strings.
 fn glob_expression(mut pattern: &str, out: &mut String, depth: usize) -> bool {
-    if depth > 32 { return false; }
+    if depth > 32 {
+        return false;
+    }
     while let Some(head) = pattern.chars().next() {
         match head {
-            '*' if pattern.starts_with("**") => { out.push_str("(?s:.*)"); pattern = &pattern[2..]; }
-            '*' => { out.push_str("[^/]*"); pattern = &pattern[1..]; }
-            '?' => { out.push_str("[^/]"); pattern = &pattern[1..]; }
+            '*' if pattern.starts_with("**") => {
+                out.push_str("(?s:.*)");
+                pattern = &pattern[2..];
+            }
+            '*' => {
+                out.push_str("[^/]*");
+                pattern = &pattern[1..];
+            }
+            '?' => {
+                out.push_str("[^/]");
+                pattern = &pattern[1..];
+            }
             '[' if pattern[1..].contains(']') => {
                 let end = pattern.find(']').unwrap();
                 let class = &pattern[1..end];
                 out.push_str("[[");
-                let class = if let Some(rest) = class.strip_prefix('!') { out.push('^'); rest } else { class };
+                let class = if let Some(rest) = class.strip_prefix('!') {
+                    out.push('^');
+                    rest
+                } else {
+                    class
+                };
                 // Preserve ranges, escaping regex set-operation syntax.
                 for c in class.chars() {
-                    if matches!(c, '[' | ']' | '\\' | '&' | '~' | '^') { out.push('\\'); }
+                    if matches!(c, '[' | ']' | '\\' | '&' | '~' | '^') {
+                        out.push('\\');
+                    }
                     out.push(c);
                 }
                 out.push_str("]&&[^/]]");
@@ -280,7 +308,13 @@ fn glob_expression(mut pattern: &str, out: &mut String, depth: usize) -> bool {
                 for (i, c) in pattern.char_indices() {
                     match c {
                         '{' => nesting += 1,
-                        '}' => { nesting -= 1; if nesting == 0 { close = Some(i); break; } }
+                        '}' => {
+                            nesting -= 1;
+                            if nesting == 0 {
+                                close = Some(i);
+                                break;
+                            }
+                        }
                         ',' if nesting == 1 => commas.push(i),
                         _ => {}
                     }
@@ -289,17 +323,25 @@ fn glob_expression(mut pattern: &str, out: &mut String, depth: usize) -> bool {
                     out.push_str("(?:");
                     let mut start = 1;
                     for end in commas.into_iter().chain(std::iter::once(close)) {
-                        if start > 1 { out.push('|'); }
-                        if !glob_expression(&pattern[start..end], out, depth + 1) { return false; }
+                        if start > 1 {
+                            out.push('|');
+                        }
+                        if !glob_expression(&pattern[start..end], out, depth + 1) {
+                            return false;
+                        }
                         start = end + 1;
                     }
                     out.push(')');
                     pattern = &pattern[close + 1..];
                 } else {
-                    out.push_str(r"\{"); pattern = &pattern[1..];
+                    out.push_str(r"\{");
+                    pattern = &pattern[1..];
                 }
             }
-            c => { out.push_str(&regex::escape(&c.to_string())); pattern = &pattern[c.len_utf8()..]; }
+            c => {
+                out.push_str(&regex::escape(&c.to_string()));
+                pattern = &pattern[c.len_utf8()..];
+            }
         }
     }
     true
@@ -333,7 +375,11 @@ mod tests {
         assert!(matches(&"{a,b}".repeat(24), &"a".repeat(24)));
         assert!(started.elapsed() < std::time::Duration::from_secs(2));
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(tmp.path().join(".editorconfig"), " ".repeat(CONFIG_LIMIT as usize + 1)).unwrap();
+        std::fs::write(
+            tmp.path().join(".editorconfig"),
+            " ".repeat(CONFIG_LIMIT as usize + 1),
+        )
+        .unwrap();
         assert!(read_config(&tmp.path().join(".editorconfig")).is_none());
     }
 
@@ -366,7 +412,12 @@ mod tests {
         assert!(!matches("[!m]ain.rs", "main.rs"));
         assert!(matches("[a-z]ain.rs", "main.rs"));
         assert!(!matches("[!a]", "/"));
-        assert_eq!(rules("[{*.rs,*.toml}]\nindent_size=2\n", "main.rs").indent(settings()).columns, 2);
+        assert_eq!(
+            rules("[{*.rs,*.toml}]\nindent_size=2\n", "main.rs")
+                .indent(settings())
+                .columns,
+            2
+        );
         assert!(matches("{*.rs,*.toml}", "main.toml"));
         assert!(!matches("{*.rs,*.toml}", "main.md"));
         // A group with nothing to choose between is not an expansion.

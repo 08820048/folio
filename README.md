@@ -61,6 +61,8 @@ next launch, with each project's tabs in order and the file that was on screen
 | Toggle activity bar | title-bar button | title-bar button |
 | Toggle sidebar | ⌘B | Ctrl+B |
 | Toggle terminal | ⌘J | Ctrl+J |
+| Run | ⌘R | Ctrl+R |
+| Run again | ⇧⌘R | Ctrl+Shift+R |
 | Toggle comment | ⌘/ | Ctrl+/ |
 | Fold | ⌥⌘[ | Ctrl+Alt+[ |
 | Unfold | ⌥⌘] | Ctrl+Alt+] |
@@ -88,6 +90,18 @@ subdirectory state, and it also answers to Enter, Space and the left and right
 arrows. The file tree takes the arrow keys and Enter. `⌘J` opens a terminal
 drawer under the workspace, one set of tabs per project. Hiding it keeps the
 children running; closing the last tab, or the project, takes them with it.
+`⌘R` runs the current file, or the test / `main` whose body the caret is in,
+in a dedicated Run tab — Rust, Python, Go, JavaScript, Ruby and shell. A Play
+control on those lines and in the title bar does the same. Dirty buffers save
+first. The command is the tab's child, started in the crate or project
+directory by a login shell (so PATH is the one your terminal has); when it
+exits the tab is done and no prompt follows. While it is still running, Play
+(and `⌘R`, and File ▸ Stop) become Stop: the first press is Ctrl-C, the next
+SIGTERM, then SIGKILL, for programs that swallow the interrupt. `⇧⌘R`
+repeats the last command once that tab is idle. `⌘J` is still the
+interactive project shell, a separate tab. On Windows the commands are
+best-effort: they go through `cmd.exe` and expect `python`, `cargo`, `go`,
+`node` on PATH.
 While the terminal holds the keyboard, `⌘C` / `⌘V` copy and paste its
 selection and `⌘W` closes the tab — elsewhere those keys stay the editor's.
 Printed `http(s)://` URLs and OSC 8 hyperlinks are underlined; `⌃`-click

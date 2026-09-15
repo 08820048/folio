@@ -354,7 +354,11 @@ pub fn duplicate_lines(text: &str, selection: Range<usize>) -> (String, Range<us
 
 /// Move the lines a selection touches one line down or up. `None` when the
 /// block is already against that edge of the file.
-pub fn move_lines(text: &str, selection: Range<usize>, down: bool) -> Option<(String, Range<usize>)> {
+pub fn move_lines(
+    text: &str,
+    selection: Range<usize>,
+    down: bool,
+) -> Option<(String, Range<usize>)> {
     let span = line_span(text, selection);
     if down {
         if span.end >= text.len() {
@@ -466,8 +470,14 @@ mod comment_tests {
         assert_eq!(block_comment("rust"), Some(("/*", "*/")));
         assert_eq!(block_comment("html"), Some(("<!--", "-->")));
         assert_eq!(block_comment("python"), None);
-        assert_eq!(toggle_block_comments("fn x() {}", "/*", "*/"), "/* fn x() {} */");
-        assert_eq!(toggle_block_comments("/* fn x() {} */", "/*", "*/"), "fn x() {}");
+        assert_eq!(
+            toggle_block_comments("fn x() {}", "/*", "*/"),
+            "/* fn x() {} */"
+        );
+        assert_eq!(
+            toggle_block_comments("/* fn x() {} */", "/*", "*/"),
+            "fn x() {}"
+        );
     }
 
     #[test]
