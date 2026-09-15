@@ -150,11 +150,10 @@ const NOTICE_LEAVE: Duration = Duration::from_millis(180);
 const TREE_ROW_HEIGHT: f32 = 27.;
 /// Indent of a tree row per nesting level.
 const TREE_ROW_INDENT: f32 = 16.;
-/// Where the project header's folder icon sits inside the list: `px_3`
-/// (12) + the `xsmall` chevron (12) + `gap_2` (8). Top-level rows are
-/// `depth == 1`, so their icon lands one indent to the right of it and
-/// every deeper level steps in by the same amount.
-const TREE_ROW_PAD: f32 = 12. + 12. + 8.;
+/// Where the project header's folder icon sits inside the list: its `px_3`.
+/// Top-level rows are `depth == 1`, so their icon lands one indent to the
+/// right of it and every deeper level steps in by the same amount.
+const TREE_ROW_PAD: f32 = 12.;
 /// Width of a `small` icon, used to center guides under the parent icon.
 const TREE_ICON_SIZE: f32 = 14.;
 /// Project root header. Taller than a file row so the chevron and folder
@@ -362,10 +361,9 @@ mod tree_guide_tests {
 
     #[core::prelude::v1::test]
     fn each_level_steps_in_by_one_indent_from_the_header_icon() {
-        // The header draws `px_3` + a 12px chevron + `gap_2` before its
-        // folder icon; a top-level row (depth 1) must start one indent past
-        // that, not on top of it.
-        let header_icon = 12. + 12. + 8.;
+        // The header draws its folder icon right after `px_3`; a top-level
+        // row (depth 1) must start one indent past that, not on top of it.
+        let header_icon = 12.;
         assert_eq!(tree_row_indent(1), px(header_icon + TREE_ROW_INDENT));
         assert_eq!(tree_row_indent(2) - tree_row_indent(1), px(TREE_ROW_INDENT));
         // The level-0 guide runs under the header icon's center.
@@ -8279,7 +8277,6 @@ impl Folio {
             .flex_shrink_0()
             .mx_1()
             .px_3()
-            .rounded(cx.theme().radius)
             .flex()
             .items_center()
             .gap_2()
@@ -8349,14 +8346,6 @@ impl Folio {
                 }
                 cx.stop_propagation();
             }))
-            .child(
-                Icon::new(if expanded {
-                    IconName::ChevronDown
-                } else {
-                    IconName::ChevronRight
-                })
-                .xsmall(),
-            )
             .child(
                 Icon::new(if expanded {
                     IconName::FolderOpen
@@ -8586,7 +8575,6 @@ impl Folio {
                         } else {
                             IconName::File
                         };
-                        let radius = cx.theme().radius;
                         let focus = this
                             .tree_hover_row
                             .filter(|&ix| ix < this.project.rows.len())
@@ -8602,7 +8590,6 @@ impl Folio {
                             .relative()
                             .w_full()
                             .h(px(TREE_ROW_HEIGHT))
-                            .rounded(radius)
                             .pl(tree_row_indent(row.depth))
                             .pr_3()
                             .flex()
@@ -8700,7 +8687,6 @@ impl Folio {
                                     div()
                                         .absolute()
                                         .inset_0()
-                                        .rounded(radius)
                                         .border_1()
                                         .border_color(tree_row_selected_border(cx)),
                                 )
@@ -8736,7 +8722,6 @@ impl Folio {
             .relative()
             .w_full()
             .h(px(TREE_ROW_HEIGHT))
-            .rounded(cx.theme().radius)
             .pl(tree_row_indent(depth))
             .pr_3()
             .flex()
