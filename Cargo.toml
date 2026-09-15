@@ -111,3 +111,9 @@ strip = true
 # Experiment: can a workspace-internal path dependency be redirected?
 [patch."https://github.com/longbridge/gpui-component"]
 gpui-base = { path = "vendor/gpui-base" }
+
+# crates.io 1.0.0 passes -Wno-unused-parameter to every C compiler; cl.exe
+# rejects it (D8021) and Windows release builds stop there. Upstream fixed
+# the flags and has not cut a new crate.
+[patch.crates-io]
+tree-sitter-scss = { git = "https://github.com/tree-sitter-grammars/tree-sitter-scss", rev = "9ab738d22bb248771d42e8678d1a307d14990df1" }

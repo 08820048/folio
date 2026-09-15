@@ -1,9 +1,9 @@
 # Folio on Windows
 
 macOS still ships from a local machine (`./scripts/release.sh`). Windows
-builds on GitHub Actions when a version tag is pushed, then the zip is
-uploaded to the same `folio-releases` R2 bucket. The website download stays
-**Coming soon** until there is a signed installer.
+builds on GitHub Actions when a version tag is pushed, then an installer
+`.exe` is uploaded to the same `folio-releases` R2 bucket. The website
+download stays **Coming soon** until that installer is signed.
 
 ## What already works in the source
 
@@ -30,7 +30,8 @@ rustup toolchain install 1.95.0
 cargo run --locked
 ```
 
-`rust-toolchain.toml` pins the same compiler as macOS. A zip matching CI:
+`rust-toolchain.toml` pins the same compiler as macOS. A matching installer
+needs Inno Setup 6 and ImageMagick:
 
 ```powershell
 pwsh -File scripts/package-windows.ps1
@@ -52,12 +53,12 @@ git push origin "v$(sed -n 's/^VERSION=//p' packaging/release.env | head -n 1)"
 ```
 
 `.github/workflows/windows-release.yml` checks that the tag is `v$VERSION`,
-builds with `--locked --release` on `windows-latest`, zips `Folio.exe` with
-`LICENSE` and `NOTICE`, and uploads:
+builds with `--locked --release` on `windows-latest`, wraps `Folio.exe` in an
+Inno Setup installer, and uploads:
 
 ```text
-https://pub-307aebc4dfa4468d80e05e193c8f9c5b.r2.dev/Folio-<version>-<build>-windows-x64.zip
-https://pub-307aebc4dfa4468d80e05e193c8f9c5b.r2.dev/Folio-latest-windows.zip
+https://pub-307aebc4dfa4468d80e05e193c8f9c5b.r2.dev/Folio-<version>-<build>-windows-x64.exe
+https://pub-307aebc4dfa4468d80e05e193c8f9c5b.r2.dev/Folio-latest-windows.exe
 ```
 
 No GitHub Release is created. Sparkle does not apply.
@@ -68,14 +69,16 @@ The workflow needs one repository secret:
 CLOUDFLARE_API_TOKEN    R2 write on the folio-releases bucket
 ```
 
-`CLOUDFLARE_ACCOUNT_ID` is already in `packaging/release.env`. Re-running the
-failed tag job from the Actions UI is enough; do not retag the same
-`Folio-<version>-<build>-windows-x64.zip` after users have fetched it — bump
+`CLOUDFLARE_ACCOUNT_ID` is already in `packaging/release.env`. Re-running a
+failed job rebuilds the commit the tag points at. After the workflow changes,
+move the tag to the new commit (the first Windows build of `v0.1.2` never
+published an artifact). Do not overwrite
+`Folio-<version>-<build>-windows-x64.exe` after users have fetched it — bump
 `BUILD` instead, the same rule as the Mac DMG.
 
 ## Still to do before a public download
 
-- A real installer (signed `.exe` / `.msi`), not an unsigned zip
+- Authenticode signing of the installer
 - Title bar / window-chrome pass on Windows 11 DPI
 - IME candidate window position
 - End-to-end of trash, Explorer, the terminal, and Run

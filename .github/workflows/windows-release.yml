@@ -46,24 +46,27 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: windows-msvc-release
+          shared-key: windows-msvc-release-exe
           cache-on-failure: true
 
-      - name: Package Folio.exe
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      - name: Package the Windows installer
         shell: pwsh
         run: ./scripts/package-windows.ps1
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.ZIP_KEY }}
-          path: ${{ env.ZIP_PATH }}
+          name: ${{ env.EXE_KEY }}
+          path: ${{ env.EXE_PATH }}
           if-no-files-found: error
 
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
 
-      - name: Upload the zip to R2
+      - name: Upload the installer to R2
         shell: bash
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -79,13 +82,13 @@ jobs:
             cache=$2
             npx --yes wrangler@4.127.1 r2 object put "$R2_BUCKET/$key" \
               --remote \
-              --file="$ZIP_PATH" \
-              --content-type="application/zip" \
+              --file="$EXE_PATH" \
+              --content-type="application/vnd.microsoft.portable-executable" \
               --cache-control="$cache"
           }
-          put "$ZIP_KEY" "public, max-age=31536000, immutable"
+          put "$EXE_KEY" "public, max-age=31536000, immutable"
           put "$LATEST_KEY" "no-cache"
           printf '\nPublished Folio %s (build %s) for Windows\n' "$VERSION" "$BUILD"
-          printf '  Zip     https://pub-307aebc4dfa4468d80e05e193c8f9c5b.r2.dev/%s\n' "$ZIP_KEY"
+          printf '  Exe     https://pub-307aebc4dfa4468d80e05e193c8f9c5b.r2.dev/%s\n' "$EXE_KEY"
           printf '  Latest  https://pub-307aebc4dfa4468d80e05e193c8f9c5b.r2.dev/%s\n' "$LATEST_KEY"
           printf 'No GitHub Release was created. macOS is still ./scripts/release.sh.\n'

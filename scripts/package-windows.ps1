@@ -1,6 +1,6 @@
-# Build a Windows zip: Folio.exe plus the license files. Called from
+# Build a Windows installer exe. Called from
 # .github/workflows/windows-release.yml on a version tag; also runnable
-# on a Windows machine. Does not sign, and does not upload.
+# on a Windows machine with Inno Setup 6. Does not sign, and does not upload.
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
@@ -38,6 +38,7 @@ if (-not (Test-Path -LiteralPath $exe)) {
 
 $stage = Join-Path $root "target/windows-stage"
 $artifacts = Join-Path $root "target/release-artifacts"
+$ico = Join-Path $root "target/folio.ico"
 Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Path $stage | Out-Null
 New-Item -ItemType Directory -Path $artifacts -Force | Out-Null
@@ -45,23 +46,51 @@ Copy-Item -LiteralPath $exe -Destination (Join-Path $stage "Folio.exe")
 Copy-Item -LiteralPath (Join-Path $root "LICENSE") -Destination $stage
 Copy-Item -LiteralPath (Join-Path $root "NOTICE") -Destination $stage
 
-$zipName = "Folio-$version-$build-windows-x64.zip"
-$zipPath = Join-Path $artifacts $zipName
-Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue
-Compress-Archive -Path (Join-Path $stage "*") -DestinationPath $zipPath -CompressionLevel Optimal
+$magick = Get-Command magick -ErrorAction SilentlyContinue
+if ($magick) {
+    & magick (Join-Path $root "assets/app-icon/logo-1024.png") -define icon:auto-resize=256,128,64,48,32,16 $ico
+    if ($LASTEXITCODE -ne 0) {
+        throw "magick failed to write $ico"
+    }
+} else {
+    throw "ImageMagick (magick) is required to embed the installer icon"
+}
 
-Write-Host "Windows zip $zipPath"
+$iscc = @(
+    (Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"),
+    (Join-Path $env:ProgramFiles "Inno Setup 6\ISCC.exe")
+) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+if (-not $iscc) {
+    throw "Inno Setup 6 is not installed (ISCC.exe)"
+}
+
+& $iscc `
+    "/DMyAppVersion=$version" `
+    "/DMyAppBuild=$build" `
+    "/DFolioRoot=$($root.Replace('\', '/'))" `
+    (Join-Path $root "packaging/windows/folio.iss")
+if ($LASTEXITCODE -ne 0) {
+    throw "ISCC failed"
+}
+
+$exeName = "Folio-$version-$build-windows-x64.exe"
+$exePath = Join-Path $artifacts $exeName
+if (-not (Test-Path -LiteralPath $exePath)) {
+    throw "Missing installer $exePath"
+}
+
+Write-Host "Windows installer $exePath"
 
 if ($env:GITHUB_ENV) {
-    $unixZip = $zipPath.Replace('\', '/')
+    $unixExe = $exePath.Replace('\', '/')
     $lines = @(
         "VERSION=$version"
         "BUILD=$build"
         "R2_BUCKET=$bucket"
         "CLOUDFLARE_ACCOUNT_ID=$account"
-        "ZIP_KEY=$zipName"
-        "ZIP_PATH=$unixZip"
-        "LATEST_KEY=Folio-latest-windows.zip"
+        "EXE_KEY=$exeName"
+        "EXE_PATH=$unixExe"
+        "LATEST_KEY=Folio-latest-windows.exe"
     )
     Add-Content -LiteralPath $env:GITHUB_ENV -Value $lines -Encoding utf8NoBOM
 }
