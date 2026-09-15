@@ -31,10 +31,26 @@ export type Release = {
 /** Newest first. */
 export const releases: Release[] = [
   {
+    version: "0.1.3",
+    build: 6,
+    date: "2026-09-15",
+    latest: true,
+    summary: "File-type icons in the tree, and a tighter file list.",
+    notes: [
+      {
+        kind: "added",
+        text: "Files in the tree show a matching icon for the language or format.",
+      },
+      {
+        kind: "improved",
+        text: "The file list is tighter, with indent that follows the tree.",
+      },
+    ],
+  },
+  {
     version: "0.1.2",
     build: 5,
     date: "2026-09-15",
-    latest: true,
     summary: "Run code from the editor, and a few places that used to get in the way.",
     notes: [
       {
