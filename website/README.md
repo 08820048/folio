@@ -51,7 +51,8 @@ there is no automatic deployment on Git pushes.
 This route and security headers are applied by Pages, not the local dev server.
 Bind a domain in Cloudflare Pages → folio-website → Custom domains.
 Update the download platform requirements if future release targets change.
-The source license is PolyForm Noncommercial 1.0.0; do not advertise commercial use as free.
+The hero keeps a disabled **Windows · Coming soon** button until a Windows
+build is on R2. The source license is PolyForm Noncommercial 1.0.0; do not advertise commercial use as free.
 
 ## Design notes
 

@@ -12,7 +12,7 @@ import { Accordion, AccordionItem, AccordionPanel, AccordionTrigger } from "@/co
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Kbd } from "@/components/ui/kbd";
-import { Download } from "lucide-react";
+import { AppleIcon, WindowsIcon } from "@/components/brand-icons";
 
 export function Principles() {
   return (
@@ -242,11 +242,12 @@ const faqs = [
     ),
   },
   {
-    id: "mac",
-    question: "Which Macs are supported?",
+    id: "platforms",
+    question: "Which platforms are supported?",
     answer: (
       <>
-        Apple silicon (M-series) builds, requiring macOS 12 or newer. Intel Macs, Windows, and
+        Apple silicon (M-series) builds, requiring macOS 12 or newer. A Windows build is on the
+        way — the download button on this page says Coming soon until one ships. Intel Macs and
         Linux have no official builds yet.
       </>
     ),
@@ -351,16 +352,26 @@ export function FinalCta() {
             </h2>
           </div>
         </div>
-        <div className="w-full sm:w-auto">
+        <div className="flex w-full flex-col gap-3 sm:w-auto">
           <Button
             size="lg"
             render={<a href="/download" />}
             className="w-full bg-[#8de3bc] text-[#05231c] inset-shadow-[0_1px_--theme(--color-white/50%)] hover:bg-[#a9edcf] sm:w-auto"
           >
-            <Download />
+            <AppleIcon />
             Download Folio for macOS
           </Button>
-          <p className="mt-3 text-center text-[10px] text-[#8db3a9]">
+          <Button
+            size="lg"
+            variant="outline"
+            disabled
+            aria-label="Windows version coming soon"
+            className="w-full border-[#8db3a9]/35 bg-transparent text-[#8db3a9] sm:w-auto"
+          >
+            <WindowsIcon />
+            Windows · Coming soon
+          </Button>
+          <p className="text-center text-[10px] text-[#8db3a9]">
             macOS 12+ · Apple silicon
           </p>
         </div>

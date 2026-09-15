@@ -219,7 +219,8 @@ pub fn delete(path: &Path) -> io::Result<()> {
 
 /// Move an entry to the platform's trash, where the user can recover it.
 pub fn trash(path: &Path) -> io::Result<()> {
-    run(trash_command(path))
+    // PowerShell on Windows is a console host; hide it. Finder / gio are GUI.
+    run_hidden(trash_command(path))
 }
 
 #[cfg(target_os = "macos")]
@@ -298,7 +299,16 @@ fn copy(source: &Path, destination: &Path) -> io::Result<()> {
         {
             std::os::unix::fs::symlink(target, destination)
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::FileTypeExt;
+            if meta.file_type().is_symlink_dir() {
+                std::os::windows::fs::symlink_dir(target, destination)
+            } else {
+                std::os::windows::fs::symlink_file(target, destination)
+            }
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             let _ = (target, destination);
             Err(io::Error::other(
@@ -344,8 +354,12 @@ fn reveal_command(path: &Path) -> Command {
 
 #[cfg(target_os = "windows")]
 fn reveal_command(path: &Path) -> Command {
+    // `/select,` is one switch: the path is glued to the comma so a space
+    // in the path is not a second argument.
     let mut command = Command::new("explorer");
-    command.arg(format!("/select,{}", path.display()));
+    let mut arg = std::ffi::OsString::from("/select,");
+    arg.push(path);
+    command.arg(arg);
     command
 }
 
@@ -400,11 +414,26 @@ fn terminal_command(dir: &Path) -> Command {
     command
 }
 
-fn run(mut command: Command) -> io::Result<()> {
+fn run(command: Command) -> io::Result<()> {
+    finish(command, false)
+}
+
+fn run_hidden(command: Command) -> io::Result<()> {
+    finish(command, true)
+}
+
+fn finish(mut command: Command, hide_console: bool) -> io::Result<()> {
+    #[cfg(windows)]
+    if hide_console {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
     let status = command.status()?;
-    // Windows' `explorer` exits non-zero even when it opened the window, so
-    // only the spawn result is trustworthy there.
-    if cfg!(target_os = "windows") || status.success() {
+    // `explorer` (and `start`) exit non-zero even when the window opened, so
+    // only the spawn result is trustworthy for those. Hidden helpers like
+    // the Recycle Bin script must still report failure.
+    if status.success() || (cfg!(target_os = "windows") && !hide_console) {
         Ok(())
     } else {
         Err(io::Error::other("External command failed"))

@@ -1,4 +1,4 @@
-import { Download } from "lucide-react";
+import { AppleIcon, WindowsIcon } from "@/components/brand-icons";
 import { Button } from "@/components/ui/button";
 import { TypewriterEffectSmooth } from "@/components/ui/typewriter-effect";
 
@@ -21,10 +21,19 @@ export function Hero() {
         <br />
         Read the code, untangle the changes, make a few well-placed edits.
       </p>
-      <div className="mt-9 flex flex-wrap items-center justify-center gap-6">
+      <div className="mt-9 flex flex-wrap items-center justify-center gap-3">
         <Button size="lg" render={<a href="/download" />}>
-          <Download />
+          <AppleIcon />
           Download for macOS
+        </Button>
+        <Button
+          size="lg"
+          variant="outline"
+          disabled
+          aria-label="Windows version coming soon"
+        >
+          <WindowsIcon />
+          Windows · Coming soon
         </Button>
       </div>
     </section>

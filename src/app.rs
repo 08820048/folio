@@ -2892,8 +2892,13 @@ impl Folio {
         let unsaved = self.unsaved_under(&path);
         let detail = match (trashed, unsaved) {
             (true, unsaved) => {
+                let bin = if cfg!(target_os = "windows") {
+                    "Recycle Bin"
+                } else {
+                    "Trash"
+                };
                 format!(
-                    "{name} and its contents will move to the Trash. {unsaved} files have unsaved changes."
+                    "{name} and its contents will move to the {bin}. {unsaved} files have unsaved changes."
                 )
             }
             (false, 0) => format!(
@@ -2903,7 +2908,13 @@ impl Folio {
                 "{name} and its contents will be deleted permanently. This cannot be undone. {unsaved} files have unsaved changes."
             ),
         };
-        let confirm = if trashed { "Move to Trash" } else { "Delete" };
+        let confirm = if !trashed {
+            "Delete"
+        } else if cfg!(target_os = "windows") {
+            "Move to Recycle Bin"
+        } else {
+            "Move to Trash"
+        };
         self.prompting = true;
         cx.notify();
         let answer = window.prompt(
@@ -3290,6 +3301,8 @@ impl Folio {
             MenuItem::ToggleReadOnly if self.is_read_only(path) => "Make Tab Writable".into(),
             MenuItem::PinTab if self.is_pinned(path) => "Unpin Tab".into(),
             MenuItem::Blame if self.blame.is_some() => "Hide Blame".into(),
+            MenuItem::Reveal if cfg!(target_os = "windows") => "Reveal in File Explorer".into(),
+            MenuItem::Trash if cfg!(target_os = "windows") => "Move to Recycle Bin".into(),
             _ => label.into(),
         }
     }
@@ -5625,7 +5638,12 @@ impl Folio {
     /// opening a web page that is not the installer.
     fn check_for_updates(&mut self, cx: &mut Context<Self>) {
         if !crate::sparkle::check() {
-            self.inform("Updates", "Updates ship in the packaged Mac app.", cx);
+            let detail = if cfg!(target_os = "macos") {
+                "Updates ship in the packaged Mac app."
+            } else {
+                "Automatic updates are not available in this build."
+            };
+            self.inform("Updates", detail, cx);
         }
     }
 
@@ -11119,9 +11137,19 @@ const SETTINGS_WINDOW_MIN: Size<Pixels> = size(px(460.), px(360.));
 const SETTINGS_WINDOW_DEFAULT: Size<Pixels> = size(px(918.), px(683.));
 
 fn home_dir() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
+    #[cfg(windows)]
+    {
+        std::env::var_os("USERPROFILE")
+            .or_else(|| std::env::var_os("HOME"))
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."))
+    }
+    #[cfg(not(windows))]
+    {
+        std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."))
+    }
 }
 
 pub fn config_dir() -> PathBuf {

@@ -37,7 +37,23 @@ fn base_command(root: &Path) -> Command {
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_NO_LAZY_FETCH", "1")
         .env_remove("GIT_EXTERNAL_DIFF");
+    hide_console(&mut command);
     command
+}
+
+/// Git is a console program. Without this, every status poll flashes a
+/// terminal on Windows.
+fn hide_console(command: &mut Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = command;
+    }
 }
 
 #[cfg(windows)]
@@ -251,15 +267,14 @@ pub fn clone(url: &str, dest: &Path) -> io::Result<PathBuf> {
     if !parent.is_dir() {
         return Err(io::Error::other("Choose a folder to put the project in"));
     }
-    let output = run_limited(
-        Command::new("git")
-            .args(["clone", "--", url])
-            .arg(dest)
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .env("GIT_OPTIONAL_LOCKS", "0"),
-        OUTPUT_LIMIT,
-        Duration::from_secs(600),
-    );
+    let mut command = Command::new("git");
+    command
+        .args(["clone", "--", url])
+        .arg(dest)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_OPTIONAL_LOCKS", "0");
+    hide_console(&mut command);
+    let output = run_limited(&mut command, OUTPUT_LIMIT, Duration::from_secs(600));
     let output = match output {
         Ok(output) => output,
         Err(e) if e.kind() == io::ErrorKind::NotFound => {

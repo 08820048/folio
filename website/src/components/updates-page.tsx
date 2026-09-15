@@ -1,4 +1,5 @@
-import { Download, Plus, Sparkles, Wrench } from "lucide-react";
+import { Plus, Sparkles, Wrench } from "lucide-react";
+import { AppleIcon } from "@/components/brand-icons";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { SiteFooter } from "@/components/sections";
@@ -108,7 +109,7 @@ export function UpdatesPage() {
           </p>
           <div className="mt-9 flex flex-wrap items-center gap-x-6 gap-y-3">
             <Button size="lg" render={<a href="/download" />}>
-              <Download />
+              <AppleIcon />
               Download for macOS
             </Button>
             <span className="text-xs text-muted-foreground">

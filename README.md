@@ -15,6 +15,9 @@ On macOS, after installing the Xcode Command Line Tools:
 cargo run --locked
 ```
 
+Windows is not a download yet. Building from source on a Windows machine is
+covered in [docs/windows.md](docs/windows.md).
+
 `rust-toolchain.toml` pins Rust 1.95.0 and rustup installs it on demand. The
 first build downloads dependencies; the app itself never needs the network. The
 code fonts JetBrains Mono, Fira Code and Source Code Pro are embedded in the
