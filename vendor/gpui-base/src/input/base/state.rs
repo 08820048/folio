@@ -32,6 +32,7 @@ use super::{
 };
 use crate::actions::{SelectDown, SelectLeft, SelectRight, SelectUp};
 use crate::input::blink_cursor::CURSOR_WIDTH;
+use crate::input::cursor_animation::CursorAnimationStates;
 use crate::input::movement::MoveDirection;
 use crate::input::{
     HoverDefinition, InlineCompletion, Lsp, Position, RopeExt as _, Selection, Selections,
@@ -329,6 +330,10 @@ pub struct InputBaseState {
     /// See [`Self::cursor_surrounding_lines`].
     pub(super) cursor_surrounding_lines: Option<usize>,
     pub(super) show_whitespaces: bool,
+    /// Smooth caret motion, off unless the host asks for it. Search fields
+    /// and other single-line inputs stay on the cheap snap path.
+    pub(super) cursor_animation: bool,
+    pub(super) cursor_animations: CursorAnimationStates,
     /// This flag tells the renderer to prefer the end of the current visual line.
     pub(crate) cursor_line_end_affinity: bool,
     pub(super) pattern: Option<regex::Regex>,
@@ -625,6 +630,8 @@ impl InputBaseState {
             scroll_beyond_last_line: None,
             cursor_surrounding_lines: None,
             show_whitespaces: false,
+            cursor_animation: false,
+            cursor_animations: CursorAnimationStates::default(),
             loading: false,
             pattern: None,
             validate: None,
@@ -1342,6 +1349,18 @@ impl InputBaseState {
         cx.notify();
     }
 
+    /// Glide the caret to its new place instead of jumping. Off by default.
+    pub fn set_cursor_animation(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.cursor_animation == enabled {
+            return;
+        }
+        self.cursor_animation = enabled;
+        if !enabled {
+            self.cursor_animations.clear();
+        }
+        cx.notify();
+    }
+
     /// Update how soft-wrapped continuation lines are indented.
     pub fn set_wrapping_indent(
         &mut self,
@@ -1827,8 +1846,12 @@ impl InputBaseState {
             return 0;
         }
 
-        let mut offset =
-            self.previous_boundary(self.selections.primary().start.min(self.selections.primary().end));
+        let mut offset = self.previous_boundary(
+            self.selections
+                .primary()
+                .start
+                .min(self.selections.primary().end),
+        );
         if self.text.char_at(offset) == Some('\r') {
             offset += 1;
         }
@@ -2611,7 +2634,8 @@ impl InputBaseState {
 
         if self.selections.primary().end < self.selections.primary().start {
             self.selection_reversed = !self.selection_reversed;
-            self.selections = (self.selections.primary().end..self.selections.primary().start).into();
+            self.selections =
+                (self.selections.primary().end..self.selections.primary().start).into();
         }
 
         // Ensure keep word selected range

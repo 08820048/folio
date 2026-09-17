@@ -36,6 +36,8 @@ pub struct Settings {
     pub ignored: Vec<String>,
     /// Wrap long lines in the editor. Off by default: code is read as a grid.
     pub soft_wrap: bool,
+    /// Glide the caret when it moves, instead of jumping. On by default.
+    pub cursor_animation: bool,
 }
 
 impl Default for Settings {
@@ -50,6 +52,7 @@ impl Default for Settings {
             sidebar: true,
             activity_bar: true,
             soft_wrap: false,
+            cursor_animation: true,
             ignored: crate::tree::DEFAULT_IGNORED
                 .iter()
                 .map(|name| (*name).to_string())

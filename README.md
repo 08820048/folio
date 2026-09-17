@@ -646,9 +646,12 @@ project is no longer in the session is dropped rather than shown. Blame is one
 line at a time rather than a gutter, and describes the lines as they were when
 it was read. The changes view is a unified diff — there is
 no side-by-side — and its counts count rows, so a changed line reads as one
-gone and one arrived. Mac updates go through Sparkle. The packaged app checks
-`https://pub-307aebc4dfa4468d80e05e193c8f9c5b.r2.dev/appcast.xml` and installs
-a signed zip from the same R2 bucket; `cargo run` has no framework and says so.
+gone and one arrived. Mac updates go through Sparkle. The packaged app asks
+`https://pub-307aebc4dfa4468d80e05e193c8f9c5b.r2.dev/appcast.xml` quietly after
+launch and once a day; a newer build shows a green **Update available** badge in
+the title bar, left of the run control, and clicking it opens Sparkle's window,
+which installs a signed zip from the same R2 bucket. `cargo run` has no
+framework and says so.
 There is no GitHub Release. Window geometry is written when a window closes and again
 on quit, so a force-killed process loses wherever the windows were — the same
 is true of the settings window. The settings sidebar has no search box, and its

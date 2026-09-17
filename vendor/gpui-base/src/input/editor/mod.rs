@@ -1,9 +1,9 @@
-use std::cell::RefCell;
-use ropey::Rope;
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable,
     IntoElement, Render, RenderOnce, SharedString, Subscription, Window,
 };
+use ropey::Rope;
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use super::{InputBaseState, InputEvent, TabSize, TextDecoration, TextDecorationCollection};
@@ -90,7 +90,10 @@ impl EditorState {
     }
 
     pub fn value(&self) -> SharedString {
-        self.value.borrow_mut().get_or_insert_with(|| self.text.to_string().into()).clone()
+        self.value
+            .borrow_mut()
+            .get_or_insert_with(|| self.text.to_string().into())
+            .clone()
     }
 
     /// A cheap, immutable snapshot for background work.

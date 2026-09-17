@@ -346,6 +346,7 @@ fn settings_round_trip_defaults_and_clamping() {
     assert!(!defaults.hard_tabs);
     assert!(defaults.sidebar);
     assert!(defaults.activity_bar);
+    assert!(defaults.cursor_animation);
     assert!(defaults.ignored.contains(&"node_modules".to_string()));
 
     let mut edited = defaults.clone();
@@ -376,6 +377,7 @@ fn settings_round_trip_defaults_and_clamping() {
     // Keys the file does not mention keep their defaults, so a file written by
     // an older version still loads.
     assert!(clamped.sidebar);
+    assert!(clamped.cursor_animation);
 
     // A corrupt file is reported and left alone rather than silently replaced.
     fs::write(&file, "not json at all").unwrap();

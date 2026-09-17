@@ -10,6 +10,8 @@ pub(crate) mod blink_cursor;
 mod change;
 #[path = "base/cursor.rs"]
 mod cursor;
+#[path = "base/cursor_animation.rs"]
+pub(crate) mod cursor_animation;
 #[path = "editor/decorations.rs"]
 mod decorations;
 #[path = "editor/diagnostics.rs"]

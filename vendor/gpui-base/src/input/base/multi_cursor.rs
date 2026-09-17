@@ -280,12 +280,8 @@ impl InputBaseState {
         };
         let rows = box_selection.anchor_row.min(box_selection.focus_row)
             ..=box_selection.anchor_row.max(box_selection.focus_row);
-        let first = box_selection
-            .anchor_column
-            .min(box_selection.focus_column);
-        let last = box_selection
-            .anchor_column
-            .max(box_selection.focus_column);
+        let first = box_selection.anchor_column.min(box_selection.focus_column);
+        let last = box_selection.anchor_column.max(box_selection.focus_column);
 
         let mut selections = Vec::with_capacity(rows.clone().count());
         let mut focus = None;

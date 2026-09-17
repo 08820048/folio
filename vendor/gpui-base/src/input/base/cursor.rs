@@ -148,7 +148,8 @@ impl Selections {
                 std::mem::swap(&mut selection.start, &mut selection.end);
             }
         }
-        self.0.sort_by_key(|selection| (selection.start, selection.end));
+        self.0
+            .sort_by_key(|selection| (selection.start, selection.end));
         let mut merged: Vec<Selection> = Vec::with_capacity(self.0.len());
         for selection in self.0.drain(..) {
             match merged.last_mut() {

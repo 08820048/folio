@@ -3,7 +3,7 @@ use crate::file_icons;
 use crate::preview::{self, Content};
 use crate::syntax;
 use crate::terminal_view::{StopStep, TerminalBusy, TerminalView};
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use folio::windows_update;
 use folio::{
     blame, brackets, buffer, diff, editorconfig, fs_op, git,
@@ -1232,6 +1232,16 @@ struct TerminalTabs {
     _watches: Vec<Subscription>,
 }
 
+/// A release newer than the running build. On Windows it carries the feed
+/// entry so the badge can go straight to the installer prompt; on macOS
+/// Sparkle holds the details and the badge just opens its window.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AvailableUpdate {
+    version: String,
+    #[cfg(target_os = "windows")]
+    feed: windows_update::Feed,
+}
+
 /// One floating status card. Drawn in Folio's own chrome — the same surface
 /// and hairline as a tab preview — not the component-kit Alert palette.
 #[derive(Clone, PartialEq, Eq)]
@@ -1400,6 +1410,9 @@ pub struct Folio {
     notice_id: u64,
     /// The card is sliding back off the right edge and should unmount after.
     notice_leaving: bool,
+    /// A newer release the feed advertised. The title bar shows it until
+    /// the user opens the updater from there.
+    available_update: Option<AvailableUpdate>,
     loading: bool,
     project_loading: bool,
     saving: bool,
@@ -1694,6 +1707,7 @@ impl Folio {
             notice: settings_error,
             notice_id: 0,
             notice_leaving: false,
+            available_update: None,
             loading: false,
             project_loading: false,
             saving: false,
@@ -1737,8 +1751,7 @@ impl Folio {
         self.start_restore(window, cx);
         self.watch_unsaved(cx);
         self.watch_disk(window, cx);
-        #[cfg(target_os = "windows")]
-        self.schedule_windows_update_check(window, cx);
+        self.schedule_update_check(window, cx);
     }
 
     fn request(&mut self, next: Next, window: &mut Window, cx: &mut Context<Self>) {
@@ -5676,18 +5689,95 @@ impl Folio {
         }
     }
 
-    #[cfg(target_os = "windows")]
-    fn schedule_windows_update_check(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Quiet check a little after launch, and once a day after that. A hit
+    /// only lights the title-bar badge; nothing pops up until it is clicked.
+    fn schedule_update_check(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        #[cfg(target_os = "windows")]
         if !windows_update::installed() {
             return;
         }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let _ = (window, cx);
+            return;
+        }
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         cx.spawn_in(window, async move |this, cx| {
             cx.background_executor().timer(Duration::from_secs(8)).await;
-            let _ = this.update_in(cx, |this, window, cx| {
-                this.check_windows_update(false, window, cx);
-            });
+            loop {
+                let keep_going = this
+                    .update_in(cx, |this, window, cx| {
+                        this.check_update_silently(window, cx);
+                    })
+                    .is_ok();
+                if !keep_going {
+                    return;
+                }
+                cx.background_executor()
+                    .timer(Duration::from_secs(24 * 60 * 60))
+                    .await;
+            }
         })
         .detach();
+    }
+
+    #[cfg(target_os = "windows")]
+    fn check_update_silently(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.check_windows_update(false, window, cx);
+    }
+
+    /// Ask Sparkle for the feed without its UI, then watch for the answer.
+    #[cfg(target_os = "macos")]
+    fn check_update_silently(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.available_update.is_some() || !crate::sparkle::begin_background_check() {
+            return;
+        }
+        let running = windows_update::current_build();
+        cx.spawn_in(window, async move |this, cx| {
+            // Sparkle answers on the main thread; a check that never reports
+            // (offline, or a session already open) is given up on after a minute.
+            for _ in 0..120 {
+                cx.background_executor()
+                    .timer(Duration::from_millis(500))
+                    .await;
+                let Some(result) = crate::sparkle::background_result() else {
+                    continue;
+                };
+                if let Some(found) = result
+                    && found.build > running
+                {
+                    let _ = this.update_in(cx, |this, _, cx| {
+                        this.available_update = Some(AvailableUpdate {
+                            version: found.version,
+                        });
+                        cx.notify();
+                    });
+                }
+                return;
+            }
+        })
+        .detach();
+    }
+
+    /// The title-bar badge: hand over to the platform's updater.
+    fn open_available_update(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(update) = self.available_update.clone() else {
+            return;
+        };
+        #[cfg(target_os = "macos")]
+        {
+            let _ = (update, window);
+            if !crate::sparkle::check() {
+                self.inform("Updates", "Updates ship in the packaged Mac app.", cx);
+            }
+        }
+        #[cfg(target_os = "windows")]
+        self.prompt_windows_update(update.feed, window, cx);
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let _ = (update, window);
+            self.inform("Updates", "Updates ship in the packaged Mac app.", cx);
+        }
     }
 
     #[cfg(target_os = "windows")]
@@ -5725,7 +5815,14 @@ impl Folio {
                 }
                 Ok(Some(feed)) => {
                     this.clear_notice();
-                    this.prompt_windows_update(feed, window, cx);
+                    this.available_update = Some(AvailableUpdate {
+                        version: feed.version.clone(),
+                        feed: feed.clone(),
+                    });
+                    cx.notify();
+                    if user {
+                        this.prompt_windows_update(feed, window, cx);
+                    }
                 }
                 Err(error) => {
                     if user {
@@ -5866,6 +5963,7 @@ impl Folio {
         // them all.
         sync_appearance(self.appearance, &self.settings, None, cx);
         self.refresh_all_brackets(cx);
+        self.sync_cursor_animation(cx);
         // These two settings are the stored state the toggles write back.
         self.sidebar = self.settings.sidebar;
         self.activity_bar = self.settings.activity_bar;
@@ -5918,6 +6016,26 @@ impl Folio {
             });
         }
         self.applied_wrap = wrap;
+    }
+
+    fn sync_cursor_animation(&mut self, cx: &mut Context<Self>) {
+        let enabled = self.settings.cursor_animation;
+        let editors: Vec<_> = std::iter::once(&self.project)
+            .chain(self.parked.iter())
+            .flat_map(|project| {
+                project
+                    .documents
+                    .values()
+                    .map(|document| document.editor.clone())
+            })
+            .collect();
+        for editor in editors {
+            editor.update(cx, |state, cx| {
+                state
+                    .base_state()
+                    .update(cx, |base, cx| base.set_cursor_animation(enabled, cx));
+            });
+        }
     }
 
     /// The ignore rules changed, so every cached listing is suspect. One
@@ -6091,9 +6209,11 @@ impl Folio {
                             let typeface = this.code_typeface();
                             let size = px(this.settings.code_font_size);
                             let wrap = this.settings.soft_wrap;
+                            let cursor_animation = this.settings.cursor_animation;
                             state.base_state().update(cx, |base, cx| {
                                 base.set_soft_wrap(wrap, window, cx);
                                 base.set_font(typeface, size);
+                                base.set_cursor_animation(cursor_animation, cx);
                             });
                         });
                         let subscription = Self::subscribe_document(&editor, window, cx);
@@ -8577,9 +8697,8 @@ impl Folio {
                             .text_color(muted)
                         } else {
                             match file_icons::file_icon(&row.entry.name) {
-                                Some(kind) => Icon::new(kind).text_color(
-                                    kind.tint(cx.theme().is_dark()).unwrap_or(muted),
-                                ),
+                                Some(kind) => Icon::new(kind)
+                                    .text_color(kind.tint(cx.theme().is_dark()).unwrap_or(muted)),
                                 None => Icon::new(IconName::File).text_color(muted),
                             }
                         }
@@ -9444,6 +9563,9 @@ impl Folio {
                                 .child("Loading…"),
                         )
                     })
+                    .when_some(self.available_update.as_ref(), |el, update| {
+                        el.child(self.render_update_badge(update, cx))
+                    })
                     .when(self.run_is_busy(cx), |el| {
                         el.child(Self::icon_button(
                             "stop",
@@ -9463,6 +9585,43 @@ impl Folio {
                         ))
                     }),
             )
+            .into_any_element()
+    }
+
+    /// "Update available" in the title bar, left of the run control. Plain
+    /// green text with the arrow, no pill; clicking hands over to the
+    /// platform updater.
+    fn render_update_badge(&self, update: &AvailableUpdate, cx: &Context<Self>) -> AnyElement {
+        let tooltip: SharedString = format!("Folio {} is available", update.version).into();
+        div()
+            .id("update-available")
+            .role(Role::Button)
+            .aria_label(tooltip.clone())
+            .focusable()
+            .tab_index(0)
+            .h(px(24.))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .gap_1()
+            .cursor_pointer()
+            .text_size(ui(11.))
+            .text_color(cx.theme().success)
+            .hover(|el| el.opacity(0.75))
+            .focus_visible(|el| el.text_color(cx.theme().accent_foreground))
+            .tooltip(move |window, cx| {
+                gpui_component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx)
+            })
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(|this, _, window, cx| this.open_available_update(window, cx)))
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                    this.open_available_update(window, cx);
+                    cx.stop_propagation();
+                }
+            }))
+            .child(Icon::new(IconName::ArrowUp).xsmall())
+            .child("Update available")
             .into_any_element()
     }
 
@@ -10610,6 +10769,21 @@ impl SettingsView {
                             }),
                             ("Off", !settings.soft_wrap, |settings| {
                                 settings.soft_wrap = false
+                            }),
+                            cx,
+                        ),
+                        cx,
+                    ),
+                    Self::row(
+                        "Cursor animation",
+                        "Whether the cursor smoothly animates when moving around the editor.",
+                        self.choice(
+                            "cursor-animation",
+                            ("On", settings.cursor_animation, |settings| {
+                                settings.cursor_animation = true
+                            }),
+                            ("Off", !settings.cursor_animation, |settings| {
+                                settings.cursor_animation = false
                             }),
                             cx,
                         ),

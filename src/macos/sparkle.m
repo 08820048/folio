@@ -3,6 +3,51 @@
 #import <objc/runtime.h>
 
 static id gController;
+static id gDelegate;
+
+// Result of the last background information check. Read from Rust through
+// folio_sparkle_check_state / folio_sparkle_found_*; the strings stay valid
+// until the next check replaces them.
+static int gCheckState; // 0 running/unknown, 1 up to date (or failed), 2 update found
+static NSString *gFoundVersion;
+static NSString *gFoundBuild;
+
+// SPUUpdaterDelegate. Sparkle's headers are not linked into this build, so
+// the delegate is a plain NSObject with the selectors Sparkle looks for.
+@interface FolioUpdaterDelegate : NSObject
+@end
+
+@implementation FolioUpdaterDelegate
+
+- (void)updater:(id)updater didFindValidUpdate:(id)item {
+    id version = ((id(*)(id, SEL))objc_msgSend)(item, sel_registerName("displayVersionString"));
+    id build = ((id(*)(id, SEL))objc_msgSend)(item, sel_registerName("versionString"));
+    gFoundVersion = [version isKindOfClass:[NSString class]] ? [version copy] : @"";
+    gFoundBuild = [build isKindOfClass:[NSString class]] ? [build copy] : @"";
+    gCheckState = 2;
+}
+
+- (void)updaterDidNotFindUpdate:(id)updater error:(NSError *)error {
+    gCheckState = 1;
+}
+
+- (void)updaterDidNotFindUpdate:(id)updater {
+    gCheckState = 1;
+}
+
+- (void)updater:(id)updater didAbortWithError:(NSError *)error {
+    if (gCheckState == 0) {
+        gCheckState = 1;
+    }
+}
+
+- (void)updater:(id)updater didFinishUpdateCycleForUpdateCheck:(NSInteger)check error:(NSError *)error {
+    if (gCheckState == 0) {
+        gCheckState = 1;
+    }
+}
+
+@end
 
 static BOOL folio_sparkle_load(void) {
     NSString *path = [[[NSBundle mainBundle] privateFrameworksPath]
@@ -21,12 +66,13 @@ void folio_sparkle_start(void) {
         if (cls == Nil) {
             return;
         }
+        gDelegate = [FolioUpdaterDelegate new];
         id allocated = ((id(*)(Class, SEL))objc_msgSend)(cls, sel_registerName("alloc"));
         gController = ((id(*)(id, SEL, BOOL, id, id))objc_msgSend)(
             allocated,
             sel_registerName("initWithStartingUpdater:updaterDelegate:userDriverDelegate:"),
             YES,
-            nil,
+            gDelegate,
             nil);
     });
 }
@@ -43,4 +89,35 @@ void folio_sparkle_check(void) {
     }
     ((void (*)(id, SEL, id))objc_msgSend)(
         gController, sel_registerName("checkForUpdates:"), nil);
+}
+
+// Ask the feed without showing any UI. The answer lands in the delegate;
+// poll folio_sparkle_check_state for it.
+void folio_sparkle_check_information(void) {
+    folio_sparkle_start();
+    if (gController == nil) {
+        gCheckState = 1;
+        return;
+    }
+    id updater = ((id(*)(id, SEL))objc_msgSend)(gController, sel_registerName("updater"));
+    if (updater == nil) {
+        gCheckState = 1;
+        return;
+    }
+    gCheckState = 0;
+    gFoundVersion = nil;
+    gFoundBuild = nil;
+    ((void (*)(id, SEL))objc_msgSend)(updater, sel_registerName("checkForUpdateInformation"));
+}
+
+int folio_sparkle_check_state(void) {
+    return gCheckState;
+}
+
+const char *folio_sparkle_found_version(void) {
+    return gFoundVersion != nil ? [gFoundVersion UTF8String] : NULL;
+}
+
+const char *folio_sparkle_found_build(void) {
+    return gFoundBuild != nil ? [gFoundBuild UTF8String] : NULL;
 }

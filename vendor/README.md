@@ -71,10 +71,15 @@ rather than a read of the whole crate.
   `set_context_menu_enabled` is public so Folio can keep the caret move on
   right-click and draw its own menu instead of the OS one. `set_font` is
   public so a code editor can paint in the code face rather than the UI face.
+  `set_cursor_animation` turns on the caret glide.
 - `input/base/element.rs` — drawing every selection as a path of its own and
   every caret as a quad, in the coordinates the primary's already used. The
   pair of brackets under the caret is drawn as a slightly larger wash behind
-  both characters. Runnable lines get a play control in the gutter.
+  both characters. Runnable lines get a play control in the gutter. When
+  cursor animation is on, each caret is a four-corner spring path instead
+  of a snap.
+- `input/base/cursor_animation.rs` — new. The damped-spring four-corner
+  caret glide, adapted from Zed / vscode-neovide-cursor.
 - `input/base/state.rs` / `input/editor/decorations.rs` /
   `input/editor/mod.rs` — `set_bracket_pairs` so Folio can hand the editor
   the rainbow pairs; the caret match is computed on paint. `set_runnables`
@@ -90,7 +95,7 @@ rather than a read of the whole crate.
   collects, so a select-all-occurrences does not first copy every hit.
   `set_search_query` updates the matcher only: the overlay re-opens the
   search box (and selects all) whenever `SearchSession.query` changes.
-- `input/mod.rs` — the `mod` line for the new file.
+- `input/mod.rs` — the `mod` lines for `multi_cursor` and `cursor_animation`.
 
 ## Re-vendoring, which an upgrade requires
 

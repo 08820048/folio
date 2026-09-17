@@ -30,8 +30,10 @@
 	<true/>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<!-- Folio runs its own quiet daily check and shows a title-bar badge;
+	     Sparkle's scheduled alert would double up on it. -->
 	<key>SUEnableAutomaticChecks</key>
-	<true/>
+	<false/>
 	<key>SUFeedURL</key>
 	<string>https://pub-307aebc4dfa4468d80e05e193c8f9c5b.r2.dev/appcast.xml</string>
 	<key>SUPublicEDKey</key>

@@ -63,8 +63,11 @@ https://pub-307aebc4dfa4468d80e05e193c8f9c5b.r2.dev/windows-appcast.json
 ```
 
 No GitHub Release is created. Sparkle does not apply. Installed copies
-check `windows-appcast.json` on launch and from **Check for Updates…**,
-download the new installer, and run it silently.
+check `windows-appcast.json` quietly on launch (and daily after that); a
+newer build lights a green **Update available** badge in the title bar,
+left of the run control. Clicking it, or **Check for Updates…**, opens
+the Install / Later prompt, which downloads the new installer and runs it
+silently.
 
 The workflow needs one repository secret:
 

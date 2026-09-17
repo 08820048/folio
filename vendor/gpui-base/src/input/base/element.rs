@@ -16,7 +16,12 @@ use std::{ops::Range, rc::Rc};
 
 use crate::{
     Scrollbar,
-    input::{RopeExt as _, blink_cursor::CURSOR_WIDTH, display_map::LineLayout},
+    input::{
+        RopeExt as _,
+        blink_cursor::CURSOR_WIDTH,
+        cursor_animation::{CursorViewport, LogicalCursorPosition},
+        display_map::LineLayout,
+    },
 };
 
 use super::{
@@ -472,7 +477,7 @@ impl TextElement {
         cx: &mut App,
     ) -> (
         Option<Bounds<Pixels>>,
-        Vec<Bounds<Pixels>>,
+        Vec<LaidOutCaret>,
         Point<Pixels>,
         Option<usize>,
     ) {
@@ -648,7 +653,7 @@ impl TextElement {
             .deferred_scroll_offset
             .map(|offset| offset.x)
             .unwrap_or(scroll_offset.x);
-        let extra_cursor_bounds: Vec<Bounds<Pixels>> = if state.masked {
+        let extra_carets: Vec<LaidOutCaret> = if state.masked {
             // A masked editor has one line and one caret; nothing adds another.
             Vec::new()
         } else {
@@ -658,40 +663,43 @@ impl TextElement {
                 .iter()
                 .rev()
                 .skip(1)
-                .filter_map(|selection| {
-                    let row = state.text.offset_to_point(selection.end).row;
+                .enumerate()
+                .filter_map(|(index, selection)| {
+                    let caret_point = state.text.offset_to_point(selection.end);
                     // A caret on a row that is scrolled out of sight has no
                     // position to be drawn at, and `caret_for` would place it
                     // at the start of a line it cannot see.
-                    if !visible_buffer_lines.contains(&row) {
+                    if !visible_buffer_lines.contains(&caret_point.row) {
                         return None;
                     }
-                    let pos = caret_for(row, selection.end, false);
+                    let pos = caret_for(caret_point.row, selection.end, false);
                     let cursor_x = bounds.left() + pos.x + line_number_width + cursor_scroll_x;
                     let cursor_x = if last_layout.text_align == TextAlign::Right {
                         cursor_x.min(bounds.right() - CURSOR_WIDTH)
                     } else {
                         cursor_x
                     };
-                    Some(Bounds::new(
-                        point(
-                            cursor_x,
-                            bounds.top() + pos.y + ((line_height - cursor_height) / 2.),
+                    Some(LaidOutCaret {
+                        id: index + 1,
+                        logical: LogicalCursorPosition {
+                            row: caret_point.row as u32,
+                            column: caret_point.column as u32,
+                        },
+                        bounds: Bounds::new(
+                            point(
+                                cursor_x,
+                                bounds.top() + pos.y + ((line_height - cursor_height) / 2.),
+                            ),
+                            size(CURSOR_WIDTH, cursor_height),
                         ),
-                        size(CURSOR_WIDTH, cursor_height),
-                    ))
+                    })
                 })
                 .collect()
         };
 
         bounds.origin = bounds.origin + scroll_offset;
 
-        (
-            cursor_bounds,
-            extra_cursor_bounds,
-            scroll_offset,
-            current_row,
-        )
+        (cursor_bounds, extra_carets, scroll_offset, current_row)
     }
 
     /// Layout the match range to a Path.
@@ -781,8 +789,7 @@ impl TextElement {
                     top_right: line_origin + point(end_x + pad_x, start.y - pad_y),
                     bottom_left: line_origin
                         + point(start.x - pad_x, start.y + line_height + pad_y),
-                    bottom_right: line_origin
-                        + point(end_x + pad_x, start.y + line_height + pad_y),
+                    bottom_right: line_origin + point(end_x + pad_x, start.y + line_height + pad_y),
                 });
 
                 // wrapped lines
@@ -1515,12 +1522,7 @@ impl TextElement {
                     }
                 })
                 .into_any_element();
-            icon.prepaint_as_root(
-                icon_bounds.origin,
-                icon_bounds.size.into(),
-                window,
-                cx,
-            );
+            icon.prepaint_as_root(icon_bounds.origin, icon_bounds.size.into(), window, cx);
             icons.push(icon);
         }
         RunnableIconLayout { icons }
@@ -1788,6 +1790,33 @@ impl TextElement {
     }
 }
 
+fn paint_caret(
+    bounds: Bounds<Pixels>,
+    corners: Option<[Point<Pixels>; 4]>,
+    color: Hsla,
+    window: &mut Window,
+) {
+    if let Some(corners) = corners {
+        let mut builder = gpui::PathBuilder::fill();
+        builder.move_to(corners[0]);
+        for corner in corners.iter().skip(1) {
+            builder.line_to(*corner);
+        }
+        if let Ok(path) = builder.build() {
+            window.paint_path(path, color);
+            return;
+        }
+    }
+    window.paint_quad(fill(bounds, color));
+}
+
+#[derive(Clone, Copy)]
+struct LaidOutCaret {
+    id: usize,
+    logical: LogicalCursorPosition,
+    bounds: Bounds<Pixels>,
+}
+
 pub(super) struct PrepaintState {
     /// The lines of entire lines.
     last_layout: LastLayout,
@@ -1800,7 +1829,7 @@ pub(super) struct PrepaintState {
     cursor_bounds: Option<Bounds<Pixels>>,
     /// The carets that are not the one the cursor is in, when there is more
     /// than one selection. The primary's own bounds above drive the scroll.
-    extra_cursor_bounds: Vec<Bounds<Pixels>>,
+    extra_carets: Vec<LaidOutCaret>,
     cursor_scroll_offset: Point<Pixels>,
     /// row index (zero based), no wrap, same line as the cursor.
     current_row: Option<usize>,
@@ -1833,13 +1862,13 @@ impl PrepaintState {
     }
 
     /// The same adjustment for every other caret.
-    fn extra_cursor_bounds_with_scroll(&self) -> Vec<Bounds<Pixels>> {
-        self.extra_cursor_bounds
+    fn extra_carets_with_scroll(&self) -> Vec<LaidOutCaret> {
+        self.extra_carets
             .iter()
-            .map(|bounds| {
-                let mut bounds = *bounds;
-                bounds.origin.y += self.cursor_scroll_offset.y;
-                bounds
+            .map(|caret| {
+                let mut caret = *caret;
+                caret.bounds.origin.y += self.cursor_scroll_offset.y;
+                caret
             })
             .collect()
     }
@@ -2235,7 +2264,7 @@ impl Element for TextElement {
         let input_bounds = bounds;
         let original_x = bounds.origin.x;
 
-        let (cursor_bounds, extra_cursor_bounds, cursor_scroll_offset, current_row) =
+        let (cursor_bounds, extra_carets, cursor_scroll_offset, current_row) =
             self.layout_cursor(&last_layout, &mut bounds, scroll_size, window, cx);
         last_layout.cursor_bounds = cursor_bounds;
 
@@ -2320,7 +2349,7 @@ impl Element for TextElement {
             scroll_size,
             line_numbers,
             cursor_bounds,
-            extra_cursor_bounds,
+            extra_carets,
             cursor_scroll_offset,
             current_row,
             selection_paths,
@@ -2526,14 +2555,86 @@ impl Element for TextElement {
             }
         }
 
-        // Paint blinking cursor
-        if focused && show_cursor {
-            if let Some(cursor_bounds) = prepaint.cursor_bounds_with_scroll() {
-                window.paint_quad(fill(cursor_bounds, editor_style.caret));
-            }
-            // The rest of the carets blink with it: one editor, one clock.
-            for cursor_bounds in prepaint.extra_cursor_bounds_with_scroll() {
-                window.paint_quad(fill(cursor_bounds, editor_style.caret));
+        // Paint the caret. A glide keeps drawing even if the blink clock has
+        // hidden it, otherwise the trail would vanish mid-move.
+        let animate_cursor = focused
+            && !disabled
+            && window.is_window_active()
+            && self.state.read(cx).cursor_animation
+            && !cx.reduce_motion();
+        if focused && (show_cursor || animate_cursor) {
+            let extra_carets = prepaint.extra_carets_with_scroll();
+            let primary_bounds = prepaint.cursor_bounds_with_scroll();
+            if animate_cursor {
+                let now = cx.background_executor().now();
+                let scroll = prepaint.cursor_scroll_offset;
+                let scroll = point(
+                    f64::from(f32::from(scroll.x)),
+                    f64::from(f32::from(scroll.y)),
+                );
+                let viewport = CursorViewport::new(
+                    origin,
+                    input_bounds,
+                    scroll,
+                    scroll,
+                    prepaint.last_layout.line_height,
+                    CURSOR_WIDTH,
+                );
+                let mut painted = Vec::new();
+                let mut handled = Vec::new();
+                let mut animating = false;
+                self.state.update(cx, |state, _| {
+                    state.cursor_animations.reconcile_newest_selection(Some(0));
+                    if let Some(bounds) = primary_bounds {
+                        let caret_point = state.text.offset_to_point(state.cursor());
+                        let corners = state.cursor_animations.update(
+                            0,
+                            LogicalCursorPosition {
+                                row: caret_point.row as u32,
+                                column: caret_point.column as u32,
+                            },
+                            bounds,
+                            viewport,
+                            now,
+                        );
+                        animating |= corners.is_some();
+                        handled.push(0);
+                        painted.push((bounds, corners));
+                    }
+                    for caret in extra_carets {
+                        let corners = state.cursor_animations.update(
+                            caret.id,
+                            caret.logical,
+                            caret.bounds,
+                            viewport,
+                            now,
+                        );
+                        animating |= corners.is_some();
+                        handled.push(caret.id);
+                        painted.push((caret.bounds, corners));
+                    }
+                    state.cursor_animations.capture_newest_state();
+                    state.cursor_animations.retain(|id| handled.contains(&id));
+                });
+                if show_cursor || animating {
+                    for (bounds, corners) in painted {
+                        paint_caret(bounds, corners, editor_style.caret, window);
+                    }
+                }
+                if animating {
+                    window.request_animation_frame();
+                }
+            } else {
+                self.state
+                    .update(cx, |state, _| state.cursor_animations.clear());
+                if show_cursor {
+                    if let Some(cursor_bounds) = primary_bounds {
+                        window.paint_quad(fill(cursor_bounds, editor_style.caret));
+                    }
+                    for caret in extra_carets {
+                        window.paint_quad(fill(caret.bounds, editor_style.caret));
+                    }
+                }
             }
         }
 
