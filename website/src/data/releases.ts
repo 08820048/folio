@@ -31,10 +31,30 @@ export type Release = {
 /** Newest first. */
 export const releases: Release[] = [
   {
+    version: "0.1.4",
+    build: 7,
+    date: "2026-09-18",
+    latest: true,
+    summary: "A smoother caret, and quieter updates.",
+    notes: [
+      {
+        kind: "added",
+        text: "The editor caret glides to its new place. Turn it off in Settings if you want it to jump.",
+      },
+      {
+        kind: "added",
+        text: "Folio checks for updates quietly. A green badge in the title bar means a newer build is ready.",
+      },
+      {
+        kind: "improved",
+        text: "The About window no longer stretches its copy to the edges, and links to folioedit.dev.",
+      },
+    ],
+  },
+  {
     version: "0.1.3",
     build: 6,
     date: "2026-09-15",
-    latest: true,
     summary: "File-type icons in the tree, and a tighter file list.",
     notes: [
       {
