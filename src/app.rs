@@ -5922,7 +5922,7 @@ impl Folio {
         {
             return;
         }
-        let bounds = WindowBounds::centered(size(px(360.), px(220.)), cx);
+        let bounds = WindowBounds::centered(size(px(360.), px(248.)), cx);
         let opened = cx.open_window(
             WindowOptions {
                 window_bounds: Some(bounds),
@@ -10115,6 +10115,9 @@ impl Folio {
 /// The About window: the name, the version and what the application is.
 struct AboutView;
 
+const SITE_URL: &str = "https://folioedit.dev";
+const SITE_LABEL: &str = "folioedit.dev";
+
 impl Render for AboutView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
@@ -10126,6 +10129,7 @@ impl Render for AboutView {
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .text_size(ui(13.))
+            .on_action(cx.listener(|_, _: &CloseWindow, window, _| window.remove_window()))
             .child(
                 TitleBar::new()
                     .bg(cx.theme().background)
@@ -10136,25 +10140,63 @@ impl Render for AboutView {
                 div()
                     .flex_1()
                     .min_h_0()
+                    .w_full()
+                    .px(px(40.))
                     .flex()
                     .flex_col()
                     .items_center()
                     .justify_center()
-                    .gap_2()
                     .child(div().text_size(ui(22.)).child("Folio"))
                     // Read from the manifest rather than written out here, so
                     // it cannot drift from the version that was built.
                     .child(
                         div()
+                            .mt(px(6.))
                             .text_size(ui(12.))
                             .text_color(cx.theme().muted_foreground)
                             .child(format!("Version {}", env!("CARGO_PKG_VERSION"))),
                     )
+                    // Two centered lines instead of one that fills the window:
+                    // a single wrapped sentence was stretching to the chrome.
                     .child(
                         div()
+                            .mt(px(16.))
+                            .flex()
+                            .flex_col()
+                            .items_center()
+                            .gap_1()
                             .text_size(ui(11.))
                             .text_color(cx.theme().muted_foreground)
-                            .child("A local code reading editor, built with Rust and GPUI."),
+                            .child(
+                                div()
+                                    .whitespace_nowrap()
+                                    .child("A local code reading editor,"),
+                            )
+                            .child(div().whitespace_nowrap().child("built with Rust and GPUI.")),
+                    )
+                    .child(
+                        div()
+                            .id("about-site")
+                            .mt(px(16.))
+                            .px_3()
+                            .py_2()
+                            .role(Role::Link)
+                            .aria_label(SITE_URL)
+                            .focusable()
+                            .tab_index(0)
+                            .cursor_pointer()
+                            .text_size(ui(12.))
+                            .text_color(cx.theme().accent_foreground)
+                            .hover(|el| el.text_color(cx.theme().foreground))
+                            .focus_visible(|el| el.text_color(cx.theme().foreground))
+                            .on_click(|_, _, cx| cx.open_url(SITE_URL))
+                            .on_key_down(cx.listener(|_, event: &KeyDownEvent, _, cx| {
+                                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                    cx.open_url(SITE_URL);
+                                    cx.stop_propagation();
+                                }
+                            }))
+                            .child(SITE_LABEL),
                     ),
             )
     }
