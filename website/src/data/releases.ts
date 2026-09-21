@@ -31,10 +31,26 @@ export type Release = {
 /** Newest first. */
 export const releases: Release[] = [
   {
+    version: "0.1.5",
+    build: 8,
+    date: "2026-09-21",
+    latest: true,
+    summary: "A terminal that docks beside the editor, and Chinese text that fits its cells.",
+    notes: [
+      {
+        kind: "added",
+        text: "The terminal can dock in a column beside the editor. The button left of the + in the terminal's tab strip swaps sides, and the column's edge drags its width.",
+      },
+      {
+        kind: "fixed",
+        text: "Chinese and other wide characters fill both of their grid cells in the terminal: no blank strip after each one, backgrounds and selections cover them fully, and IME composition no longer overlaps its own glyphs.",
+      },
+    ],
+  },
+  {
     version: "0.1.4",
     build: 7,
     date: "2026-09-18",
-    latest: true,
     summary: "A smoother caret, and quieter updates.",
     notes: [
       {
