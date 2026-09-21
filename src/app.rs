@@ -4996,6 +4996,7 @@ impl Folio {
         let end = tabs.len();
         div()
             .id(("tabs", pane))
+            .debug_selector(|| format!("editor-tabs-{pane}"))
             .flex_shrink_0()
             .w_full()
             .h(px(TAB_HEIGHT))
@@ -7364,11 +7365,16 @@ impl Folio {
         // The tab strip reads like the one above the code: a tab per
         // terminal, each with its own close, a button that swaps the dock
         // between drawer and right-hand column, and a `+` for another.
+        // Its bottom rule is what makes the dock read as its own panel
+        // when the column sits beside the editor's tab strip at the same
+        // height.
         let tab_strip = div()
             .h(px(26.))
             .flex()
             .items_center()
             .pr_2()
+            .border_b_1()
+            .border_color(cx.theme().border)
             .children((0..tab_count).map(|index| {
                 self.render_terminal_tab(index, &labels[index], index == active, cx)
             }))
@@ -7403,6 +7409,8 @@ impl Folio {
             // A column beside the editor: the left edge drags the width,
             // the way the drawer's top edge drags the height.
             div()
+                .id("terminal-dock")
+                .debug_selector(|| "terminal-dock".to_string())
                 .flex_shrink_0()
                 .w(px(self.terminal_width))
                 .h_full()
@@ -16012,6 +16020,70 @@ mod tests {
         assert!(
             written.unsaved.is_none(),
             "a failed recovery write must not be returned as acknowledged"
+        );
+    }
+
+    #[gpui::test]
+    fn right_terminal_dock_and_split_panes_keep_their_own_columns(
+        cx: &mut TestAppContext,
+    ) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let src = root.join("src");
+        std::fs::create_dir(&src).unwrap();
+        std::fs::write(src.join("main.rs"), "// hi\n").unwrap();
+        cx.update(gpui_component::init);
+        let cx = cx.add_empty_window();
+        let view = cx.update(|window, cx| {
+            cx.new(|cx| {
+                let mut app = Folio::new(window, cx);
+                app.recent_task = None;
+                app.recent_file = root.join("recent.json");
+                app.settings_file = root.join("settings.json");
+                app.window_file = root.join("window.json");
+                app.settings = Settings::default();
+                app.applied_ignored = app.settings.ignored.clone();
+                app
+            })
+        });
+        view.update_in(cx, |app, window, cx| {
+            app.request(Next::Open(root.clone()), window, cx)
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |app, window, cx| {
+            app.terminal_open = true;
+            app.terminal_right = true;
+            app.ensure_terminal(cx);
+            app.split_editor(window, cx);
+        });
+        cx.run_until_parked();
+        // A focused input syncs its native content type, which needs a
+        // real macOS window; the layout below only needs the tree.
+        cx.update(|window, _| window.blur());
+        cx.draw(
+            point(px(0.), px(0.)),
+            size(px(1600.), px(900.)),
+            |_, _| div().w(px(1600.)).h(px(900.)).child(view.clone()),
+        );
+        let left = cx
+            .debug_bounds("editor-tabs-0")
+            .expect("pane 0's tab strip was drawn");
+        let right = cx
+            .debug_bounds("editor-tabs-1")
+            .expect("pane 1's tab strip was drawn");
+        let dock = cx
+            .debug_bounds("terminal-dock")
+            .expect("the terminal dock was drawn");
+        eprintln!(
+            "FOLIO_DEBUG tabs0={left:?} tabs1={right:?} dock={dock:?} viewport=1600x900"
+        );
+        assert!(
+            f32::from(left.right()) <= f32::from(dock.origin.x) + 0.5,
+            "pane 0's tab strip ({left:?}) must not run under the right dock ({dock:?})"
+        );
+        assert!(
+            f32::from(right.right()) <= f32::from(dock.origin.x) + 0.5,
+            "pane 1's tab strip ({right:?}) must not run under the right dock ({dock:?})"
         );
     }
 }
