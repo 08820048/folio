@@ -906,12 +906,16 @@ impl Element for TerminalGrid {
 }
 
 /// One stretch of same-styled cells, painted with `shape_line` at a
-/// cell origin the way Zed's `BatchedTextRun` is.
+/// cell origin the way Zed's `BatchedTextRun` is. A wide character is
+/// always its own batch: it draws at the size that fills both of its
+/// columns, which no neighbour can share.
 struct TextBatch {
     row: usize,
     column: usize,
     text: String,
     run: TextRun,
+    /// The batch is one double-cell character.
+    wide: bool,
 }
 
 /// A run of cells that share a background other than the grid's.
@@ -947,9 +951,27 @@ fn paint_grid(
     }
     for batch in &batches {
         let origin = cell_origin(layout, batch.row, batch.column);
+        // A wide character's glyph from the CJK fallback runs about 1.6
+        // cells at the cell font, which used to leave its spacer column
+        // blank; shaped at the size whose advance is both its columns it
+        // fills them.
+        let font_size = if batch.wide {
+            let natural = window
+                .text_system()
+                .shape_line(
+                    SharedString::from(batch.text.clone()),
+                    layout.font_size,
+                    std::slice::from_ref(&batch.run),
+                    Some(layout.cell_width),
+                )
+                .width;
+            wide_font_size(layout.font_size, layout.cell_width, natural)
+        } else {
+            layout.font_size
+        };
         let line = window.text_system().shape_line(
             SharedString::from(batch.text.clone()),
-            layout.font_size,
+            font_size,
             std::slice::from_ref(&batch.run),
             Some(layout.cell_width),
         );
@@ -985,7 +1007,10 @@ fn paint_grid(
                 underline,
                 strikethrough: None,
             }],
-            Some(layout.cell_width),
+            // Natural advances, not the cell grid: forcing one cell per
+            // character would snap a multi-character composition's glyphs
+            // on top of each other.
+            None,
         );
         window.paint_quad(fill(
             Bounds {
@@ -1071,6 +1096,9 @@ fn layout_cells(
             if cell.attrs.contains(terminal::Attrs::WIDE_CHAR_SPACER) {
                 continue;
             }
+            // A wide character owns its spacer column too: backgrounds,
+            // selection and the block cursor cover both cells.
+            let wide = cell.attrs.contains(terminal::Attrs::WIDE_CHAR);
             let mut fg = colors.resolve(cell.fg);
             let mut bg = colors.resolve(cell.bg);
             if cell.attrs.contains(terminal::Attrs::INVERSE) {
@@ -1097,12 +1125,12 @@ fn layout_cells(
                             && last.column + last.cells == column
                             && last.color == bg =>
                     {
-                        last.cells += 1;
+                        last.cells += if wide { 2 } else { 1 };
                     }
                     _ => rects.push(BgRect {
                         row,
                         column,
-                        cells: 1,
+                        cells: if wide { 2 } else { 1 },
                         color: bg,
                     }),
                 }
@@ -1147,6 +1175,19 @@ fn layout_cells(
                     .contains(terminal::Attrs::STRIKETHROUGH)
                     .then(Default::default),
             };
+            // A wide character always stands alone: it paints at its own
+            // size, so it cannot share a shaped line with the single-cell
+            // neighbours it would drag out of place.
+            if wide {
+                batches.push(TextBatch {
+                    row,
+                    column,
+                    text: cell.c.to_string(),
+                    run,
+                    wide: true,
+                });
+                continue;
+            }
             match batches.last_mut() {
                 Some(last)
                     if last.row == row
@@ -1161,6 +1202,7 @@ fn layout_cells(
                     column,
                     text: cell.c.to_string(),
                     run,
+                    wide: false,
                 }),
             }
         }
@@ -1174,6 +1216,21 @@ fn same_run(left: &TextRun, right: &TextRun) -> bool {
         && left.background_color == right.background_color
         && left.underline == right.underline
         && left.strikethrough == right.strikethrough
+}
+
+/// The font size whose advance maps one wide character onto both of its
+/// grid columns. `natural` is the character's advance at `font_size` —
+/// about one em from the CJK fallback against a 0.6 em cell, which is
+/// why the scale lands near 1.2 for the bundled faces.
+fn wide_font_size(font_size: Pixels, cell_width: Pixels, natural: Pixels) -> Pixels {
+    let natural = f32::from(natural);
+    if natural <= 0.0 {
+        return font_size;
+    }
+    // The clamp keeps a pathological fallback from painting wildly large
+    // or shrinking away; every normal CJK face sits well inside it.
+    let scale = (2.0 * f32::from(cell_width) / natural).clamp(0.5, 2.0);
+    px(f32::from(font_size) * scale)
 }
 
 fn selection_on_row(snapshot: &terminal::Snapshot, row: usize) -> Option<(usize, usize)> {
@@ -1345,6 +1402,7 @@ fn button_of(button: MouseButton) -> Option<Button> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use terminal::Cell;
 
     #[test]
     fn ctrl_or_the_platform_key_opens_a_link() {
@@ -1422,5 +1480,94 @@ mod tests {
         assert_eq!(grid_cells(px(100.), px(16.)), 6);
         assert_eq!(grid_cells(px(16.), px(16.)), 2);
         assert_eq!(grid_cells(px(15.), px(16.)), 2);
+    }
+
+    #[test]
+    fn wide_characters_stretch_to_both_cells() {
+        let font_size = px(13.);
+        let cell_width = px(8.);
+        // An advance that already spans both cells leaves the size alone.
+        assert_eq!(wide_font_size(font_size, cell_width, px(16.)), font_size);
+        // The CJK fallback advances one em — 13px against two 8px cells,
+        // so the size scales by 16/13.
+        let scaled = f32::from(wide_font_size(font_size, cell_width, px(13.)));
+        assert!((scaled - 16.0).abs() < 0.01);
+        // A missing measurement changes nothing.
+        assert_eq!(wide_font_size(font_size, cell_width, px(0.)), font_size);
+        // Pathological advances clamp instead of vanishing or exploding.
+        assert_eq!(wide_font_size(font_size, cell_width, px(64.)), px(6.5));
+        assert_eq!(wide_font_size(font_size, cell_width, px(1.)), px(26.));
+    }
+
+    #[test]
+    fn wide_characters_batch_alone_and_cover_both_cells() {
+        let cells = vec![
+            Cell {
+                c: 'a',
+                ..Cell::default()
+            },
+            Cell {
+                c: '同',
+                bg: Color::Rgb(0x10, 0x20, 0x30),
+                attrs: terminal::Attrs::WIDE_CHAR,
+                ..Cell::default()
+            },
+            Cell {
+                c: ' ',
+                bg: Color::Rgb(0x10, 0x20, 0x30),
+                attrs: terminal::Attrs::WIDE_CHAR_SPACER,
+                ..Cell::default()
+            },
+            Cell {
+                c: 'b',
+                ..Cell::default()
+            },
+            Cell {
+                c: 'c',
+                ..Cell::default()
+            },
+        ];
+        let snapshot = terminal::Snapshot {
+            columns: cells.len(),
+            rows: 1,
+            display_offset: 0,
+            cells,
+            cursor: terminal::Cursor {
+                row: 0,
+                column: 0,
+                shape: terminal::CursorShape::Hidden,
+            },
+            selection: None,
+            modes: terminal::Modes::default(),
+        };
+        let font = Font {
+            family: "JetBrains Mono".into(),
+            ..Default::default()
+        };
+        let term = TermColors {
+            foreground: rgb(0xffffff).into(),
+            background: rgb(0x000000).into(),
+            cursor: rgb(0xffffff).into(),
+            cursor_text: rgb(0x000000).into(),
+            selection: rgb(0x808080).into(),
+            palette: [rgb(0x000000).into(); 16],
+        };
+        let (rects, batches) = layout_cells(&snapshot, &term, &font, false);
+
+        // The wide character stands alone between two ASCII runs.
+        assert_eq!(batches.len(), 3);
+        assert_eq!(batches[0].text, "a");
+        assert!(!batches[0].wide);
+        assert_eq!(batches[1].text, "同");
+        assert_eq!(batches[1].column, 1);
+        assert_eq!(batches[1].run.len, 3);
+        assert!(batches[1].wide);
+        assert_eq!(batches[2].text, "bc");
+        assert_eq!(batches[2].column, 3);
+        assert!(!batches[2].wide);
+        // The character's background covers its spacer column too.
+        assert_eq!(rects.len(), 1);
+        assert_eq!(rects[0].column, 1);
+        assert_eq!(rects[0].cells, 2);
     }
 }
