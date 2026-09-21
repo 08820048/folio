@@ -1347,6 +1347,10 @@ pub struct Folio {
     terminals: HashMap<PathBuf, TerminalTabs>,
     terminal_open: bool,
     terminal_height: f32,
+    /// The dock fills a column to the editor's right instead of a drawer
+    /// under it. View state: the children keep running either way.
+    terminal_right: bool,
+    terminal_width: f32,
     resizing_terminal: bool,
     run_after_save: Option<Option<usize>>,
     generation: u64,
@@ -1671,6 +1675,8 @@ impl Folio {
             terminals: HashMap::new(),
             terminal_open: false,
             terminal_height: 260.,
+            terminal_right: false,
+            terminal_width: 420.,
             resizing_terminal: false,
             run_after_save: None,
             generation: 0,
@@ -7355,49 +7361,104 @@ impl Folio {
                 }
             })
             .collect();
-        div()
-            .flex_shrink_0()
-            .h(px(self.terminal_height))
+        // The tab strip reads like the one above the code: a tab per
+        // terminal, each with its own close, a button that swaps the dock
+        // between drawer and right-hand column, and a `+` for another.
+        let tab_strip = div()
+            .h(px(26.))
             .flex()
-            .flex_col()
-            .border_t_1()
-            .border_color(cx.theme().border)
-            .rounded_br(px(WORKSPACE_RADIUS))
-            .when(!self.sidebar, |el| el.rounded_bl(px(WORKSPACE_RADIUS)))
-            // The top edge drags the height, the way the sidebar's edge
-            // drags the width.
-            .child(
-                div()
-                    .id("terminal-resize")
-                    .h(px(4.))
-                    .cursor_row_resize()
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, _, _| this.resizing_terminal = true),
-                    ),
-            )
-            // The tab strip reads like the one above the code: a tab per
-            // terminal, each with its own close, and a `+` for another.
-            .child(
-                div()
-                    .h(px(26.))
-                    .flex()
-                    .items_center()
-                    .pr_2()
-                    .children((0..tab_count).map(|index| {
-                        self.render_terminal_tab(index, &labels[index], index == active, cx)
-                    }))
-                    .child(div().flex_1())
-                    .child(Self::icon_button(
-                        "terminal-new",
-                        IconName::Plus,
-                        "New Terminal",
-                        |this, window, cx| this.new_terminal(window, cx),
-                        cx,
-                    )),
-            )
-            .child(div().flex_1().min_h_0().overflow_hidden().child(entity))
-            .into_any_element()
+            .items_center()
+            .pr_2()
+            .children((0..tab_count).map(|index| {
+                self.render_terminal_tab(index, &labels[index], index == active, cx)
+            }))
+            .child(div().flex_1())
+            .child(Self::icon_button(
+                "terminal-side",
+                if self.terminal_right {
+                    IconName::PanelBottom
+                } else {
+                    IconName::PanelRight
+                },
+                if self.terminal_right {
+                    "Move Terminal Below"
+                } else {
+                    "Move Terminal Right"
+                },
+                |this, _, cx| {
+                    this.terminal_right = !this.terminal_right;
+                    cx.notify();
+                },
+                cx,
+            ))
+            .child(Self::icon_button(
+                "terminal-new",
+                IconName::Plus,
+                "New Terminal",
+                |this, window, cx| this.new_terminal(window, cx),
+                cx,
+            ));
+        let body = div().flex_1().min_h_0().overflow_hidden().child(entity);
+        if self.terminal_right {
+            // A column beside the editor: the left edge drags the width,
+            // the way the drawer's top edge drags the height.
+            div()
+                .flex_shrink_0()
+                .w(px(self.terminal_width))
+                .h_full()
+                .flex()
+                .border_l_1()
+                .border_color(cx.theme().border)
+                .rounded_tr(px(WORKSPACE_RADIUS))
+                .rounded_br(px(WORKSPACE_RADIUS))
+                .child(
+                    div()
+                        .id("terminal-resize")
+                        .w(px(4.))
+                        .h_full()
+                        .cursor_col_resize()
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, _| this.resizing_terminal = true),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .h_full()
+                        .flex()
+                        .flex_col()
+                        .child(tab_strip)
+                        .child(body),
+                )
+                .into_any_element()
+        } else {
+            div()
+                .flex_shrink_0()
+                .h(px(self.terminal_height))
+                .flex()
+                .flex_col()
+                .border_t_1()
+                .border_color(cx.theme().border)
+                .rounded_br(px(WORKSPACE_RADIUS))
+                .when(!self.sidebar, |el| el.rounded_bl(px(WORKSPACE_RADIUS)))
+                // The top edge drags the height, the way the sidebar's edge
+                // drags the width.
+                .child(
+                    div()
+                        .id("terminal-resize")
+                        .h(px(4.))
+                        .cursor_row_resize()
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, _, _| this.resizing_terminal = true),
+                        ),
+                )
+                .child(tab_strip)
+                .child(body)
+                .into_any_element()
+        }
     }
 
     /// One terminal tab: the terminal's mark and title, and the close that
@@ -9713,8 +9774,15 @@ impl Folio {
                     .h_full()
                     .flex()
                     .flex_col()
-                    .rounded_tr(px(WORKSPACE_RADIUS))
-                    .rounded_br(px(WORKSPACE_RADIUS))
+                    // The right corners stop being the card's edge when
+                    // the terminal column takes that side.
+                    .when(
+                        !(self.terminal_open && self.terminal_right),
+                        |el| {
+                            el.rounded_tr(px(WORKSPACE_RADIUS))
+                                .rounded_br(px(WORKSPACE_RADIUS))
+                        },
+                    )
                     .when(!self.sidebar, |el| {
                         el.rounded_tl(px(WORKSPACE_RADIUS))
                             .rounded_bl(px(WORKSPACE_RADIUS))
@@ -9790,10 +9858,15 @@ impl Folio {
                     // The terminal drawer hangs under the content
                     // column alone; the sidebar keeps its full
                     // height, and the editor above shrinks.
-                    .when(self.terminal_open, |el| {
+                    .when(self.terminal_open && !self.terminal_right, |el| {
                         el.child(self.render_terminal_dock(window, cx))
                     }),
             )
+            // On the right the dock is a column of its own, after the
+            // content column, with the card's right edge.
+            .when(self.terminal_open && self.terminal_right, |el| {
+                el.child(self.render_terminal_dock(window, cx))
+            })
             .into_any_element()
     }
 
@@ -11200,18 +11273,29 @@ impl Render for Folio {
                 }
                 if this.resizing_terminal {
                     let viewport = window.viewport_size();
-                    this.terminal_height = (f32::from(viewport.height)
-                        - f32::from(event.position.y))
-                    .clamp(120., f32::from(viewport.height) * 0.7);
+                    if this.terminal_right {
+                        // The dock's left edge drags its width against the
+                        // card's right edge, the way the drawer's top edge
+                        // drags its height against the card's bottom.
+                        this.terminal_width = (f32::from(viewport.width)
+                            - WORKSPACE_INSET
+                            - f32::from(event.position.x))
+                        .clamp(200., f32::from(viewport.width) * 0.6);
+                    } else {
+                        this.terminal_height = (f32::from(viewport.height)
+                            - f32::from(event.position.y))
+                        .clamp(120., f32::from(viewport.height) * 0.7);
+                    }
                     cx.notify();
                 }
                 if this.resizing_pane {
                     if this.project.split_axis == SplitAxis::Vertical {
                         // Title bar plus the card's top inset; the terminal
-                        // drawer, when open, eats the bottom of this column.
+                        // drawer, when open below, eats the bottom of this
+                        // column. A right-hand dock does not.
                         let top = 34. + WORKSPACE_INSET;
                         let bottom = f32::from(window.viewport_size().height)
-                            - if this.terminal_open {
+                            - if this.terminal_open && !this.terminal_right {
                                 this.terminal_height
                             } else {
                                 0.
@@ -11227,7 +11311,18 @@ impl Render for Folio {
                             } else {
                                 0.
                             };
-                        let width = (f32::from(window.viewport_size().width) - left).max(1.);
+                        // The right-hand terminal column eats this
+                        // column's width the way the drawer eats the
+                        // vertical axis's height.
+                        let right_dock = if this.terminal_open && this.terminal_right {
+                            this.terminal_width + 4.
+                        } else {
+                            0.
+                        };
+                        let width = (f32::from(window.viewport_size().width)
+                            - left
+                            - right_dock)
+                        .max(1.);
                         this.pane_ratio =
                             ((f32::from(event.position.x) - left) / width).clamp(0.25, 0.75);
                     }
