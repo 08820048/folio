@@ -11,4 +11,7 @@ Third-party material keeps its own license:
 - JetBrains Mono — SIL Open Font License 1.1 (`assets/OFL.txt`)
 - Lucide icons vendored in `assets/icons/` — ISC (`assets/icons/LICENSE.txt`)
 - `vendor/gpui-base` — Apache License 2.0 (`vendor/gpui-base/LICENSE-APACHE`)
+- Tree-sitter highlight queries vendored in `src/queries/` (Swift, C#, CMake,
+  protobuf, and the TypeScript/JSON replacements) — MIT, copied from the
+  corresponding `tree-sitter-*` grammar crates listed in `Cargo.lock`
 - Other Rust crates listed in `Cargo.lock` — see each crate's own license

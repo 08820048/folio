@@ -5,10 +5,14 @@
 //! registry is public, so more grammars can be added here without patching the
 //! component. This table adds 23 more.
 //!
-//! Two built-ins are also replaced: `.tsx` shipped with only the TypeScript
+//! Several built-ins are also replaced. `.tsx` shipped with only the TypeScript
 //! overlay query (no JS keywords, strings, or JSX tags), and `.json` treated
-//! every bracket and comma as the same punctuation. The replacements live in
-//! `src/queries/`.
+//! every bracket and comma as the same punctuation. Four more — `swift`,
+//! `csharp`, `cmake` and `proto` — are registered by gpui-component with an
+//! **empty** highlights query, so they parsed but painted nothing; their
+//! queries are vendored from the grammar crates into `src/queries/`.
+//! (`graphql` has the same empty-query gap but its crate ships no query file,
+//! so it stays unhighlighted until one is written here.)
 //!
 //! `folio::buffer::language` returns exactly the names registered below, and the
 //! test at the bottom proves each one actually compiles its highlight query.
@@ -315,6 +319,17 @@ pub fn register_extra_languages() {
         include_str!("queries/javascript-injections.scm"),
     );
     replace_queries(registry, "json", include_str!("queries/json.scm"), "");
+    // gpui-component registers these four with `(language, "", "", "")` — a
+    // grammar that parses and a highlight query that matches nothing.
+    replace_queries(
+        registry,
+        "swift",
+        include_str!("queries/swift.scm"),
+        include_str!("queries/swift-injections.scm"),
+    );
+    replace_queries(registry, "csharp", include_str!("queries/csharp.scm"), "");
+    replace_queries(registry, "cmake", include_str!("queries/cmake.scm"), "");
+    replace_queries(registry, "proto", include_str!("queries/proto.scm"), "");
 }
 
 /// Swap the highlight (and optionally injection) query of a built-in
@@ -432,6 +447,52 @@ mod tests {
         colored(line, 6, 7);
     }
 
+    /// gpui-component registers these four grammars with an empty highlights
+    /// query: they parse, but every capture list is empty, so nothing painted.
+    /// An empty query still "compiles", so `language()` alone would not catch
+    /// the regression — assert real colors on real source.
+    #[test]
+    fn builtins_with_empty_upstream_queries_paint_after_replacement() {
+        register_extra_languages();
+        let theme = HighlightTheme::default_dark();
+
+        let source = "func greet(name: String) -> Int { return 1 }\n";
+        let styles = line_styles(Path::new("main.swift"), source, &theme);
+        let line = &styles[&1];
+        let func = source.find("func").expect("func");
+        colored(line, func, func + 4);
+        let string_ty = source.find("String").expect("String");
+        colored(line, string_ty, string_ty + 6);
+        let ret = source.find("return").expect("return");
+        colored(line, ret, ret + 6);
+
+        let source = "class C { public int F() { return 0; } }\n";
+        let styles = line_styles(Path::new("a.cs"), source, &theme);
+        let line = &styles[&1];
+        let class = source.find("class").expect("class");
+        colored(line, class, class + 5);
+        let int_ty = source.find("int").expect("int");
+        colored(line, int_ty, int_ty + 3);
+
+        let source = "cmake_minimum_required(VERSION 3.20)\n";
+        let styles = line_styles(Path::new("CMakeLists.txt"), source, &theme);
+        let line = &styles[&1];
+        let name = source
+            .find("cmake_minimum_required")
+            .expect("cmake_minimum_required");
+        colored(line, name, name + "cmake_minimum_required".len());
+        let ver = source.find("VERSION").expect("VERSION");
+        colored(line, ver, ver + 7);
+
+        let source = "message Foo { optional string name = 1; }\n";
+        let styles = line_styles(Path::new("a.proto"), source, &theme);
+        let line = &styles[&1];
+        let message = source.find("message").expect("message");
+        colored(line, message, message + 7);
+        let string_kw = source.find("string").expect("string");
+        colored(line, string_kw, string_kw + 6);
+    }
+
     #[test]
     fn every_registered_grammar_compiles_its_highlight_query() {
         register_extra_languages();
@@ -493,6 +554,9 @@ mod tests {
             "a.scss",
             "a.sass",
             "a.less",
+            "a.swift",
+            "a.cs",
+            "a.proto",
             "a.ipynb",
             "a.json5",
             "a.json",
