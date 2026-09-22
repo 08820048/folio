@@ -31,10 +31,26 @@ export type Release = {
 /** Newest first. */
 export const releases: Release[] = [
   {
+    version: "0.1.6",
+    build: 9,
+    date: "2026-09-22",
+    latest: true,
+    summary: "Swift and C# light up, and the side terminal reads as its own panel.",
+    notes: [
+      {
+        kind: "fixed",
+        text: "Swift, C#, CMake and Protocol Buffers files are syntax highlighted again. The component registered their grammars with an empty query, so they painted as plain text.",
+      },
+      {
+        kind: "fixed",
+        text: "The terminal dock beside the editor carries its own bottom rule, so it no longer reads as part of the editor's tab strip.",
+      },
+    ],
+  },
+  {
     version: "0.1.5",
     build: 8,
     date: "2026-09-21",
-    latest: true,
     summary: "A terminal that docks beside the editor, and Chinese text that fits its cells.",
     notes: [
       {

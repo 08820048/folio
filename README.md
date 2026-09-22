@@ -15,7 +15,7 @@ On macOS, after installing the Xcode Command Line Tools:
 cargo run --locked
 ```
 
-Windows is not a public download yet. A version tag (`v0.1.5`) starts
+Windows is not a public download yet. A version tag (`v0.1.6`) starts
 GitHub Actions, which uploads a zip to R2; see [docs/windows.md](docs/windows.md).
 Building from source on a Windows machine is the same document.
 
