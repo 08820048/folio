@@ -105,7 +105,10 @@ first one is the file tree — and the title-bar button shows or hides the rail
 itself. The file tree is drag-resizable. Its top row shows the project
 folder's name and collapses or expands the whole tree on click, keeping
 subdirectory state, and it also answers to Enter, Space and the left and right
-arrows. The file tree takes the arrow keys and Enter. `⌘J` opens a terminal
+arrows. The file tree takes the arrow keys, Home/End, Enter, F2 to rename,
+Delete/⌘⌫ to trash (⌥⌘⌫ to delete permanently), Shift+F10 for its menu, and
+type-ahead: letters jump to the next matching name, shown in the project
+header, and Escape clears it. `⌘J` opens a terminal
 drawer under the workspace, one set of tabs per project. Hiding it keeps the
 children running; closing the last tab, or the project, takes them with it.
 `⌘R` runs the current file, or the test / `main` whose body the caret is in,

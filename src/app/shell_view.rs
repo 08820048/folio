@@ -462,6 +462,17 @@ impl Folio {
                 .small(),
             )
             .child(div().flex_1().min_w_0().truncate().child(label))
+            .when(!project.tree_query.is_empty(), |el| {
+                el.child(
+                    div()
+                        .flex_shrink_0()
+                        .max_w(px(80.))
+                        .truncate()
+                        .text_size(ui(10.))
+                        .text_color(cx.theme().accent_foreground)
+                        .child(format!("[{}]", project.tree_query)),
+                )
+            })
             .when(project.documents.values().any(|d| d.dirty), |el| {
                 el.child(Icon::new(IconName::Asterisk).xsmall())
             })
@@ -795,6 +806,7 @@ impl Folio {
                             }))
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.project.selected_row = i;
+                                this.project.tree_query.clear();
                                 this.tree_focus.focus(window, cx);
                                 match row.entry.kind {
                                     EntryKind::Directory => this.toggle_directory(path.clone(), cx),

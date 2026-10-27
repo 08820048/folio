@@ -1335,6 +1335,47 @@ fn a_closed_tab_can_be_reopened(cx: &mut TestAppContext) {
     });
 }
 
+/// Typing in the tree selects the next prefix match, starts at the current
+/// row, and leaves the selection alone when nothing matches.
+#[gpui::test]
+fn tree_typeahead_selects_by_prefix(cx: &mut TestAppContext) {
+    cx.update(gpui_component::init);
+    let cx = cx.add_empty_window();
+    let view = cx.update(|window, cx| {
+        cx.new(|cx| {
+            let mut app = Folio::new(window, cx);
+            app.recent_task = None;
+            app
+        })
+    });
+    view.update_in(cx, |app, _, cx| {
+        let row = |name: &str| Row {
+            entry: tree::Entry {
+                path: PathBuf::from("/repo").join(name),
+                name: name.to_string(),
+                kind: EntryKind::File,
+            },
+            depth: 0,
+        };
+        app.project.rows = vec![row("alpha.rs"), row("beta.rs"), row("gamma.rs")];
+        app.project.selected_row = 0;
+
+        app.project.tree_query = "gam".into();
+        app.tree_typeahead(cx);
+        assert_eq!(app.project.selected_row, 2);
+
+        app.project.tree_query = "be".into();
+        app.project.selected_row = 0;
+        app.tree_typeahead(cx);
+        assert_eq!(app.project.selected_row, 1);
+
+        app.project.tree_query = "zzz".into();
+        app.project.selected_row = 1;
+        app.tree_typeahead(cx);
+        assert_eq!(app.project.selected_row, 1, "no match leaves the row alone");
+    });
+}
+
 /// A binary file opens in the read-only page viewer, with hex offsets and no
 /// Document behind it.
 #[gpui::test]

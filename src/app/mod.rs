@@ -1209,6 +1209,9 @@ struct Project {
     /// The read-only page viewer, when the active file is too large (or too
     /// binary) for the editor.
     large_file: Option<LargeFile>,
+    /// Letters typed while the tree has focus; jumps to the first name with
+    /// that prefix. Cleared by navigation and Escape.
+    tree_query: String,
     workspace: Option<Workspace>,
     directories: HashMap<PathBuf, Vec<Entry>>,
     expanded: HashSet<PathBuf>,
@@ -1261,6 +1264,7 @@ impl Default for Project {
             image_zoom: 1.,
             image_scroll: ScrollHandle::new(),
             large_file: None,
+            tree_query: String::new(),
             workspace: None,
             directories: HashMap::new(),
             expanded: HashSet::new(),
@@ -3619,11 +3623,53 @@ impl Folio {
         let Some(row) = self.project.rows.get(self.project.selected_row).cloned() else {
             return;
         };
+
+        // Type-ahead first: a printable character extends the transient query
+        // instead of being read as a command. Backspace edits it; Escape ends
+        // it. Modifiers that mean a command keep their meaning.
+        let plain_backspace = event.keystroke.key == "backspace"
+            && !event.keystroke.modifiers.platform
+            && !event.keystroke.modifiers.control
+            && !event.keystroke.modifiers.alt;
+        if plain_backspace && !self.project.tree_query.is_empty() {
+            self.project.tree_query.pop();
+            self.tree_typeahead(cx);
+            cx.stop_propagation();
+            return;
+        }
+        if event.keystroke.key == "escape" && !self.project.tree_query.is_empty() {
+            self.project.tree_query.clear();
+            cx.notify();
+            cx.stop_propagation();
+            return;
+        }
+        if let Some(character) = event.keystroke.key_char.as_deref()
+            && character.chars().count() == 1
+            && !event.keystroke.modifiers.platform
+            && !event.keystroke.modifiers.control
+            && !event.keystroke.modifiers.alt
+            && !character.chars().next().is_some_and(char::is_control)
+        {
+            self.project.tree_query.push_str(character);
+            self.tree_typeahead(cx);
+            cx.stop_propagation();
+            return;
+        }
+
+        let root = self
+            .project
+            .workspace
+            .as_ref()
+            .is_some_and(|workspace| workspace.root == row.entry.path);
         match event.keystroke.key.as_str() {
             "up" => self.project.selected_row = self.project.selected_row.saturating_sub(1),
             "down" => {
                 self.project.selected_row =
                     (self.project.selected_row + 1).min(self.project.rows.len().saturating_sub(1))
+            }
+            "home" => self.project.selected_row = 0,
+            "end" => {
+                self.project.selected_row = self.project.rows.len().saturating_sub(1);
             }
             "enter" => match row.entry.kind {
                 EntryKind::Directory => self.toggle_directory(row.entry.path, cx),
@@ -3648,13 +3694,66 @@ impl Folio {
                     self.project.selected_row = i;
                 }
             }
+            "f2" if !root => {
+                self.begin_rename(row.entry.path, window, cx);
+            }
+            "delete" if !root => {
+                self.confirm_removal(row.entry.path, true, window, cx);
+            }
+            "backspace" if !root && event.keystroke.modifiers.platform => {
+                // ⌘⌫ trashes; ⌥⌘⌫ skips the Trash and confirms.
+                self.confirm_removal(row.entry.path, !event.keystroke.modifiers.alt, window, cx);
+            }
+            "f10" if event.keystroke.modifiers.shift => {
+                let mouse = window.mouse_position();
+                let position = if f32::from(mouse.x) > self.sidebar_width {
+                    point(px(self.sidebar_width * 0.6), px(120.))
+                } else {
+                    mouse
+                };
+                self.open_menu(
+                    MenuTarget::Tree {
+                        path: row.entry.path.clone(),
+                        root,
+                    },
+                    position,
+                    window,
+                    cx,
+                );
+            }
             _ => return,
         }
+        self.project.tree_query.clear();
         self.project
             .tree_scroll
             .scroll_to_item(self.project.selected_row, ScrollStrategy::Nearest);
         cx.stop_propagation();
         cx.notify();
+    }
+
+    /// Move the tree selection to the next name beginning with the transient
+    /// type-ahead query. It starts at the current row and wraps once, so a
+    /// second letter keeps the current match instead of jumping away from it.
+    fn tree_typeahead(&mut self, cx: &mut Context<Self>) {
+        let query = self.project.tree_query.to_lowercase();
+        if query.is_empty() || self.project.rows.is_empty() {
+            return;
+        }
+        let current = self
+            .project
+            .selected_row
+            .min(self.project.rows.len().saturating_sub(1));
+        let matches = |row: &Row| row.entry.name.to_lowercase().starts_with(&query);
+        let found = (current..self.project.rows.len())
+            .find(|index| matches(&self.project.rows[*index]))
+            .or_else(|| (0..current).find(|index| matches(&self.project.rows[*index])));
+        if let Some(index) = found {
+            self.project.selected_row = index;
+            self.project
+                .tree_scroll
+                .scroll_to_item(index, ScrollStrategy::Nearest);
+            cx.notify();
+        }
     }
 }
 
