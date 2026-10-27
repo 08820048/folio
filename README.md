@@ -1,11 +1,15 @@
 # Folio
 
+[![CI](https://github.com/08820048/folio/actions/workflows/ci.yml/badge.svg)](https://github.com/08820048/folio/actions/workflows/ci.yml)
+[![License: PolyForm Noncommercial 1.0.0](https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-blue.svg)](LICENSE)
+
 A local code reading editor built with Rust and GPUI. Light and dark follow the
 system; one window, several projects; no WebView, no AI service. A project's
 shell sits in a drawer under the workspace.
 
 The source is public under the [PolyForm Noncommercial License 1.0.0](LICENSE).
-Personal and educational use is fine. **Commercial use is not.**
+Personal and educational use is fine. **Commercial use is not.** This is
+source-available, not OSI-approved open source.
 
 ## Running
 
@@ -724,6 +728,15 @@ The specification in [docs/Folio需求文档.md](docs/Folio需求文档.md) is r
 to match what is implemented, and lists what is not. Full progress and the
 outstanding acceptance items are in
 [docs/开发进度.md](docs/开发进度.md). Both are in Chinese.
+
+## Community
+
+- [CONTRIBUTING.md](CONTRIBUTING.md) — setup, checks, and what belongs here
+- [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) — the Contributor Covenant
+- [SECURITY.md](SECURITY.md) — private vulnerability reports
+- [SUPPORT.md](SUPPORT.md) — where to ask and what to include
+- [CHANGELOG.md](CHANGELOG.md) — the shorter public history
+- [GOVERNANCE.md](GOVERNANCE.md) — maintainer, review, releases
 
 ## License
 

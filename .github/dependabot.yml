@@ -1,0 +1,39 @@
+version: 2
+
+# Dependency updates run weekly. GPUI and gpui-component are pinned together
+# in Cargo.lock and are upgraded by hand after a build/test pass; Dependabot is
+# told not to open PRs that would drift those git sources.
+updates:
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Asia/Shanghai
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+    commit-message:
+      prefix: "chore(deps)"
+    ignore:
+      - dependency-name: "gpui*"
+      - dependency-name: "gpui-component*"
+      - dependency-name: "alacritty_terminal"
+    groups:
+      patch-and-minor:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Asia/Shanghai
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+    commit-message:
+      prefix: "chore(ci)"

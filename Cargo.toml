@@ -4,6 +4,13 @@ version = "0.1.6"
 edition = "2024"
 description = "A small native code reading and editing workspace"
 license = "PolyForm-Noncommercial-1.0.0"
+authors = ["xuyi"]
+repository = "https://github.com/08820048/folio"
+homepage = "https://folio-website-7j4.pages.dev"
+readme = "README.md"
+rust-version = "1.95"
+keywords = ["editor", "gpui", "rust", "markdown", "code-reading"]
+categories = ["development-tools", "text-editors"]
 
 [features]
 default = ["desktop"]
