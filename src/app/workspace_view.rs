@@ -421,11 +421,28 @@ impl Folio {
         style.heading_base_font_size = px(15.);
         style.highlight_theme = cx.theme().highlight_theme.clone();
         style.is_dark = cx.theme().is_dark();
+        // TextView resolves a plain path relative to the process, not to the
+        // note. Turn every existing relative image into a file:// URL first.
+        let text = localize_markdown_images(&text, path.parent());
+        let base = path.parent().map(Path::to_path_buf);
         let mut view =
             TextView::markdown(format!("markdown-preview:{}", path.to_string_lossy()), text)
                 .selectable(true)
                 .scrollable(true)
                 .style(style)
+                .on_link_click(move |url, _event, window, cx| {
+                    // The handler is Send + Sync and cannot hold the view; the
+                    // global parks a weak one for exactly this call.
+                    let Some(target) = cx.try_global::<MarkdownLinkTarget>() else {
+                        return;
+                    };
+                    let folio = target.0.clone();
+                    let base = base.clone();
+                    let url = url.to_string();
+                    let _ = folio.update(cx, |this, cx| {
+                        this.open_markdown_link(base.as_deref(), &url, window, cx);
+                    });
+                })
                 .h_full()
                 .w_full()
                 .p_6();
@@ -436,6 +453,53 @@ impl Folio {
             view = view.markdown_mdx();
         }
         view.into_any_element()
+    }
+
+    /// Follow a Markdown link. Relative paths resolve against the note that
+    /// contains them and open in Folio; http(s), mail and data URLs go to the
+    /// system opener; a file outside the project opens in the default app.
+    pub(super) fn open_markdown_link(
+        &mut self,
+        base: Option<&Path>,
+        url: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let url = url
+            .trim()
+            .trim_matches(|character| character == '<' || character == '>');
+        if url.is_empty() || url.starts_with('#') {
+            return;
+        }
+        if is_web_url(url) {
+            cx.open_url(url);
+            return;
+        }
+        let path = url.strip_prefix("file://").unwrap_or(url);
+        let path = path.split(['#', '?']).next().unwrap_or(path);
+        let path = decode_percent(path);
+        if path.is_empty() {
+            return;
+        }
+        let target = if Path::new(&path).is_absolute() {
+            PathBuf::from(path)
+        } else if let Some(base) = base {
+            base.join(path)
+        } else {
+            return;
+        };
+        if let Some(workspace) = self.project.workspace.clone()
+            && let Ok(resolved) = workspace.resolve(&target)
+            && resolved.is_file()
+        {
+            self.open_file(resolved, window, cx);
+            return;
+        }
+        // Outside the project (or no longer a file): hand it to the OS rather
+        // than pretending it is a Folio document.
+        if target.is_file() {
+            cx.open_url(&format!("file://{}", target.display()));
+        }
     }
 
     pub(super) fn render_pane(
@@ -693,5 +757,110 @@ impl Folio {
                     }),
             )
             .into_any_element()
+    }
+}
+
+/// Rewrite relative Markdown image targets to `file://` URLs when the image
+/// exists beside the note. Reference-style images and raw HTML `<img>` are
+/// left alone; the common inline form is what a README uses.
+fn localize_markdown_images(text: &str, base: Option<&Path>) -> String {
+    let Some(base) = base else {
+        return text.to_string();
+    };
+    static IMAGE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let image = IMAGE.get_or_init(|| {
+        regex::Regex::new(r#"!\[([^\]]*)\]\(\s*(<[^>]+>|[^)\s]+)(?:\s+"[^"]*")?\s*\)"#)
+            .expect("markdown image pattern")
+    });
+    image
+        .replace_all(text, |captures: &regex::Captures<'_>| {
+            let alt = &captures[1];
+            let raw = captures[2].trim_matches(|character| character == '<' || character == '>');
+            if raw.is_empty()
+                || is_web_url(raw)
+                || raw.starts_with("file://")
+                || Path::new(raw).is_absolute()
+            {
+                return captures[0].to_string();
+            }
+            let path = base.join(decode_percent(raw));
+            if path.is_file() {
+                format!("![{alt}](file://{})", path.display())
+            } else {
+                captures[0].to_string()
+            }
+        })
+        .into_owned()
+}
+
+fn is_web_url(url: &str) -> bool {
+    url.starts_with("http://")
+        || url.starts_with("https://")
+        || url.starts_with("mailto:")
+        || url.starts_with("data:")
+        || url.starts_with('#')
+}
+
+/// Minimal `%XX` decoding for the characters a URL-encoded file name can
+/// contain. Invalid escapes are left as written.
+fn decode_percent(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%'
+            && index + 2 < bytes.len()
+            && let Ok(byte) = u8::from_str_radix(&value[index + 1..index + 3], 16)
+        {
+            out.push(byte);
+            index += 3;
+        } else {
+            out.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::prelude::v1::test;
+
+    #[test]
+    fn markdown_images_resolve_relative_to_the_note() {
+        let temp = tempfile::tempdir().unwrap();
+        let docs = temp.path().join("docs");
+        std::fs::create_dir(&docs).unwrap();
+        let image = docs.join("diagram.png");
+        let spaced = docs.join("my image.png");
+        std::fs::write(&image, b"png").unwrap();
+        std::fs::write(&spaced, b"png").unwrap();
+
+        let text = "![one](diagram.png)\n\
+                    ![two](missing.png)\n\
+                    ![three](https://example.com/x.png)\n\
+                    ![four](<my image.png>)\n\
+                    ![five](my%20image.png)\n";
+        let out = localize_markdown_images(text, Some(&docs));
+        assert!(
+            out.contains(&format!("file://{}", image.display())),
+            "{out}"
+        );
+        assert!(
+            out.contains(&format!("file://{}", spaced.display())),
+            "{out}"
+        );
+        assert!(out.contains("![two](missing.png)"), "{out}");
+        assert!(out.contains("https://example.com/x.png"), "{out}");
+        assert!(out.contains("![five](file://"), "{out}");
+    }
+
+    #[test]
+    fn percent_decoding_only_touches_valid_escapes() {
+        assert_eq!(decode_percent("a%20b"), "a b");
+        assert_eq!(decode_percent("100%"), "100%");
+        assert_eq!(decode_percent("%ZZ"), "%ZZ");
+        assert_eq!(decode_percent("%E4%B8%AD"), "中");
     }
 }

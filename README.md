@@ -127,8 +127,12 @@ Images preview in place, scaled to fit: PNG, JPEG, GIF, WebP, BMP, TIFF, ICO
 and SVG. GIF and WebP show their first frame, and an image never enters the
 text editing or saving path. Markdown (`.md`, `.mdx`, `.markdown`) opens as a
 rendered preview; Preview / Source on the file, or `⇧⌘V`, switches to the
-same buffer as source. A jump from search lands in source so the hit is
-visible. Large files stay in source. Every in-app icon is Lucide and icon buttons draw
+same buffer as source. Relative image paths resolve against the note's own
+folder and render inline; a relative link to another file in the project opens
+it in Folio, `http(s)` / `mailto` links go to the system opener, and a file
+outside the project opens in the default app. Reference-style images and raw
+HTML `<img>` tags are left as text. A jump from search lands in source so the
+hit is visible. Large files stay in source. Every in-app icon is Lucide and icon buttons draw
 no background box. The activity-bar toggle in the title bar's top-left uses
 `panel-left-dashed` / `panel-right-dashed`; the terminal tab uses
 `square-terminal`. gpui-component does not ship those three, so `src/assets.rs`

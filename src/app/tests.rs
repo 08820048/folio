@@ -1335,6 +1335,51 @@ fn a_closed_tab_can_be_reopened(cx: &mut TestAppContext) {
     });
 }
 
+/// A relative Markdown link opens the target in Folio, with a fragment
+/// stripped before the path is resolved.
+#[gpui::test]
+fn markdown_links_open_notes_in_the_app(cx: &mut TestAppContext) {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let docs = root.join("docs");
+    std::fs::create_dir(&docs).unwrap();
+    let first = docs.join("first.md");
+    let second = docs.join("second.md");
+    std::fs::write(&first, "# First\n\n[Next](second.md#part)\n").unwrap();
+    std::fs::write(&second, "# Second\n\n## Part\n").unwrap();
+
+    cx.update(gpui_component::init);
+    let cx = cx.add_empty_window();
+    let view = cx.update(|window, cx| {
+        cx.new(|cx| {
+            let mut app = Folio::new(window, cx);
+            app.recent_task = None;
+            app.recent_file = root.join("recent.json");
+            app.settings_file = root.join("settings.json");
+            app.window_file = root.join("window.json");
+            app.settings = Settings::default();
+            app.applied_ignored = app.settings.ignored.clone();
+            app
+        })
+    });
+    view.update_in(cx, |app, window, cx| {
+        app.request(Next::Open(root.clone()), window, cx)
+    });
+    cx.run_until_parked();
+    view.update_in(cx, |app, window, cx| {
+        app.open_file(first.clone(), window, cx)
+    });
+    cx.run_until_parked();
+    view.update_in(cx, |app, window, cx| {
+        app.open_markdown_link(Some(&docs), "second.md#part", window, cx);
+    });
+    cx.run_until_parked();
+    view.update_in(cx, |app, _, _| {
+        assert_eq!(app.project.active(), Some(&second));
+        assert!(app.project.documents.contains_key(&second));
+    });
+}
+
 /// An empty quick open is the recent files, and a typed one puts name
 /// quality ahead of a mere substring or a deep path.
 #[gpui::test]

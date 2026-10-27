@@ -1409,6 +1409,13 @@ impl Notice {
     }
 }
 
+/// A way for a Markdown link click to reach the view that owns the preview.
+/// `TextView::on_link_click` runs with only `&mut App`, so the weak view is
+/// parked in a global instead of being captured by the (Send + Sync) handler.
+struct MarkdownLinkTarget(WeakEntity<Folio>);
+
+impl Global for MarkdownLinkTarget {}
+
 pub struct Folio {
     project: Project,
     parked: Vec<Project>,
@@ -1872,6 +1879,7 @@ impl Folio {
                 appearance_subscription,
             ],
         };
+        cx.set_global(MarkdownLinkTarget(cx.entity().downgrade()));
         this.refresh_recent(RecentAction::Load, cx);
         this.tree_focus.focus(window, cx);
         // Packaged builds load Sparkle from the app bundle. `cargo run`
