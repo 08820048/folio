@@ -317,6 +317,9 @@ pub struct InputBaseState {
     pub(super) selecting: bool,
     /// The rectangle the mouse or the column keys are drawing, if they are.
     pub(super) box_selection: Option<BoxSelection>,
+    /// An option-click that has not moved yet. On mouse-up it adds a caret; a
+    /// drag turns it into a rectangle instead.
+    pub(super) option_click: Option<usize>,
     pub(crate) disabled: bool,
     pub(crate) readonly: bool,
     pub(crate) text_align: TextAlign,
@@ -619,6 +622,7 @@ impl InputBaseState {
             input_bounds: Bounds::default(),
             selecting: false,
             box_selection: None,
+            option_click: None,
             disabled: false,
             readonly: false,
             text_align: TextAlign::Left,
@@ -1916,6 +1920,10 @@ impl InputBaseState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.selections.len() > 1 {
+            self.delete_to_line_edge_at_every_selection(false, window, cx);
+            return;
+        }
         if !self.selections.primary().is_empty() {
             self.replace_text_in_range(None, "", window, cx);
             self.pause_blink_cursor(cx);
@@ -1941,6 +1949,10 @@ impl InputBaseState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.selections.len() > 1 {
+            self.delete_to_line_edge_at_every_selection(true, window, cx);
+            return;
+        }
         if !self.selections.primary().is_empty() {
             self.replace_text_in_range(None, "", window, cx);
             self.pause_blink_cursor(cx);
@@ -1966,6 +1978,10 @@ impl InputBaseState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.selections.len() > 1 {
+            self.delete_word_at_every_selection(false, window, cx);
+            return;
+        }
         if !self.selections.primary().is_empty() {
             self.replace_text_in_range(None, "", window, cx);
             self.pause_blink_cursor(cx);
@@ -1988,6 +2004,10 @@ impl InputBaseState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.selections.len() > 1 {
+            self.delete_word_at_every_selection(true, window, cx);
+            return;
+        }
         if !self.selections.primary().is_empty() {
             self.replace_text_in_range(None, "", window, cx);
             self.pause_blink_cursor(cx);
@@ -2130,6 +2150,7 @@ impl InputBaseState {
         }
 
         self.selecting = true;
+        self.option_click = None;
         let offset = self.index_for_mouse_position(event.position);
 
         if self.handle_click_hover_definition(event, offset, window, cx) {
@@ -2160,10 +2181,10 @@ impl InputBaseState {
             return;
         }
 
-        // The option key is what makes a drag a rectangle instead of a run of
-        // text: the same columns on every line it covers.
+        // Option-click adds a caret; option-drag turns into a rectangle on
+        // the first move. The set is left alone until one of those happens.
         if event.modifiers.alt {
-            self.begin_box(offset, cx);
+            self.option_click = Some(offset);
             return;
         }
 
@@ -2180,6 +2201,11 @@ impl InputBaseState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Some(offset) = self.option_click.take() {
+            self.selecting = false;
+            self.add_cursor_at(offset, cx);
+            return;
+        }
         if event.button == MouseButton::Right {
             if let Some((position, offset)) = self.pending_context_menu.take() {
                 self.handle_right_click_menu(position, offset, window, cx);
@@ -2854,6 +2880,9 @@ impl InputBaseState {
     /// During a drag: the rectangle follows the pointer if one is being drawn,
     /// and the selection otherwise.
     fn drag_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        if let Some(anchor) = self.option_click.take() {
+            self.begin_box(anchor, cx);
+        }
         if self.box_selection.is_some() {
             self.drag_box_to(offset, cx);
         } else {

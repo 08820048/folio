@@ -140,6 +140,10 @@ impl InputBaseState {
     }
 
     pub(super) fn left(&mut self, _: &MoveLeft, _: &mut Window, cx: &mut Context<Self>) {
+        if self.selections.len() > 1 {
+            self.move_all_horizontal(false, cx);
+            return;
+        }
         self.pause_blink_cursor(cx);
         if self.selections.primary().is_empty() {
             self.move_to(self.previous_boundary(self.cursor()), None, cx);
@@ -149,6 +153,10 @@ impl InputBaseState {
     }
 
     pub(super) fn right(&mut self, _: &MoveRight, _: &mut Window, cx: &mut Context<Self>) {
+        if self.selections.len() > 1 {
+            self.move_all_horizontal(true, cx);
+            return;
+        }
         self.pause_blink_cursor(cx);
         if self.selections.primary().is_empty() {
             self.move_to(self.next_boundary(self.selections.primary().end), None, cx);
@@ -163,6 +171,10 @@ impl InputBaseState {
         }
 
         if self.mode.is_single_line() {
+            return;
+        }
+        if self.selections.len() > 1 {
+            self.move_all_vertical(-1, cx);
             return;
         }
 
@@ -183,6 +195,10 @@ impl InputBaseState {
         }
 
         if self.mode.is_single_line() {
+            return;
+        }
+        if self.selections.len() > 1 {
+            self.move_all_vertical(1, cx);
             return;
         }
 

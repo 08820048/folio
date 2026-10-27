@@ -16,6 +16,8 @@ Notable changes to Folio. The detailed, dated implementation log is
 - Read-only paged viewer for files over 32 MiB, and a hex view for binary or
   non-UTF-8 files.
 - Terminal scrollback search (`⌘F`), with next/previous match and highlight.
+- Complete multi-cursor: option-click adds a caret, arrows move every caret, and
+  word/line deletes apply to all of them.
 - Quick-open relevance ordering and per-project recent files.
 - Reopen closed tab, tab keyboard navigation and a scrolling tab strip.
 - Save-all (`⌥⌘S`) and code-size zoom (`⌘+` / `⌘-` / `⌘0`).

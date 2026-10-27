@@ -354,8 +354,9 @@ JSON — say so instead of inserting a marker the file cannot use.
 
 ## Multi-cursor
 
-Four keys make more than one cursor and one takes it back down, all of them
-bound to the code editor's own key context.
+`⌘D`, `⇧⌘L`, `⌥⌘↑` / `⌥⌘↓`, `⇧⌥↑` / `⇧⌥↓` and `⌥`-click make more than one
+cursor; Escape takes the set back down to one. They are bound to the code
+editor's own key context.
 
 **`⌘D` takes the word, then the next place it appears.** With the caret inside
 a word the first press selects that word; each press after it adds the next
@@ -366,13 +367,16 @@ the file.
 
 **`⌥⌘↑` and `⌥⌘↓` add a caret on the line above or below**, in the column the
 outermost caret was in, so holding either key grows a block of cursors a line
-at a time. **Escape** goes back to one cursor — the one the caret was in — and
-with one cursor it does whatever it did before.
+at a time. A plain **`⌥`-click** adds a caret at the pointer, while an
+`⌥`-drag still draws a rectangle. **Escape** goes back to one cursor — the one
+the caret was in — and with one cursor it does whatever it did before.
 
 Everything the editor does to one selection, it then does to all of them:
-typing, pasting, `⌫` and `⌦`, and Enter, which breaks the line at every caret
-with the indentation of the line it breaks — and lays out the pair, the way it
-does for one cursor, wherever a caret sits inside a pair of brackets. Copying
+typing, pasting, `⌫` and `⌦`, `⌥⌫` / `⌥⌦` (a word), `⌘⌫` / `⌘⌦` (to the line
+edge), arrow keys (every caret moves), and Enter, which breaks the line at
+every caret with the indentation of the line it breaks — and lays out the
+pair, the way it does for one cursor, wherever a caret sits inside a pair of
+brackets. Copying
 joins the selections with newlines, so pasting them somewhere else gives back
 one line each. However many selections the edit covered, it is one edit: one
 step on the undo stack, and one change to the file.
@@ -387,13 +391,11 @@ ordinary set behind.
 The columns are counted in characters rather than in pixels: on lines holding
 tabs or wide characters, it is a column of text rather than a drawn rectangle.
 
-Three things do not multiply, and each says so rather than half-working. A
-bracket is typed at every cursor instead of pairing around a selection, because
-with several there is no single selection to wrap. `⌘/` comments the block from
-the first cursor to the last as one edit, and leaves it selected the way it
-does for one cursor. And a click, an arrow key or any other movement collapses
-the set to one cursor — deliberately, because it means there is never a caret
-somewhere the cursor commands do not know about.
+Two things do not multiply. A bracket is typed at every cursor instead of
+pairing around a selection, because with several there is no single selection
+to wrap. `⌘/` comments the block from the first cursor to the last as one edit,
+and leaves it selected the way it does for one cursor. A plain click still
+collapses the set to the caret under the pointer; an `⌥`-click adds one.
 
 `⇧⌘L` and `⌘D` stop at 1,000 selections: on a common word in a large file they
 take the first thousand and go no further.
@@ -696,11 +698,8 @@ happens: a clean buffer reloads, a dirty one is asked to Reload or Keep. Move to
 through Finder, so macOS raises an automation permission prompt the first time
 and a refusal surfaces as an error; the Recycle Bin and `gio trash` paths behind
 the other platforms are written but untested on real hardware. Multi-cursor
-covers typing, pasting, deleting, Enter and the four cursor commands, and stops
-there: there is no `⌥`-click to add a cursor, an arrow key collapses the set
-rather than moving it, and the word- and line-delete commands (`⌥⌫`, `⌥⌦`,
-`⌘⌫`, `⌘⌦`) were left as they were, so they can act on one cursor rather than
-all of them. An edit through the set is one step on the undo stack and comes
+covers typing, pasting, deleting, Enter, arrows, `⌥`-click, the four cursor
+commands and the word/line deletes. An edit through the set is one step on the undo stack and comes
 back in one, though the cursors it covered are not restored. Enter indents to
 the line it breaks, but not when the line merely ends with an opener: a `{`
 whose pair is not there — deleted, or never inserted because the character in

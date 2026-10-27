@@ -61,17 +61,22 @@ rather than a read of the whole crate.
   the operations a multi-cursor is built out of.
 - `input/base/multi_cursor.rs` — new. The commands that make more than one
   selection, the edit that lands at every one of them, the collapse back to one,
-  and the rectangle the mouse and the column keys draw. A batch edit emits one
-  `Change` and the occurrence search stops at `MAX_SELECTIONS`.
+  and the rectangle the mouse and the column keys draw. An option-click adds a
+  caret (`add_cursor_at`); arrow keys move every caret; word and line deletes
+  grow and delete at every selection. A batch edit emits one `Change` and the
+  occurrence search stops at `MAX_SELECTIONS`.
 - `input/base/state.rs` — where the set is read and written: a keystroke, a
   backspace, an Enter, an escape, a paste and a cut, and the hooks that reach
-  `multi_cursor.rs`, an option-drag among them — plus the two folding commands
+  `multi_cursor.rs`, an option-click/drag among them — plus the two folding commands
   and what they do with a caret the fold has hidden. Escape during an IME
   composition deletes the marked run instead of only dropping the underline.
   `set_context_menu_enabled` is public so Folio can keep the caret move on
   right-click and draw its own menu instead of the OS one. `set_font` is
   public so a code editor can paint in the code face rather than the UI face.
   `set_cursor_animation` turns on the caret glide.
+- `input/base/movement.rs` — `left` / `right` / `up` / `down` route to the
+  all-caret movement in `multi_cursor.rs` when the set has more than one entry;
+  a single caret keeps the layout-aware path.
 - `input/base/element.rs` — drawing every selection as a path of its own and
   every caret as a quad, in the coordinates the primary's already used. The
   pair of brackets under the caret is drawn as a slightly larger wash behind

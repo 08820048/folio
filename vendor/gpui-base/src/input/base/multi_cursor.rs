@@ -16,6 +16,7 @@ use std::ops::Range;
 
 use gpui::{Context, EntityInputHandler as _, Window};
 use sum_tree::Bias;
+use unicode_segmentation::UnicodeSegmentation;
 
 use super::{BoxSelection, InputBaseState, Selection};
 use crate::input::change::Change;
@@ -195,6 +196,174 @@ impl InputBaseState {
         self.update_preferred_column();
         cx.notify();
         true
+    }
+}
+
+/// Movement and deletion with more than one selection.
+impl InputBaseState {
+    /// Option-click: add a caret at `offset`. A click inside an existing
+    /// non-empty selection moves the caret there instead of leaving two
+    /// selections that overlap.
+    pub fn add_cursor_at(&mut self, offset: usize, cx: &mut Context<Self>) {
+        if self.selections.len() >= MAX_SELECTIONS {
+            return;
+        }
+        let selection = Selection::new(offset, offset);
+        if self
+            .selections
+            .all()
+            .iter()
+            .any(|existing| !existing.is_empty() && existing.contains(offset))
+        {
+            self.selections.select_only(selection);
+        } else if !self.selections.all().contains(&selection) {
+            self.selections.add(selection);
+        }
+        self.end_box();
+        self.scroll_to(offset, None, cx);
+        self.pause_blink_cursor(cx);
+        self.update_preferred_column();
+        cx.notify();
+    }
+
+    /// Move every caret one line up or down, keeping each one's byte column
+    /// within the target line. A selection collapses to the edge it is
+    /// moving from first, exactly as a single caret does.
+    pub fn move_all_vertical(&mut self, step: isize, cx: &mut Context<Self>) {
+        if self.selections.len() <= 1 || self.mode.is_single_line() || step == 0 {
+            return;
+        }
+        self.end_box();
+        let last = self.text.lines_len().saturating_sub(1) as isize;
+        let mut next = Vec::with_capacity(self.selections.len());
+        for selection in self.selections.in_text_order() {
+            let anchor = if step < 0 {
+                selection.start
+            } else {
+                selection.end
+            };
+            let point = self.text.offset_to_point(anchor);
+            let row = (point.row as isize + step).clamp(0, last) as usize;
+            let column = point.column.min(self.text.line_len(row));
+            let offset = self.text.line_start_offset(row) + column;
+            let offset = self.text.clip_offset(offset, Bias::Left);
+            next.push(Selection::new(offset, offset));
+        }
+        self.selections.replace_all(next);
+        self.scroll_to(self.cursor(), None, cx);
+        self.pause_blink_cursor(cx);
+        self.update_preferred_column();
+        cx.notify();
+    }
+
+    /// Move every caret left or right. A non-empty selection collapses to
+    /// its near edge on the first press, as it does with one caret.
+    pub fn move_all_horizontal(&mut self, forward: bool, cx: &mut Context<Self>) {
+        if self.selections.len() <= 1 {
+            return;
+        }
+        self.end_box();
+        let mut next = Vec::with_capacity(self.selections.len());
+        for selection in self.selections.in_text_order() {
+            let offset = if !selection.is_empty() {
+                if forward { selection.end } else { selection.start }
+            } else if forward {
+                self.next_boundary(selection.end)
+            } else {
+                self.previous_boundary(selection.start)
+            };
+            next.push(Selection::new(offset, offset));
+        }
+        self.selections.replace_all(next);
+        self.scroll_to(self.cursor(), None, cx);
+        self.pause_blink_cursor(cx);
+        self.update_preferred_column();
+        cx.notify();
+    }
+
+    /// ⌥⌫ / ⌥⌦ with a set: grow every caret over its own word and delete.
+    pub fn delete_word_at_every_selection(
+        &mut self,
+        forward: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selections.len() <= 1 {
+            return;
+        }
+        let mut ranges = Vec::with_capacity(self.selections.len());
+        for selection in self.selections.in_text_order() {
+            if !selection.is_empty() {
+                ranges.push(selection);
+                continue;
+            }
+            let (start, end) = if forward {
+                (selection.end, self.next_end_of_word_at(selection.end))
+            } else {
+                (self.previous_start_of_word_at(selection.start), selection.start)
+            };
+            ranges.push(Selection::new(start, end));
+        }
+        self.selections.replace_all(ranges);
+        self.replace_in_every_selection("", window, cx);
+    }
+
+    /// ⌘⌫ / ⌘⌦ with a set: delete from every caret to its line edge.
+    pub fn delete_to_line_edge_at_every_selection(
+        &mut self,
+        forward: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selections.len() <= 1 {
+            return;
+        }
+        let mut ranges = Vec::with_capacity(self.selections.len());
+        for selection in self.selections.in_text_order() {
+            if !selection.is_empty() {
+                ranges.push(selection);
+                continue;
+            }
+            let point = self.text.offset_to_point(selection.start);
+            let line_start = self.text.line_start_offset(point.row);
+            let line_end = line_start + self.text.line_len(point.row);
+            let (start, end) = if forward {
+                let end = if selection.start >= line_end {
+                    (line_end + 1).min(self.text.len())
+                } else {
+                    line_end
+                };
+                (selection.start, end.max(selection.start))
+            } else {
+                let start = if selection.start <= line_start {
+                    line_start.saturating_sub(1)
+                } else {
+                    line_start
+                };
+                (start, selection.start)
+            };
+            ranges.push(Selection::new(start, end));
+        }
+        self.selections.replace_all(ranges);
+        self.replace_in_every_selection("", window, cx);
+    }
+
+    fn previous_start_of_word_at(&self, offset: usize) -> usize {
+        let offset = self.offset_from_utf16(self.offset_to_utf16(offset));
+        let left = self.text.slice(0..offset).to_string();
+        UnicodeSegmentation::split_word_bound_indices(left.as_str())
+            .rfind(|(_, word)| !word.trim_start().is_empty())
+            .map(|(index, _)| index)
+            .unwrap_or(0)
+    }
+
+    fn next_end_of_word_at(&self, offset: usize) -> usize {
+        let offset = self.offset_from_utf16(self.offset_to_utf16(offset));
+        let right = self.text.slice(offset..self.text.len()).to_string();
+        UnicodeSegmentation::split_word_bound_indices(right.as_str())
+            .find(|(_, word)| !word.trim_start().is_empty())
+            .map(|(index, word)| offset + index + word.len())
+            .unwrap_or(self.text.len())
     }
 }
 

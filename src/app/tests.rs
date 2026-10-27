@@ -3097,6 +3097,35 @@ fn multi_cursor_edits_every_selection(cx: &mut TestAppContext) {
         assert_eq!(value(cx), "two\none\nthree\n");
         app.move_lines(false, window, cx);
         assert_eq!(value(cx), "one\ntwo\nthree\n");
+
+        // Option-click adds a caret rather than replacing the set.
+        start("one\ntwo\n", 0..0, window, cx);
+        base.update(cx, |base, cx| base.add_cursor_at(4, cx));
+        assert_eq!(ranges(cx), vec![0..0, 4..4]);
+
+        // Arrows move every caret.
+        start("a\nb\nc\n", 0..0, window, cx);
+        app.on_active_buffer(cx, |base, cx| base.add_cursor_below(cx));
+        assert_eq!(ranges(cx), vec![0..0, 2..2]);
+        base.update(cx, |base, cx| base.move_all_vertical(1, cx));
+        assert_eq!(ranges(cx), vec![2..2, 4..4]);
+        base.update(cx, |base, cx| base.move_all_horizontal(true, cx));
+        assert_eq!(ranges(cx), vec![3..3, 5..5]);
+
+        // Word and line deletion land at every caret.
+        start("aa bb\naa bb\n", 2..2, window, cx);
+        app.on_active_buffer(cx, |base, cx| base.add_cursor_below(cx));
+        base.update(cx, |base, cx| {
+            base.delete_word_at_every_selection(false, window, cx)
+        });
+        assert_eq!(value(cx), " bb\n bb\n");
+
+        start("aa bb\naa bb\n", 2..2, window, cx);
+        app.on_active_buffer(cx, |base, cx| base.add_cursor_below(cx));
+        base.update(cx, |base, cx| {
+            base.delete_to_line_edge_at_every_selection(true, window, cx)
+        });
+        assert_eq!(value(cx), "aa\naa\n");
     });
 }
 
