@@ -60,6 +60,11 @@ cargo test --locked --no-default-features
 cargo clippy --locked --all-targets --features desktop-tests -- -D warnings
 ```
 
+## Result
+
+After pushing the fixes, the GitHub API's open-alert endpoint returned **0**
+alerts for the branch (down from 42).
+
 ## Residual risk
 
 - GPUI, `gpui_platform`, `gpui-component` and `alacritty_terminal` are pinned
