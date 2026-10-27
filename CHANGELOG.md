@@ -18,6 +18,13 @@ Notable changes to Folio. The detailed, dated implementation log is
 - Save-all (`⌥⌘S`) and code-size zoom (`⌘+` / `⌘-` / `⌘0`).
 - macOS CI for formatting, tests and clippy.
 
+### Security
+
+- Pruned the website's unused `geist` and runtime `shadcn` dependency chains
+  (Next.js, MCP SDK, undici and friends), updated Vite/source-map-js and
+  rustls to their patched releases. `npm audit` is clean; see
+  `docs/dependency-audit-2026-10-27.md`.
+
 ### Changed
 
 - `src/app.rs` split into `src/app/mod.rs` plus focused modules and `tests.rs`.

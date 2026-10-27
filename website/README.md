@@ -1,7 +1,10 @@
 # Folio website
 
 React + Vite + Tailwind CSS v4, components from [coss ui](https://coss.com/ui/docs)
-(added through the shadcn CLI with `@coss/style`, built on Base UI). The editor
+(added through the shadcn CLI with `@coss/style`, built on Base UI). The CLI is
+a dev-time `npx shadcn` call, not a dependency; its Tailwind base is vendored
+at `src/shadcn-tailwind.css` (MIT) so the production lockfile does not pull in
+the CLI's server/MCP stack. The editor
 illustration is a labeled interactive mock, not a screenshot or a live editor.
 Production: https://folio-website-7j4.pages.dev
 Only `dist/` (generated) plus the static files in `public/` are deployed. App
