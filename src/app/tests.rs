@@ -1335,6 +1335,60 @@ fn a_closed_tab_can_be_reopened(cx: &mut TestAppContext) {
     });
 }
 
+/// A binary file opens in the read-only page viewer, with hex offsets and no
+/// Document behind it.
+#[gpui::test]
+fn a_binary_file_opens_in_the_page_viewer(cx: &mut TestAppContext) {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let blob = root.join("blob.bin");
+    std::fs::write(&blob, [0x41, 0x00, 0x42, 0xff].repeat(5_000)).unwrap();
+
+    cx.update(gpui_component::init);
+    let cx = cx.add_empty_window();
+    let view = cx.update(|window, cx| {
+        cx.new(|cx| {
+            let mut app = Folio::new(window, cx);
+            app.recent_task = None;
+            app.recent_file = root.join("recent.json");
+            app.settings_file = root.join("settings.json");
+            app.window_file = root.join("window.json");
+            app.settings = Settings::default();
+            app.applied_ignored = app.settings.ignored.clone();
+            app
+        })
+    });
+    view.update_in(cx, |app, window, cx| {
+        app.request(Next::Open(root.clone()), window, cx)
+    });
+    cx.run_until_parked();
+    view.update_in(cx, |app, window, cx| {
+        app.open_file(blob.clone(), window, cx)
+    });
+    cx.run_until_parked();
+    view.update_in(cx, |app, window, cx| {
+        let large = app.project.large_file.as_ref().expect("binary page viewer");
+        assert_eq!(large.path, blob);
+        assert!(large.binary);
+        assert_eq!(large.pages, 2);
+        assert_eq!(large.page, 0);
+        assert!(large.text.starts_with("00000000"));
+        assert!(
+            app.project.documents.is_empty(),
+            "no editor behind the page viewer"
+        );
+        let _ = app.render(window, cx);
+    });
+
+    view.update_in(cx, |app, _, cx| app.load_large_page(1, cx));
+    cx.run_until_parked();
+    view.update_in(cx, |app, _, _| {
+        let large = app.project.large_file.as_ref().unwrap();
+        assert_eq!(large.page, 1);
+        assert!(large.text.starts_with("00004000"), "{}", large.text);
+    });
+}
+
 /// Image zoom is bounded and Fit returns to the fitted view.
 #[gpui::test]
 fn image_zoom_clamps_and_fit_resets(cx: &mut TestAppContext) {

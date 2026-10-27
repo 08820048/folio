@@ -13,6 +13,8 @@ Notable changes to Folio. The detailed, dated implementation log is
 - Review marks in the changes list and diff header, saved with the session.
 - Markdown relative images and in-app document links.
 - Image zoom and pan (25%–800%, fit, `⌘`-scroll, pinch).
+- Read-only paged viewer for files over 32 MiB, and a hex view for binary or
+  non-UTF-8 files.
 - Quick-open relevance ordering and per-project recent files.
 - Reopen closed tab, tab keyboard navigation and a scrolling tab strip.
 - Save-all (`⌥⌘S`) and code-size zoom (`⌘+` / `⌘-` / `⌘0`).

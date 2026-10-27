@@ -590,6 +590,36 @@ struct Document {
     _subscription: Subscription,
 }
 
+/// A file opened in the read-only page viewer. The whole file is never in
+/// memory: `text` is one page, and `load_large_page` replaces it on navigation.
+struct LargeFile {
+    path: PathBuf,
+    size: u64,
+    binary: bool,
+    page: usize,
+    pages: u64,
+    text: String,
+    loading: bool,
+    error: Option<String>,
+    request: u64,
+}
+
+impl LargeFile {
+    fn new(path: PathBuf, size: u64, binary: bool) -> Self {
+        Self {
+            path,
+            size,
+            binary,
+            page: 0,
+            pages: preview::page_count(size, binary),
+            text: String::new(),
+            loading: false,
+            error: None,
+            request: 0,
+        }
+    }
+}
+
 /// Rainbow colours on every matched pair. The caret's match is drawn by
 /// the editor from the same pair list, so it updates as the caret moves.
 struct BracketPaint {
@@ -1176,6 +1206,9 @@ struct Project {
     /// natural size times this factor and the pane scrolls.
     image_zoom: f32,
     image_scroll: ScrollHandle,
+    /// The read-only page viewer, when the active file is too large (or too
+    /// binary) for the editor.
+    large_file: Option<LargeFile>,
     workspace: Option<Workspace>,
     directories: HashMap<PathBuf, Vec<Entry>>,
     expanded: HashSet<PathBuf>,
@@ -1227,6 +1260,7 @@ impl Default for Project {
             image: None,
             image_zoom: 1.,
             image_scroll: ScrollHandle::new(),
+            large_file: None,
             workspace: None,
             directories: HashMap::new(),
             expanded: HashSet::new(),
@@ -1657,6 +1691,9 @@ fn remap_project_paths(project: &mut Project, from: &Path, to: &Path) {
     if let Some((image, render)) = project.image.take() {
         project.image = Some((moved(&image, from, to).unwrap_or(image), render));
     }
+    if let Some(large) = project.large_file.as_mut() {
+        large.path = moved(&large.path, from, to).unwrap_or_else(|| large.path.clone());
+    }
     for pane in &mut project.panes {
         if let Some(active) = pane.active.take() {
             pane.active = Some(moved(&active, from, to).unwrap_or(active));
@@ -2055,6 +2092,14 @@ impl Folio {
                 }
             }
             self.project.documents.remove(path);
+            if self
+                .project
+                .large_file
+                .as_ref()
+                .is_some_and(|large| large.path == *path)
+            {
+                self.project.large_file = None;
+            }
             self.project.pinned.remove(path);
             self.project.read_only.remove(path);
             if self
@@ -3001,6 +3046,21 @@ impl Folio {
             self.next_restore(window, cx);
             return;
         }
+        if self
+            .project
+            .large_file
+            .as_ref()
+            .is_some_and(|large| large.path == path)
+        {
+            self.loading = false;
+            self.tree_focus.focus(window, cx);
+            self.update_title(window);
+            self.follow_diff(window, cx);
+            cx.notify();
+            self.next_restore(window, cx);
+            return;
+        }
+        self.project.large_file = None;
         if let Some(doc) = self.project.documents.get(&path) {
             let editor = doc.editor.clone();
             self.loading = false;
@@ -3033,7 +3093,7 @@ impl Folio {
             // directory tree — which is work for this side of the executor.
             let indent = match &content {
                 Content::Text(_) => editorconfig::Rules::for_path(&path).indent(configured),
-                Content::Image(_) => configured,
+                Content::Image(_) | Content::Large { .. } => configured,
             };
             Ok::<_, std::io::Error>((path, content, indent))
         });
@@ -3141,10 +3201,59 @@ impl Folio {
                             this.read_blame(window, cx);
                         }
                     }
+                    Ok((path, Content::Large { size, binary }, _)) => {
+                        this.project.image = None;
+                        this.project.large_file = Some(LargeFile::new(path.clone(), size, binary));
+                        this.project.show_path(path);
+                        this.clear_notice();
+                        this.tree_focus.focus(window, cx);
+                        this.update_title(window);
+                        this.load_large_page(0, cx);
+                        this.follow_diff(window, cx);
+                    }
                     Err(e) => this.error(e.to_string(), cx),
                 }
                 cx.notify();
                 this.next_restore(window, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Read one page of the active large file. A newer page (or a closed
+    /// viewer) makes an older result harmless: both the request and the page
+    /// are checked when it lands.
+    fn load_large_page(&mut self, page: usize, cx: &mut Context<Self>) {
+        let Some(large) = self.project.large_file.as_mut() else {
+            return;
+        };
+        let last = large.pages.saturating_sub(1) as usize;
+        let page = page.min(last);
+        large.page = page;
+        large.loading = true;
+        large.error = None;
+        large.request = large.request.wrapping_add(1);
+        let request = large.request;
+        let path = large.path.clone();
+        let binary = large.binary;
+        let task = cx
+            .background_executor()
+            .spawn(async move { preview::read_page(&path, page, binary) });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                let Some(large) = this.project.large_file.as_mut() else {
+                    return;
+                };
+                if large.request != request || large.page != page {
+                    return;
+                }
+                large.loading = false;
+                match result {
+                    Ok(text) => large.text = text,
+                    Err(error) => large.error = Some(error.to_string()),
+                }
+                cx.notify();
             });
         })
         .detach();

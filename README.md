@@ -131,7 +131,10 @@ Images preview in place, scaled to fit: PNG, JPEG, GIF, WebP, BMP, TIFF, ICO
 and SVG. GIF and WebP show their first frame, and an image never enters the
 text editing or saving path. The footer has −/+/Fit buttons, `⌘`-scroll or a
 trackpad pinch zooms between 25% and 800%, and once zoomed the pane scrolls to
-pan. Markdown (`.md`, `.mdx`, `.markdown`) opens as a
+pan. A file over 32 MiB opens in a read-only page viewer — 64 KiB text pages or
+16 KiB hex pages, with page navigation and no Document or save path behind it;
+binary and non-UTF-8 files use the hex pages too. Markdown (`.md`, `.mdx`,
+`.markdown`) opens as a
 rendered preview; Preview / Source on the file, or `⇧⌘V`, switches to the
 same buffer as source. Relative image paths resolve against the note's own
 folder and render inline; a relative link to another file in the project opens
@@ -675,8 +678,8 @@ moving the copy to a new revision.
 
 This is a runnable development version. First-release performance and
 cross-platform acceptance are not finished. A single file above 5 MiB turns
-highlighting off and one above 32 MiB is refused; text must be UTF-8 and
-symlinks are skipped. Quick open indexes at most 100,000 files and shows 100
+highlighting off; one above 32 MiB opens read-only in pages rather than in the
+editor. Binary and non-UTF-8 files open as hex pages. Symlinks are skipped. Quick open indexes at most 100,000 files and shows 100
 matches. Project search skips files above 2 MiB and caps results at 1000
 matches over 200 files; results stream in as files finish and **Stop** keeps
 the partial list. Bitmaps

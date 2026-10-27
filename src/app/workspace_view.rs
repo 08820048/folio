@@ -376,6 +376,102 @@ impl Folio {
             .into_any_element()
     }
 
+    /// The page viewer for a file that is too large for the editor, or is not
+    /// UTF-8. It is read-only by construction: there is no Document behind it.
+    fn render_large_file(&self, large: &LargeFile, cx: &mut Context<Self>) -> AnyElement {
+        let pages = large.pages.max(1);
+        let page = (large.page as u64).min(pages - 1) as usize;
+        let mut header = format!(
+            "{} · {} · read-only · page {}/{}",
+            name(&large.path),
+            preview::size_label(large.size),
+            page + 1,
+            pages
+        );
+        if large.loading {
+            header.push_str(" · reading…");
+        }
+        let body = if let Some(error) = &large.error {
+            div()
+                .p_4()
+                .text_size(ui(12.))
+                .text_color(cx.theme().warning)
+                .child(error.clone())
+                .into_any_element()
+        } else if large.text.is_empty() && large.loading {
+            div()
+                .p_4()
+                .text_size(ui(12.))
+                .text_color(cx.theme().muted_foreground)
+                .child("Reading page…")
+                .into_any_element()
+        } else {
+            let text = TextView::markdown(
+                format!("large-preview:{}:{}", large.path.to_string_lossy(), page),
+                preview::text_fence(&large.text),
+            )
+            .selectable(true)
+            .scrollable(true)
+            .text_size(ui(12.))
+            .font_family(self.code_font())
+            .h_full()
+            .w_full()
+            .p_4();
+            text.into_any_element()
+        };
+        div()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .px_4()
+                    .py_1()
+                    .border_b_1()
+                    .border_color(cx.theme().border)
+                    .text_size(ui(11.))
+                    .text_color(cx.theme().muted_foreground)
+                    .child(div().truncate().child(header)),
+            )
+            .child(div().flex_1().min_h_0().w_full().child(body))
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .px_3()
+                    .py_1()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_size(ui(11.))
+                    .text_color(cx.theme().muted_foreground)
+                    .child(Self::icon_button(
+                        "large-prev",
+                        IconName::ChevronLeft,
+                        "Previous page",
+                        move |this, _, cx| this.load_large_page(page.saturating_sub(1), cx),
+                        cx,
+                    ))
+                    .child(format!("{} / {}", page + 1, pages))
+                    .child(Self::icon_button(
+                        "large-next",
+                        IconName::ChevronRight,
+                        "Next page",
+                        move |this, _, cx| this.load_large_page(page + 1, cx),
+                        cx,
+                    ))
+                    .child(div().flex_1())
+                    .child(if large.binary {
+                        "hex · editing disabled"
+                    } else {
+                        "text · editing disabled"
+                    }),
+            )
+            .into_any_element()
+    }
+
     pub(super) fn render_markdown_bar(&self, preview: bool, cx: &Context<Self>) -> AnyElement {
         div()
             .flex_shrink_0()
@@ -548,6 +644,14 @@ impl Folio {
                     .image
                     .as_ref()
                     .filter(|(path, _)| pane.active.as_ref() == Some(path))
+            })
+            .flatten();
+        let large = (!showing_diff)
+            .then(|| {
+                self.project
+                    .large_file
+                    .as_ref()
+                    .filter(|large| pane.active.as_ref() == Some(&large.path))
             })
             .flatten();
         let blame = focused.then(|| self.blame_text(cx)).flatten();
@@ -829,35 +933,41 @@ impl Folio {
                                 ),
                         )
                     })
-                    .when(!showing_diff && doc.is_none() && image.is_none(), |el| {
-                        el.child(
-                            div()
-                                .size_full()
-                                .flex()
-                                .flex_col()
-                                .gap_3()
-                                .justify_center()
-                                .items_center()
-                                .child(
-                                    div()
-                                        .text_size(if empty_solo { ui(24.) } else { ui(15.) })
-                                        .text_color(cx.theme().accent_foreground)
-                                        .child(if empty_solo {
-                                            "Some room to read a little code."
-                                        } else {
-                                            "Open a file"
-                                        }),
-                                )
-                                .when(empty_solo, |el| {
-                                    el.child(
+                    .when_some(large, |el, large| {
+                        el.child(self.render_large_file(large, cx))
+                    })
+                    .when(
+                        !showing_diff && doc.is_none() && image.is_none() && large.is_none(),
+                        |el| {
+                            el.child(
+                                div()
+                                    .size_full()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_3()
+                                    .justify_center()
+                                    .items_center()
+                                    .child(
                                         div()
-                                            .text_size(ui(12.))
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child("Pick a file on the left, or press ⌘ P"),
+                                            .text_size(if empty_solo { ui(24.) } else { ui(15.) })
+                                            .text_color(cx.theme().accent_foreground)
+                                            .child(if empty_solo {
+                                                "Some room to read a little code."
+                                            } else {
+                                                "Open a file"
+                                            }),
                                     )
-                                }),
-                        )
-                    }),
+                                    .when(empty_solo, |el| {
+                                        el.child(
+                                            div()
+                                                .text_size(ui(12.))
+                                                .text_color(cx.theme().muted_foreground)
+                                                .child("Pick a file on the left, or press ⌘ P"),
+                                        )
+                                    }),
+                            )
+                        },
+                    ),
             )
             .into_any_element()
     }

@@ -12,10 +12,17 @@ pub const FILE_LIMIT: u64 = 32 * 1024 * 1024;
 pub fn read(path: &Path) -> io::Result<String> {
     let bytes = read_bytes(path)?;
     if bytes.contains(&0) {
-        return Err(io::Error::other("Cannot preview: binary file"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Cannot preview: binary file",
+        ));
     }
-    String::from_utf8(bytes)
-        .map_err(|_| io::Error::other("Cannot preview: only UTF-8 text is supported"))
+    String::from_utf8(bytes).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Cannot preview: only UTF-8 text is supported",
+        )
+    })
 }
 
 pub fn read_bytes(path: &Path) -> io::Result<Vec<u8>> {
