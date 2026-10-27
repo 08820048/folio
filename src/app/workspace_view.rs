@@ -455,6 +455,22 @@ impl Folio {
         view.into_any_element()
     }
 
+    /// `⌘`-scroll, pinch, or the footer buttons. 100% means fit-to-window:
+    /// above it the image is natural size × factor and the pane scrolls.
+    pub(super) fn zoom_image(&mut self, delta: f32, cx: &mut Context<Self>) {
+        let next = (self.project.image_zoom + delta).clamp(0.25, 8.0);
+        if (next - self.project.image_zoom).abs() > f32::EPSILON {
+            self.project.image_zoom = next;
+            cx.notify();
+        }
+    }
+
+    pub(super) fn reset_image_view(&mut self, cx: &mut Context<Self>) {
+        self.project.image_zoom = 1.0;
+        self.project.image_scroll = ScrollHandle::new();
+        cx.notify();
+    }
+
     /// Follow a Markdown link. Relative paths resolve against the note that
     /// contains them and open in Folio; http(s), mail and data URLs go to the
     /// system opener; a file outside the project opens in the default app.
@@ -705,25 +721,112 @@ impl Folio {
                         )
                     })
                     .when_some(image, |el, (path, image)| {
-                        el.child(
-                            div().flex_1().min_h_0().w_full().p_6().child(
-                                img(image.clone())
-                                    .size_full()
-                                    .object_fit(ObjectFit::Contain),
-                            ),
-                        )
-                        .child(
+                        let zoom = self.project.image_zoom;
+                        let fitted = (zoom - 1.0).abs() < f32::EPSILON;
+                        let natural = image.size(0);
+                        let width = u32::from(natural.width) as f32;
+                        let height = u32::from(natural.height) as f32;
+                        let viewer = div()
+                            .id("image-viewer")
+                            .flex_1()
+                            .min_h_0()
+                            .w_full()
+                            .on_pinch(cx.listener(|this, event: &PinchEvent, _, cx| {
+                                this.zoom_image(event.delta, cx);
+                                cx.stop_propagation();
+                            }))
+                            .on_scroll_wheel(cx.listener(
+                                |this, event: &ScrollWheelEvent, _, cx| {
+                                    if !(event.modifiers.platform || event.modifiers.control) {
+                                        return;
+                                    }
+                                    let delta = match &event.delta {
+                                        ScrollDelta::Lines(delta) => delta.y,
+                                        ScrollDelta::Pixels(delta) => f32::from(delta.y),
+                                    };
+                                    if delta != 0. {
+                                        this.zoom_image(delta.signum() * 0.1, cx);
+                                    }
+                                    cx.stop_propagation();
+                                },
+                            ));
+                        let viewer = if fitted {
+                            viewer.child(
+                                div().size_full().p_6().child(
+                                    img(image.clone())
+                                        .size_full()
+                                        .object_fit(ObjectFit::Contain),
+                                ),
+                            )
+                        } else {
+                            viewer
+                                .overflow_scroll()
+                                .track_scroll(&self.project.image_scroll)
+                                .child(
+                                    div()
+                                        .min_w_full()
+                                        .min_h_full()
+                                        .p_6()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .child(
+                                            img(image.clone())
+                                                .w(px(width * zoom))
+                                                .h(px(height * zoom))
+                                                .object_fit(ObjectFit::Fill),
+                                        ),
+                                )
+                        };
+                        el.child(viewer).child(
                             div()
                                 .px_4()
                                 .py_2()
+                                .flex()
+                                .items_center()
+                                .gap_3()
                                 .text_size(ui(11.))
                                 .text_color(cx.theme().muted_foreground)
-                                .child(format!(
+                                .child(div().flex_1().min_w_0().truncate().child(format!(
                                     "{} · {} × {} · static preview",
                                     name(path),
-                                    u32::from(image.size(0).width),
-                                    u32::from(image.size(0).height)
-                                )),
+                                    u32::from(natural.width),
+                                    u32::from(natural.height)
+                                )))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_shrink_0()
+                                        .items_center()
+                                        .gap_1()
+                                        .child(Self::icon_button(
+                                            "image-zoom-out",
+                                            IconName::Minus,
+                                            "Zoom out",
+                                            |this, _, cx| this.zoom_image(-0.25, cx),
+                                            cx,
+                                        ))
+                                        .child(
+                                            div()
+                                                .w(px(38.))
+                                                .text_right()
+                                                .child(format!("{:.0}%", zoom * 100.)),
+                                        )
+                                        .child(Self::icon_button(
+                                            "image-zoom-in",
+                                            IconName::Plus,
+                                            "Zoom in",
+                                            |this, _, cx| this.zoom_image(0.25, cx),
+                                            cx,
+                                        ))
+                                        .child(Self::icon_button(
+                                            "image-fit",
+                                            IconName::Maximize,
+                                            "Fit to window",
+                                            |this, _, cx| this.reset_image_view(cx),
+                                            cx,
+                                        )),
+                                ),
                         )
                     })
                     .when(!showing_diff && doc.is_none() && image.is_none(), |el| {

@@ -125,7 +125,9 @@ sizes, font and indentation come from the settings, and soft wrap is off.
 
 Images preview in place, scaled to fit: PNG, JPEG, GIF, WebP, BMP, TIFF, ICO
 and SVG. GIF and WebP show their first frame, and an image never enters the
-text editing or saving path. Markdown (`.md`, `.mdx`, `.markdown`) opens as a
+text editing or saving path. The footer has −/+/Fit buttons, `⌘`-scroll or a
+trackpad pinch zooms between 25% and 800%, and once zoomed the pane scrolls to
+pan. Markdown (`.md`, `.mdx`, `.markdown`) opens as a
 rendered preview; Preview / Source on the file, or `⇧⌘V`, switches to the
 same buffer as source. Relative image paths resolve against the note's own
 folder and render inline; a relative link to another file in the project opens

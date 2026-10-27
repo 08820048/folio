@@ -1335,6 +1335,29 @@ fn a_closed_tab_can_be_reopened(cx: &mut TestAppContext) {
     });
 }
 
+/// Image zoom is bounded and Fit returns to the fitted view.
+#[gpui::test]
+fn image_zoom_clamps_and_fit_resets(cx: &mut TestAppContext) {
+    cx.update(gpui_component::init);
+    let cx = cx.add_empty_window();
+    let view = cx.update(|window, cx| {
+        cx.new(|cx| {
+            let mut app = Folio::new(window, cx);
+            app.recent_task = None;
+            app
+        })
+    });
+    view.update_in(cx, |app, _, cx| {
+        assert!((app.project.image_zoom - 1.0).abs() < f32::EPSILON);
+        app.zoom_image(-10.0, cx);
+        assert!((app.project.image_zoom - 0.25).abs() < f32::EPSILON);
+        app.zoom_image(100.0, cx);
+        assert!((app.project.image_zoom - 8.0).abs() < f32::EPSILON);
+        app.reset_image_view(cx);
+        assert!((app.project.image_zoom - 1.0).abs() < f32::EPSILON);
+    });
+}
+
 /// A relative Markdown link opens the target in Folio, with a fragment
 /// stripped before the path is resolved.
 #[gpui::test]

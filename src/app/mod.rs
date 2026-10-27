@@ -1172,6 +1172,10 @@ struct Pane {
 struct Project {
     id: u64,
     image: Option<(PathBuf, std::sync::Arc<RenderImage>)>,
+    /// 1.0 is fit-to-window. Above or below that the image is drawn at its
+    /// natural size times this factor and the pane scrolls.
+    image_zoom: f32,
+    image_scroll: ScrollHandle,
     workspace: Option<Workspace>,
     directories: HashMap<PathBuf, Vec<Entry>>,
     expanded: HashSet<PathBuf>,
@@ -1221,6 +1225,8 @@ impl Default for Project {
         Self {
             id: 0,
             image: None,
+            image_zoom: 1.,
+            image_scroll: ScrollHandle::new(),
             workspace: None,
             directories: HashMap::new(),
             expanded: HashSet::new(),
@@ -3048,6 +3054,8 @@ impl Folio {
                             );
                         }
                         this.project.image = Some((path.clone(), image));
+                        this.project.image_zoom = 1.;
+                        this.project.image_scroll = ScrollHandle::new();
                         this.project.show_path(path);
                         this.clear_notice();
                         this.tree_focus.focus(window, cx);
