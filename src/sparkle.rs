@@ -59,7 +59,7 @@ pub fn begin_background_check() -> bool {
 pub fn background_result() -> Option<Option<Found>> {
     #[cfg(target_os = "macos")]
     unsafe {
-        return match sys::folio_sparkle_check_state() {
+        match sys::folio_sparkle_check_state() {
             0 => None,
             2 => {
                 let version = c_string(sys::folio_sparkle_found_version());
@@ -69,7 +69,7 @@ pub fn background_result() -> Option<Option<Found>> {
                 Some(Some(Found { version, build }))
             }
             _ => Some(None),
-        };
+        }
     }
     #[cfg(not(target_os = "macos"))]
     Some(None)

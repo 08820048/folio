@@ -7,8 +7,10 @@
 
 use regex::{Regex, RegexBuilder};
 use std::{
+    collections::HashMap,
     fs, io,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 /// Files larger than this are skipped. Reading a 32 MiB file to show one match
@@ -180,41 +182,131 @@ impl Matcher {
 ///
 /// `should_continue` is polled once per file so a superseded search stops early
 /// instead of competing with the next keystroke.
+///
+/// The scan is split across a handful of worker threads. Results keep the
+/// order of `files` even though they arrive out of order.
 pub fn search_files(
     files: &[PathBuf],
-    overlay: &std::collections::HashMap<PathBuf, String>,
+    overlay: &HashMap<PathBuf, String>,
     matcher: &Matcher,
-    should_continue: impl Fn() -> bool,
+    should_continue: impl Fn() -> bool + Sync,
 ) -> Outcome {
+    let found = std::sync::Mutex::new(Vec::new());
+    let truncated = search_files_stream(files, overlay, matcher, should_continue, |index, file| {
+        if let Ok(mut found) = found.lock() {
+            found.push((index, file));
+        }
+    });
+    let mut found = found
+        .into_inner()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    found.sort_by_key(|(index, _)| *index);
+
     let mut outcome = Outcome::default();
     let mut total = 0;
-    for path in files {
-        if !should_continue() {
-            // Superseded; the caller discards this result anyway.
-            return Outcome::default();
-        }
-        let text = match overlay.get(path) {
-            Some(text) => std::borrow::Cow::Borrowed(text.as_str()),
-            None => match read(path) {
-                Ok(text) => std::borrow::Cow::Owned(text),
-                Err(_) => continue,
-            },
-        };
-        let hits = matcher.hits(&text, HITS_PER_FILE.min(MATCH_LIMIT - total));
-        if hits.is_empty() {
-            continue;
-        }
-        total += hits.len();
-        outcome.files.push(FileHits {
-            path: path.clone(),
-            hits,
-        });
-        if total >= MATCH_LIMIT || outcome.files.len() >= FILE_LIMIT {
+    for (_, mut file) in found {
+        if outcome.files.len() >= FILE_LIMIT {
             outcome.truncated = true;
             break;
         }
+        let room = MATCH_LIMIT.saturating_sub(total);
+        if room == 0 {
+            outcome.truncated = true;
+            break;
+        }
+        if file.hits.len() > room {
+            outcome.truncated = true;
+            file.hits.truncate(room);
+        }
+        if file.hits.is_empty() {
+            continue;
+        }
+        total += file.hits.len();
+        outcome.files.push(file);
     }
+    outcome.truncated |= truncated;
     outcome
+}
+
+/// The streaming half of [`search_files`]: each non-empty file is handed to
+/// `report` as soon as one worker finishes it, tagged with its index in
+/// `files`. Returns whether the scan hit a result limit (cancellation is not
+/// truncation).
+///
+/// `report` can be called from several threads at once; a caller that updates
+/// UI must serialize it (the search panel sends through an `mpsc` channel).
+pub fn search_files_stream(
+    files: &[PathBuf],
+    overlay: &HashMap<PathBuf, String>,
+    matcher: &Matcher,
+    should_continue: impl Fn() -> bool + Sync,
+    report: impl Fn(usize, FileHits) + Sync,
+) -> bool {
+    let next = AtomicUsize::new(0);
+    let total = AtomicUsize::new(0);
+    let file_count = AtomicUsize::new(0);
+    let truncated = AtomicBool::new(false);
+    let workers = std::thread::available_parallelism()
+        .map(|count| count.get())
+        .unwrap_or(4)
+        .clamp(1, 8)
+        .min(files.len().max(1));
+
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| {
+                loop {
+                    if truncated.load(Ordering::Relaxed) || !should_continue() {
+                        break;
+                    }
+                    let index = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(path) = files.get(index) else {
+                        break;
+                    };
+                    let text = match overlay.get(path) {
+                        Some(text) => std::borrow::Cow::Borrowed(text.as_str()),
+                        None => match read(path) {
+                            Ok(text) => std::borrow::Cow::Owned(text),
+                            Err(_) => continue,
+                        },
+                    };
+                    let room = MATCH_LIMIT.saturating_sub(total.load(Ordering::Relaxed));
+                    if room == 0 {
+                        truncated.store(true, Ordering::Relaxed);
+                        break;
+                    }
+                    let hits = matcher.hits(&text, HITS_PER_FILE.min(room));
+                    if hits.is_empty() {
+                        continue;
+                    }
+                    let count = hits.len();
+                    let before = total.fetch_add(count, Ordering::Relaxed);
+                    if before >= MATCH_LIMIT {
+                        truncated.store(true, Ordering::Relaxed);
+                        break;
+                    }
+                    let found = file_count.fetch_add(1, Ordering::Relaxed);
+                    if found >= FILE_LIMIT {
+                        truncated.store(true, Ordering::Relaxed);
+                        break;
+                    }
+                    report(
+                        index,
+                        FileHits {
+                            path: path.clone(),
+                            hits,
+                        },
+                    );
+                    if before + count >= MATCH_LIMIT || found + 1 >= FILE_LIMIT {
+                        truncated.store(true, Ordering::Relaxed);
+                        break;
+                    }
+                }
+            });
+        }
+    });
+
+    truncated.load(Ordering::Relaxed)
 }
 
 fn read(path: &Path) -> io::Result<String> {
@@ -443,6 +535,47 @@ mod tests {
         let hits = Matcher::new("a*", options(true)).unwrap().hits("aaa", 10);
         assert_eq!(hits.len(), 1);
         assert_eq!(&hits[0].preview[hits[0].start..hits[0].end], "aaa");
+    }
+
+    #[test]
+    fn a_parallel_scan_keeps_order_and_enforces_the_caps() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let mut files = Vec::new();
+        for index in 0..240 {
+            let path = root.join(format!("{index:03}.rs"));
+            fs::write(&path, "needle\n").unwrap();
+            files.push(path);
+        }
+        let matcher = Matcher::new("needle", Options::default()).unwrap();
+        let outcome = search_files(&files, &HashMap::new(), &matcher, || true);
+        assert_eq!(outcome.files.len(), FILE_LIMIT);
+        assert!(outcome.truncated);
+        assert!(
+            outcome
+                .files
+                .windows(2)
+                .all(|pair| pair[0].path < pair[1].path),
+            "files arrive out of order but the result is sorted by the input order"
+        );
+
+        // One file per hit budget: 30 files × 100 hits is well over the total.
+        let mut many = Vec::new();
+        for index in 0..30 {
+            let path = root.join(format!("many-{index:03}.rs"));
+            fs::write(&path, "needle\n".repeat(100)).unwrap();
+            many.push(path);
+        }
+        let outcome = search_files(&many, &HashMap::new(), &matcher, || true);
+        assert_eq!(
+            outcome
+                .files
+                .iter()
+                .map(|file| file.hits.len())
+                .sum::<usize>(),
+            MATCH_LIMIT
+        );
+        assert!(outcome.truncated);
     }
 
     #[test]

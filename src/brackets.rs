@@ -53,24 +53,24 @@ pub fn pairs_bytes(bytes: &[u8]) -> Vec<Pair> {
                 i = skip_string(bytes, end.0, b'"', end.1);
             }
             open @ (b'(' | b'[' | b'{') => {
-                if open == b'{' {
-                    if let Some(depth) = interp.last_mut() {
-                        *depth += 1;
-                    }
+                if open == b'{'
+                    && let Some(depth) = interp.last_mut()
+                {
+                    *depth += 1;
                 }
                 stack.push((open, i, stack.len()));
                 i += 1;
             }
             close @ (b')' | b']' | b'}') => {
-                if close == b'}' {
-                    if let Some(depth) = interp.last_mut() {
-                        if *depth == 1 {
-                            interp.pop();
-                            i += 1;
-                            continue;
-                        }
-                        *depth -= 1;
+                if close == b'}'
+                    && let Some(depth) = interp.last_mut()
+                {
+                    if *depth == 1 {
+                        interp.pop();
+                        i += 1;
+                        continue;
                     }
+                    *depth -= 1;
                 }
                 if stack.last().is_some_and(|(open, _, _)| mates(*open, close)) {
                     let (_, open, depth) = stack.pop().expect("checked");

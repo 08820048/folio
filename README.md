@@ -46,7 +46,12 @@ Retina sizes, and embeds it in the signed bundle.
 ## Usage
 
 Once a project is open, pick a file in the tree or press `⌘P` to fuzzy-match
-file names. Type `:123` to go to a line. Switching files keeps each one's
+file names. A name that is exact beats one that starts with the query, which
+beats a substring, which beats the characters appearing in order; shallow
+paths and files just opened get a small boost. With an empty query the panel
+shows the project's recent files first, newest at the top — that history is
+kept per project and comes back with the session, capped at 20 entries. Type
+`:123` to go to a line. Switching files keeps each one's
 cursor, contents and undo history; closing a project releases that project's
 buffers. Click "Add Project" in the sidebar to bring in more folders — each
 keeps its own buffers and expansion state, and the whole set comes back on the
@@ -60,6 +65,10 @@ next launch, with each project's tabs in order and the file that was on screen
 | Find in project | ⇧⌘F | Ctrl+Shift+F |
 | Replace in project | ⇧⌘H | Ctrl+Shift+H |
 | Save current file | ⌘S | Ctrl+S |
+| Save all | ⌥⌘S | Ctrl+Alt+S |
+| Reopen closed tab | ⇧⌘T | Ctrl+Shift+T |
+| Previous / next tab | ⇧⌘[ / ⇧⌘] (⌃Tab / ⌃⇧Tab) | Ctrl+Shift+[ / Ctrl+Shift+] (Ctrl+Tab / Ctrl+Shift+Tab) |
+| Code size up / down / actual | ⌘+ / ⌘- / ⌘0 | Ctrl++ / Ctrl+- / Ctrl+0 |
 | Find in file | ⌘F | Ctrl+F |
 | Replace in file | ⌥⌘F | Ctrl+Alt+F |
 | Go to line | ⌘G | Ctrl+G |
@@ -145,7 +154,10 @@ that was deleted today. Closing every project still lands on the launcher.
 
 Unsaved edits are the other half of it. Every few seconds, while there are any,
 they are written to a file beside the session, so a crash, a force quit or a
-power cut costs seconds rather than the work. A clean exit takes that file with
+power cut costs seconds rather than the work. A revision counter on each buffer
+means the timer first compares numbers: while nothing has been typed it does no
+snapshot at all, and when one file changes only that file's text is read
+again. A clean exit takes that file with
 it, which is what leaves it behind only when there was no clean exit. The next
 launch opens those buffers with their edits in them, marks them unsaved, and
 says how many it recovered. They are unsaved in the ordinary way: `⌘S` writes
@@ -153,6 +165,22 @@ them, and the usual conflict check still protects whatever changed on disk in
 the meantime.
 
 ## Project tree
+
+The tree and the quick-open index follow `.gitignore` as well as the settings
+list. `.gitignore` files are read from the project root down, each matched from
+the directory that owns it, so a nested file can add to — or re-include against
+— its parent; `.git/info/exclude` is read at the root. Git's rules are used even
+when the folder is not a repository, and a name in Settings is still hidden on
+top. That keeps `node_modules`, `target`, `.venv`, `__pycache__` and whatever
+else the repository already excludes out of the tree and the search index
+without teaching Folio a second ignore language.
+
+A file created or removed outside Folio updates the quick-open index in place:
+the removed path is filtered out, the new one is checked against `.gitignore`
+and added. A directory appearing, or a rename, still walks the project once —
+that is the only answer that is correct when the old side of a rename may not
+have produced an event. A `.gitignore` edit is a full refresh for the same
+reason: it changes which paths belong in the index.
 
 Right-click a folder row, or a project header, and the menu opens at the
 pointer, flipping when it would overhang the window. It carries New File, New
@@ -205,10 +233,12 @@ path to the OS, so what they launch follows the platform.
 ## Tabs
 
 Every file opened gets a tab, in a strip above the code. The strip is 26px and
-appears only once a second file is open, so a single file looks exactly as it
-did before tabs existed. A tab carries the file's name, a mark when its buffer
-has edits that are not on disk, and a close button. Opening a file that already
-has a tab focuses it rather than adding another.
+always drawn once a project is open, so the split button at its right is
+reachable with one file. It scrolls horizontally when there are more tabs than
+fit; `⇧⌘[` / `⇧⌘]` (or `⌃Tab` / `⌃⇧Tab`) walk it and `⇧⌘T` puts back the last
+tab closed in this project. A tab carries the file's name, a mark when its
+buffer has edits that are not on disk, and a close button. Opening a file that
+already has a tab focuses it rather than adding another.
 
 Closing a tab with unsaved changes asks first — Save, Don't Save or Cancel —
 and Save writes only that file, not every dirty buffer open alongside it. The
@@ -362,6 +392,15 @@ reads the file itself. Outside a repository, or with git not installed, there
 is nothing to show. Escape, `⌘⇧D` again, the close button in the header, or
 Hide File Changes on the view's own right-click all put the editor back.
 
+The changes list carries a review mark per file: the check beside a row is
+faint until it is marked, green once it is, and clicking it — or selecting the
+row and pressing `Space` — toggles it. The same choice appears as a **Reviewed**
+chip in the diff header, so a file can be marked without going back to the
+list. The header counts how many of the changed files are marked. This is view
+state only: it never touches the file or its git status, and it is saved with
+the session, so a review can be picked up after a restart. A file deleted in
+the meantime drops out of the saved list.
+
 `⌥⌘B`, or Blame in the View menu, shows what the line the caret is on was last
 written by — short hash, author, when, and the commit's summary — in a strip
 under the code. It follows the caret, so reading down a function tells you who
@@ -402,7 +441,8 @@ Changes apply as you make them. Fonts and sizes take effect at once;
 tab size applies to files opened from then on, because the pinned
 gpui-component has no way to change it on an editor that already exists. The
 ignore list is the one that does real work: the tree re-reads the folders it is
-holding and the quick-open index is rebuilt.
+holding and the quick-open index is rebuilt. It applies on top of every
+`.gitignore`, so a name here is hidden even where the repository would show it.
 
 A project's own `.editorconfig` has the last word on the files it covers.
 `indent_style`, `indent_size` and `tab_width` are read from the nearest such
@@ -438,9 +478,13 @@ replace row. Because both lookups share one panel, the activity-bar search
 icon is the on-screen entry; `⌘P` and the menu items still open it on the
 file-name side.
 
-Search is live: 140ms after typing stops, a background scan of the whole
-project starts. Results are grouped per file with line numbers and a context
-preview, and matches are drawn in the accent colour. Long lines are windowed
+Search is live: 140ms after typing stops, a parallel background scan of the
+whole project starts. Files are read by up to eight workers and each file's
+results stream into the panel as it finishes, so a large repository shows its
+first hits instead of waiting for the last file. **Stop** keeps what has
+arrived; a new query starts a fresh scan. Results are grouped per file with
+line numbers and a context preview, and matches are drawn in the accent
+colour. Long lines are windowed
 around the match and marked with an ellipsis, leading indentation is dropped
 and tabs expand to four spaces, so the previews line up. `↑ ↓` chooses, `Enter`
 opens the file with the cursor on the match, and `Esc` closes. `← →` switch
@@ -458,6 +502,10 @@ Three filters, following editor convention, apply to both find and replace:
 - `.*` — regular expression; `$1` / `${name}` / `$$` expand in the replacement
   per the `regex` crate's rules. With it off the query is escaped and the
   replacement is inserted verbatim
+- **Path filter** — a row under the query takes space-separated path
+  fragments. Include fragments are ORed; a fragment beginning with `!`
+  excludes. Matching is case-insensitive against the path relative to the
+  project root, so `src !test` is the common case
 
 "Replace All" confirms first, and **splits by whether the file is open**:
 
@@ -530,7 +578,8 @@ status, the extension-to-grammar map, the file operations behind the tree menu
 (create collisions, a recursive duplicate and rename, paste refusals, a
 case-only rename, deleting a tree), the settings file against real bytes
 (defaults, round trip, clamping, unknown keys, a corrupt file left alone), the
-ignore list reaching both the tree and the index, the diff parser on
+ignore list reaching both the tree and the index, `.gitignore` (nested files,
+negations, `.git/info/exclude`) doing the same, the diff parser on
 hand-written hunks and against a real repository, the line-comment markers and
 the two rules that decide where a bracket may pair, the `.editorconfig` reader
 — its globs, its sections applied in order, `unset` removing a property, `root`
@@ -619,12 +668,12 @@ cross-platform acceptance are not finished. A single file above 5 MiB turns
 highlighting off and one above 32 MiB is refused; text must be UTF-8 and
 symlinks are skipped. Quick open indexes at most 100,000 files and shows 100
 matches. Project search skips files above 2 MiB and caps results at 1000
-matches over 200 files, with no streaming results and no cancel button. Bitmaps
+matches over 200 files; results stream in as files finish and **Stop** keeps
+the partial list. Bitmaps
 are capped at 32M pixels and 16,384 pixels per side, and SVG rasterization is
 size-limited by GPUI. Git status refreshes when a project is opened or switched
-and after a save. A file that changes on disk while it is open is noticed by the
-conflict check when a save runs, and not before — there is no file-system
-watcher, so nothing reports an outside edit as it happens. Move to Trash goes
+and after a save, and the filesystem watcher notices an outside change as it
+happens: a clean buffer reloads, a dirty one is asked to Reload or Keep. Move to Trash goes
 through Finder, so macOS raises an automation permission prompt the first time
 and a refusal surfaces as an error; the Recycle Bin and `gio trash` paths behind
 the other platforms are written but untested on real hardware. Multi-cursor
@@ -644,9 +693,8 @@ one part of that format not read. The session is written every few seconds, so a
 crash can lose the last few seconds of tab changes, and a recovered buffer whose
 project is no longer in the session is dropped rather than shown. Blame is one
 line at a time rather than a gutter, and describes the lines as they were when
-it was read. The changes view is a unified diff — there is
-no side-by-side — and its counts count rows, so a changed line reads as one
-gone and one arrived. Mac updates go through Sparkle. The packaged app asks
+it was read. The changes view can be unified or split; its counts count rows,
+so a changed line reads as one gone and one arrived. Mac updates go through Sparkle. The packaged app asks
 `https://pub-307aebc4dfa4468d80e05e193c8f9c5b.r2.dev/appcast.xml` quietly after
 launch and once a day; a newer build shows a green **Update available** badge in
 the title bar, left of the run control, and clicking it opens Sparkle's window,
@@ -656,13 +704,15 @@ There is no GitHub Release. Window geometry is written when a window closes and 
 on quit, so a force-killed process loses wherever the windows were — the same
 is true of the settings window. The settings sidebar has no search box, and its
 pages do not scroll, which is fine at four pages and would need fixing before
-there were many more. Word wrap is off and not offered: a long line scrolls
-sideways, and there is no switch for it. The sidebar does not animate — it is drawn at its width. Notices slide in from
+there were many more. Word wrap is off by default and can be turned on in
+Settings → Type; with it off, a long line scrolls sideways. The sidebar does
+not animate — it is drawn at its width. Notices slide in from
 the right edge and, unless they are errors, slide back out after two seconds. Times in the recent list are the English
 relative strings `just now`, `N hours ago` and `N days ago` rather than anything
 formatted for the system locale, and the interface itself is English only. The
-performance targets in the specification have not been measured, and the
-Windows, Linux, input-method and accessibility checks have not been run.
+cold-start target (≤300ms) is still missed — the development machine measured
+1048ms in release — and the Windows, Linux, input-method and accessibility
+checks have not been run.
 
 The specification in [docs/Folio需求文档.md](docs/Folio需求文档.md) is revised
 to match what is implemented, and lists what is not. Full progress and the

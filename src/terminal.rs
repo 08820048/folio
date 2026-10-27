@@ -745,10 +745,10 @@ fn apply_detected_urls(cells: &mut [Cell], columns: usize, rows: usize) {
         for (from, to, uri) in find_urls(&text) {
             let uri: Arc<str> = uri.into();
             for col in from..to.min(columns) {
-                if let Some(cell) = cells.get_mut(start + col) {
-                    if cell.hyperlink.is_none() {
-                        cell.hyperlink = Some(uri.clone());
-                    }
+                if let Some(cell) = cells.get_mut(start + col)
+                    && cell.hyperlink.is_none()
+                {
+                    cell.hyperlink = Some(uri.clone());
                 }
             }
         }

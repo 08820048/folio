@@ -122,18 +122,27 @@ impl FileIcon {
     /// in the tree's muted foreground.
     pub fn tint(self, dark: bool) -> Option<Hsla> {
         let tint = match self {
-            Self::Rust | Self::Html | Self::Java | Self::Swift | Self::Svelte | Self::Zig
+            Self::Rust
+            | Self::Html
+            | Self::Java
+            | Self::Swift
+            | Self::Svelte
+            | Self::Zig
             | Self::OCaml => Tint::Orange,
             Self::Git | Self::Ruby => Tint::Red,
             Self::Json | Self::JavaScript => Tint::Yellow,
             Self::Shell | Self::Vue => Tint::Green,
             Self::Go | Self::React | Self::Dart => Tint::Teal,
-            Self::Markdown | Self::Python | Self::TypeScript | Self::Css | Self::Docker
-            | Self::C | Self::Sql | Self::Nix => Tint::Blue,
+            Self::Markdown
+            | Self::Python
+            | Self::TypeScript
+            | Self::Css
+            | Self::Docker
+            | Self::C
+            | Self::Sql
+            | Self::Nix => Tint::Blue,
             Self::Cpp | Self::Lua | Self::Php => Tint::Indigo,
-            Self::Yaml | Self::Kotlin | Self::CSharp | Self::Elixir | Self::Haskell => {
-                Tint::Purple
-            }
+            Self::Yaml | Self::Kotlin | Self::CSharp | Self::Elixir | Self::Haskell => Tint::Purple,
             Self::Sass | Self::GraphQl => Tint::Pink,
             Self::Lock | Self::Text | Self::Image | Self::Config => return None,
         };
@@ -203,8 +212,9 @@ pub fn file_icon(name: &str) -> Option<FileIcon> {
         "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "ico" | "bmp" | "avif" | "heic" => {
             FileIcon::Image
         }
-        "toml" | "ini" | "cfg" | "conf" | "config" | "env" | "properties" | "plist"
-        | "xml" => FileIcon::Config,
+        "toml" | "ini" | "cfg" | "conf" | "config" | "env" | "properties" | "plist" | "xml" => {
+            FileIcon::Config
+        }
         _ => return None,
     })
 }

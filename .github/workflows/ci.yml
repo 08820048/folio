@@ -1,0 +1,54 @@
+name: CI
+
+# Every push and pull request. The Windows release workflow only runs on a
+# version tag, so nothing else in the repository checks a change before it
+# lands. This is that check: formatting, the library tests, the GPUI
+# regression tests, and clippy with warnings denied.
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  macos:
+    runs-on: macos-14
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.95.0"
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: macos-ci
+          cache-on-failure: true
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      # The grammars and the terminal are behind `desktop`; a library-only
+      # build still has to compile and pass without them.
+      - name: Test the library
+        run: cargo test --locked --no-default-features
+
+      - name: Test the desktop app
+        run: cargo test --locked --features desktop-tests
+
+      - name: Clippy
+        run: cargo clippy --locked --all-targets --features desktop-tests -- -D warnings

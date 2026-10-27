@@ -36,6 +36,14 @@ pub struct SessionProject {
     /// The pair was stacked rather than side by side.
     #[serde(default)]
     pub split_vertical: bool,
+    /// Files already read in the changes view. View state only: never written
+    /// to the project, and a file that no longer exists is dropped on load.
+    #[serde(default)]
+    pub reviewed: Vec<PathBuf>,
+    /// Quick-open history, newest first. Repeated per project so switching
+    /// projects keeps each one's own order.
+    #[serde(default)]
+    pub recent_files: Vec<PathBuf>,
 }
 
 /// Every project that was open, in the order they were opened.
@@ -78,6 +86,8 @@ impl Session {
             if project.right_tabs.is_empty() {
                 project.right_active = None;
             }
+            project.reviewed.retain(|path| path.is_file());
+            project.recent_files.retain(|path| path.is_file());
         }
         session
     }
@@ -158,6 +168,8 @@ mod tests {
                 right_tabs: vec![other.clone()],
                 right_active: Some(other.clone()),
                 split_vertical: false,
+                reviewed: vec![file.clone()],
+                recent_files: vec![file.clone()],
             }],
         };
 
@@ -177,6 +189,7 @@ mod tests {
                     root: project.clone(),
                     tabs: vec![file.clone(), other.clone()],
                     active: Some(other.clone()),
+                    reviewed: vec![file.clone(), other.clone(), root.join("missing.rs")],
                     ..Default::default()
                 },
                 SessionProject {
@@ -196,6 +209,8 @@ mod tests {
         assert_eq!(loaded.projects[0].tabs, vec![file.clone()]);
         // The file it was showing is gone too, so there is nothing to show.
         assert_eq!(loaded.projects[0].active, None);
+        // A reviewed file that has since been deleted drops out of the list.
+        assert_eq!(loaded.projects[0].reviewed, vec![file]);
     }
 
     #[test]

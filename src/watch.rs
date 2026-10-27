@@ -235,7 +235,7 @@ mod tests {
             );
         }
         assert_eq!(queue.len(), 2);
-        assert_eq!(queue[&root.join("src/main.rs")], false);
+        assert!(!queue[&root.join("src/main.rs")]);
         assert!(queue.contains_key(&root.join(".git")));
         collect_event(
             &mut queue,

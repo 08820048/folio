@@ -37,6 +37,32 @@ fn main() {
                 KeyBinding::new(&format!("{modifier}-shift-o"), NewProject, Some("Folio")),
                 KeyBinding::new(&format!("{modifier}-w"), CloseProject, Some("Folio")),
                 KeyBinding::new(&format!("{modifier}-s"), Save, Some("Folio")),
+                KeyBinding::new(&format!("{modifier}-alt-s"), SaveAll, Some("Folio")),
+                KeyBinding::new(
+                    &format!("{modifier}-shift-t"),
+                    ReopenClosedTab,
+                    Some("Folio"),
+                ),
+                // Tab navigation, the way browsers and most editors spell it.
+                // The bracket pair is also bound in the editor's context so a
+                // focused buffer cannot swallow it.
+                KeyBinding::new(&format!("{modifier}-shift-["), PrevTab, Some("Folio")),
+                KeyBinding::new(&format!("{modifier}-shift-]"), NextTab, Some("Folio")),
+                KeyBinding::new(&format!("{modifier}-shift-["), PrevTab, Some("FolioEditor")),
+                KeyBinding::new(&format!("{modifier}-shift-]"), NextTab, Some("FolioEditor")),
+                KeyBinding::new("ctrl-tab", NextTab, Some("Folio")),
+                KeyBinding::new("ctrl-shift-tab", PrevTab, Some("Folio")),
+                // Code size. `=` and `shift-=` are the physical keys; the
+                // `+` alias covers layouts that report it directly.
+                KeyBinding::new(&format!("{modifier}-="), ZoomIn, Some("Folio")),
+                KeyBinding::new(&format!("{modifier}-shift-="), ZoomIn, Some("Folio")),
+                KeyBinding::new(&format!("{modifier}-+"), ZoomIn, Some("Folio")),
+                KeyBinding::new(&format!("{modifier}-="), ZoomIn, Some("FolioEditor")),
+                KeyBinding::new(&format!("{modifier}-shift-="), ZoomIn, Some("FolioEditor")),
+                KeyBinding::new(&format!("{modifier}--"), ZoomOut, Some("Folio")),
+                KeyBinding::new(&format!("{modifier}--"), ZoomOut, Some("FolioEditor")),
+                KeyBinding::new(&format!("{modifier}-0"), ZoomReset, Some("Folio")),
+                KeyBinding::new(&format!("{modifier}-0"), ZoomReset, Some("FolioEditor")),
                 KeyBinding::new(&format!("{modifier}-p"), QuickOpen, Some("Folio")),
                 KeyBinding::new(&format!("{modifier}-shift-f"), ProjectSearch, Some("Folio")),
                 KeyBinding::new(
@@ -197,6 +223,9 @@ fn main() {
                     MenuItem::action("Replace in Project…", ProjectReplace),
                     MenuItem::separator(),
                     MenuItem::action("Save", Save),
+                    MenuItem::action("Save All", SaveAll),
+                    MenuItem::separator(),
+                    MenuItem::action("Reopen Closed Tab", ReopenClosedTab),
                     MenuItem::separator(),
                     MenuItem::action("Run", Run),
                     MenuItem::action("Run Again", Rerun),
@@ -241,6 +270,10 @@ fn main() {
                     MenuItem::separator(),
                     MenuItem::action("Blame", ToggleBlame),
                     MenuItem::action("Markdown Preview", ToggleMarkdownPreview),
+                    MenuItem::separator(),
+                    MenuItem::action("Zoom In", ZoomIn),
+                    MenuItem::action("Zoom Out", ZoomOut),
+                    MenuItem::action("Actual Size", ZoomReset),
                 ]),
             ]);
             let state = WindowState::load(&config_dir().join("window.json"));

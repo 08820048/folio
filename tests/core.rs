@@ -386,6 +386,51 @@ fn settings_round_trip_defaults_and_clamping() {
 }
 
 #[test]
+fn gitignore_hides_files_from_the_tree_and_index() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::create_dir_all(root.join("generated")).unwrap();
+    fs::create_dir_all(root.join("sub")).unwrap();
+    fs::write(root.join(".gitignore"), "generated/\n*.log\n!keep.log\n").unwrap();
+    fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
+    fs::write(root.join("generated/out.rs"), "// out\n").unwrap();
+    fs::write(root.join("a.log"), "log\n").unwrap();
+    fs::write(root.join("keep.log"), "keep\n").unwrap();
+    fs::write(root.join("sub/.gitignore"), "local.rs\n").unwrap();
+    fs::write(root.join("sub/local.rs"), "// local\n").unwrap();
+    fs::write(root.join("sub/keep.rs"), "// keep\n").unwrap();
+
+    let names = |entries: Vec<tree::Entry>| {
+        entries
+            .into_iter()
+            .map(|entry| entry.name)
+            .collect::<Vec<_>>()
+    };
+
+    let top = names(tree::children_in(root, root, &ignored()).unwrap());
+    assert!(!top.contains(&"generated".to_string()), "{top:?}");
+    assert!(!top.contains(&"a.log".to_string()), "{top:?}");
+    assert!(
+        top.contains(&"keep.log".to_string()),
+        "a negation re-includes"
+    );
+    assert!(top.contains(&"sub".to_string()));
+
+    // A nested `.gitignore` applies to its own directory.
+    let sub = names(tree::children_in(root, &root.join("sub"), &ignored()).unwrap());
+    assert!(!sub.contains(&"local.rs".to_string()), "{sub:?}");
+    assert!(sub.contains(&"keep.rs".to_string()), "{sub:?}");
+
+    let index = tree::index(root, &ignored()).unwrap();
+    assert!(!index.iter().any(|path| path.ends_with("generated/out.rs")));
+    assert!(!index.iter().any(|path| path.ends_with("a.log")));
+    assert!(index.iter().any(|path| path.ends_with("keep.log")));
+    assert!(!index.iter().any(|path| path.ends_with("sub/local.rs")));
+    assert!(index.iter().any(|path| path.ends_with("sub/keep.rs")));
+}
+
+#[test]
 fn the_tree_honours_a_custom_ignore_list() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
