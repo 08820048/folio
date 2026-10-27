@@ -603,8 +603,12 @@ mod tests {
         );
         let dest = temp.path().join("zed");
         clone(source.to_str().unwrap(), &dest).unwrap();
+        // Git on Windows may check the file out with CRLF according to the
+        // machine's autocrlf setting; the clone itself is what this checks.
         assert_eq!(
-            std::fs::read_to_string(dest.join("readme")).unwrap(),
+            std::fs::read_to_string(dest.join("readme"))
+                .unwrap()
+                .replace("\r\n", "\n"),
             "hi\n"
         );
         assert!(clone(source.to_str().unwrap(), &dest).is_err());

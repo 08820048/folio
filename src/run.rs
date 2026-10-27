@@ -1029,9 +1029,16 @@ fn adds() {\n\
         let run = command(root, &go, None).unwrap();
         assert_eq!(run.shell, "go run .");
         assert_eq!(run.cwd, root);
+        // The shell quoting follows the platform: POSIX single quotes on Unix,
+        // the cmd.exe double-quote form on Windows.
+        let test_command = if cfg!(windows) {
+            "go test -run \"^TestAdd$\""
+        } else {
+            "go test -run '^TestAdd$'"
+        };
         assert_eq!(
             command(root, &go, Some(&found[1])).unwrap().shell,
-            "go test -run '^TestAdd$'"
+            test_command
         );
 
         let js = root.join("app.js");
