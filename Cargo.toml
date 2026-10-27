@@ -58,7 +58,7 @@ regex = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"
-notify = "6.1"
+notify = "7.0"
 # .gitignore parsing for the project tree and the quick-open index. Already in
 # the lockfile through gpui-component; only the direct edge is new.
 ignore = "0.4"
