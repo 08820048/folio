@@ -32,6 +32,9 @@ Notable changes to Folio. The detailed, dated implementation log is
 
 ### Changed
 
+- Dependency updates: Actions v7, `notify` 7, `sha2` 0.11, tree-sitter
+  Haskell/OCaml/Erlang grammars, and a patch/minor group. `tree-sitter`
+  itself stays pinned until the grammar ABI moves with it.
 - `src/app.rs` split into `src/app/mod.rs` plus focused modules and `tests.rs`.
 - Recovery snapshots compare per-buffer revisions instead of every dirty Rope.
 - File-level watch events update the quick-open index without a full walk.

@@ -20,10 +20,16 @@ updates:
       - dependency-name: "gpui*"
       - dependency-name: "gpui-component*"
       - dependency-name: "alacritty_terminal"
+      # A tree-sitter update has to move with the GPUI/grammar ABI. 0.26.13
+      # already broke the solidity query; take these by hand.
+      - dependency-name: "tree-sitter"
     groups:
       patch-and-minor:
         patterns: ["*"]
         update-types: ["minor", "patch"]
+      major:
+        patterns: ["*"]
+        update-types: ["major"]
 
   - package-ecosystem: github-actions
     directory: "/"
@@ -37,3 +43,6 @@ updates:
       - dependencies
     commit-message:
       prefix: "chore(ci)"
+    groups:
+      actions:
+        patterns: ["*"]
