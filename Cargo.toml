@@ -81,7 +81,7 @@ tree-sitter-ini = { version = "1.4", optional = true }
 tree-sitter-less = { version = "1", optional = true }
 tree-sitter-nix = { version = "0.3", optional = true }
 tree-sitter-objc = { version = "3", optional = true }
-tree-sitter-ocaml = { version = "0.25", optional = true }
+tree-sitter-ocaml = { version = "0.26", optional = true }
 tree-sitter-powershell = { version = "0.26", optional = true }
 tree-sitter-r = { version = "1.3", optional = true }
 tree-sitter-regex = { version = "0.25", optional = true }
