@@ -341,6 +341,61 @@ impl Terminal {
         self.term.lock().selection_to_string()
     }
 
+    /// Case-insensitive search over the whole scrollback, newest last. The
+    /// result is capped so a one-letter query cannot make the UI carry the
+    /// entire history.
+    pub fn search(&self, query: &str, limit: usize) -> Vec<SearchHit> {
+        let query = query.to_lowercase();
+        if query.is_empty() || limit == 0 {
+            return Vec::new();
+        }
+        let term = self.term.lock();
+        let grid = term.grid();
+        let top = grid.topmost_line().0;
+        let bottom = grid.bottommost_line().0;
+        let mut hits = Vec::new();
+        for line in top..=bottom {
+            let row = &grid[Line(line)];
+            let text: String = row.into_iter().map(|cell| cell.c).collect();
+            let lower = text.to_lowercase();
+            let mut offset = 0;
+            while let Some(found) = lower[offset..].find(&query) {
+                let start_byte = offset + found;
+                let start = lower[..start_byte].chars().count();
+                let end = start + query.chars().count() - 1;
+                hits.push(SearchHit {
+                    line,
+                    column: start,
+                    start: GridPoint {
+                        line,
+                        column: start,
+                    },
+                    end: GridPoint { line, column: end },
+                });
+                if hits.len() >= limit {
+                    return hits;
+                }
+                offset = start_byte + query.len();
+                if offset >= lower.len() {
+                    break;
+                }
+            }
+        }
+        hits
+    }
+
+    /// Scroll the display so a hit's line is in the viewport. A line already
+    /// on screen is left where it is where possible.
+    pub fn reveal_search_hit(&self, hit: &SearchHit) {
+        let mut term = self.term.lock();
+        let (bottom, current) = {
+            let grid = term.grid();
+            (grid.bottommost_line().0, grid.display_offset() as i32)
+        };
+        let target = (bottom - hit.line).max(0);
+        term.scroll_display(Scroll::Delta(target - current));
+    }
+
     /// Put text into the child as if pasted. Bracketed paste is decided by
     /// the mode the child itself switched on.
     pub fn paste(&self, text: &str) {
@@ -668,6 +723,16 @@ pub struct GridPoint {
     pub column: usize,
 }
 
+/// One case-insensitive match in the scrollback. Lines are grid coordinates:
+/// negative is history, zero is the top of the screen.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SearchHit {
+    pub line: i32,
+    pub column: usize,
+    pub start: GridPoint,
+    pub end: GridPoint,
+}
+
 /// What a drag or a click count is building.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SelectionKind {
@@ -895,6 +960,27 @@ mod tests {
             snapshot.hyperlink_at(plain, 1).as_deref(),
             Some("https://plain.example/y")
         );
+    }
+
+    #[test]
+    fn search_finds_scrollback_and_reveals_without_panicking() {
+        let mut terminal = Terminal::spawn(Spawn {
+            working_directory: None,
+            shell: shell("/bin/sh", "printf 'alpha beta\nbeta gamma\n'"),
+            columns: 40,
+            rows: 10,
+            scrollback: 100,
+        })
+        .unwrap();
+        wait_for(&mut terminal, |_, snapshot| {
+            snapshot.text().contains("alpha beta") && snapshot.text().contains("beta gamma")
+        });
+        let hits = terminal.search("BETA", 10);
+        assert_eq!(hits.len(), 2, "{hits:?}");
+        assert_eq!(hits[0].column, 6);
+        terminal.reveal_search_hit(&hits[1]);
+        assert!(terminal.snapshot().text().contains("gamma"));
+        assert!(terminal.search("missing", 10).is_empty());
     }
 
     #[test]

@@ -125,6 +125,9 @@ best-effort: they go through `cmd.exe` and expect `python`, `cargo`, `go`,
 `node` on PATH.
 While the terminal holds the keyboard, `⌘C` / `⌘V` copy and paste its
 selection and `⌘W` closes the tab — elsewhere those keys stay the editor's.
+`⌘F` searches the scrollback case-insensitively; `↑` / `↓` or `Enter` walk the
+matches, the current one is selected and scrolled into view, and `Esc` closes
+the search bar.
 Printed `http(s)://` URLs and OSC 8 hyperlinks are underlined; `⌃`-click
 (or `⌘`-click on macOS) opens them in the browser.
 Editing uses gpui-component's Rope editor and a Tree-sitter allowlist; type

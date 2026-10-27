@@ -21,9 +21,9 @@ use folio::terminal::{self, Color, GridPoint, SelectionKind, Terminal, TerminalE
 use folio::terminal_keys::{Key, Modifiers, encode};
 use folio::terminal_mouse::{self, Button};
 use gpui::{
-    App, Bounds, ClipboardItem, ContentMask, Context, Element, ElementId, Entity, EventEmitter,
-    FocusHandle, Focusable, Font, FontStyle, FontWeight, GlobalElementId, Hsla, InputHandler,
-    InspectorElementId, IntoElement, KeyDownEvent, Keystroke, LayoutId, MouseButton,
+    AnyElement, App, Bounds, ClipboardItem, ContentMask, Context, Element, ElementId, Entity,
+    EventEmitter, FocusHandle, Focusable, Font, FontStyle, FontWeight, GlobalElementId, Hsla,
+    InputHandler, InspectorElementId, IntoElement, KeyDownEvent, Keystroke, LayoutId, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Overflow, ParentElement, Pixels, Point, Render,
     ScrollWheelEvent, SharedString, Style, Styled, TextAlign, TextRun, UTF16Selection,
     UnderlineStyle, Window, div, fill, point, prelude::*, px, relative, rgb, size,
@@ -141,6 +141,15 @@ pub struct TerminalView {
     /// when last; the next press escalates.
     stop_presses: u8,
     last_stop: Option<Instant>,
+    /// In-terminal search over the scrollback, when it is open.
+    search: Option<TerminalSearch>,
+}
+
+#[derive(Default)]
+struct TerminalSearch {
+    query: String,
+    hits: Vec<terminal::SearchHit>,
+    selected: usize,
 }
 
 impl TerminalView {
@@ -221,6 +230,7 @@ impl TerminalView {
             is_run,
             stop_presses: 0,
             last_stop: None,
+            search: None,
         }
     }
 
@@ -612,6 +622,150 @@ impl TerminalView {
         step
     }
 
+    fn start_search(&mut self, cx: &mut Context<Self>) {
+        self.search = Some(TerminalSearch::default());
+        if let Some(terminal) = self.terminal.as_ref() {
+            terminal.clear_selection();
+        }
+        cx.notify();
+    }
+
+    fn search_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        if self.terminal.is_none() {
+            self.search = None;
+            return;
+        }
+        match event.keystroke.key.as_str() {
+            "escape" => {
+                self.search = None;
+                if let Some(terminal) = self.terminal.as_ref() {
+                    terminal.clear_selection();
+                }
+                cx.notify();
+                return;
+            }
+            "enter" | "down" => {
+                let len = self
+                    .search
+                    .as_ref()
+                    .map(|search| search.hits.len())
+                    .unwrap_or(0);
+                if len > 0
+                    && let Some(search) = self.search.as_mut()
+                {
+                    search.selected = (search.selected + 1) % len;
+                }
+                self.select_search_hit(cx);
+                return;
+            }
+            "up" => {
+                let len = self
+                    .search
+                    .as_ref()
+                    .map(|search| search.hits.len())
+                    .unwrap_or(0);
+                if len > 0
+                    && let Some(search) = self.search.as_mut()
+                {
+                    search.selected = (search.selected + len - 1) % len;
+                }
+                self.select_search_hit(cx);
+                return;
+            }
+            "backspace" => {
+                if let Some(search) = self.search.as_mut() {
+                    search.query.pop();
+                }
+                self.refresh_search(cx);
+                return;
+            }
+            _ => {}
+        }
+        if let Some(character) = event.keystroke.key_char.as_deref()
+            && character.chars().count() == 1
+            && !event.keystroke.modifiers.platform
+            && !event.keystroke.modifiers.control
+            && !event.keystroke.modifiers.alt
+            && !character.chars().next().is_some_and(char::is_control)
+            && let Some(search) = self.search.as_mut()
+        {
+            search.query.push_str(character);
+            self.refresh_search(cx);
+        }
+    }
+
+    fn refresh_search(&mut self, cx: &mut Context<Self>) {
+        let Some(terminal) = self.terminal.as_ref() else {
+            return;
+        };
+        let hits = self
+            .search
+            .as_ref()
+            .map(|search| terminal.search(&search.query, 500))
+            .unwrap_or_default();
+        if let Some(search) = self.search.as_mut() {
+            search.hits = hits;
+            search.selected = 0;
+        }
+        self.select_search_hit(cx);
+    }
+
+    fn select_search_hit(&mut self, cx: &mut Context<Self>) {
+        let Some(terminal) = self.terminal.as_ref() else {
+            return;
+        };
+        let hit = self
+            .search
+            .as_ref()
+            .and_then(|search| search.hits.get(search.selected))
+            .cloned();
+        if let Some(hit) = hit {
+            terminal.reveal_search_hit(&hit);
+            terminal.start_selection(hit.start, SelectionKind::Char);
+            terminal.update_selection(hit.end, true);
+        } else {
+            terminal.clear_selection();
+        }
+        cx.notify();
+    }
+
+    fn render_search(&self, search: &TerminalSearch, cx: &Context<Self>) -> AnyElement {
+        let count = if search.hits.is_empty() {
+            "0".to_string()
+        } else {
+            format!("{}/{}", search.selected + 1, search.hits.len())
+        };
+        div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .right_0()
+            .px_2()
+            .py_1()
+            .flex()
+            .items_center()
+            .gap_2()
+            .bg(cx.theme().background)
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .text_size(px(11.))
+            .text_color(cx.theme().foreground)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .child(if search.query.is_empty() {
+                        "Find in terminal…".to_string()
+                    } else {
+                        search.query.clone()
+                    }),
+            )
+            .child(count)
+            .child("↑↓ · Enter · Esc")
+            .into_any_element()
+    }
+
     /// Whether the IME is composing. An empty mark is not composing —
     /// leaving it set would keep macOS sending every later key, so
     /// nothing reaches the child and the caret has nowhere to sit.
@@ -623,6 +777,20 @@ impl TerminalView {
         let Some(terminal) = self.terminal.as_ref() else {
             return;
         };
+        // Search owns the keyboard while it is open. ⌘F (Ctrl+F on Windows)
+        // opens it before the command-key guard below sends the key outward.
+        if self.search.is_some() {
+            self.search_key(event, cx);
+            cx.stop_propagation();
+            return;
+        }
+        let find_key = event.keystroke.modifiers.platform
+            || (!cfg!(target_os = "macos") && event.keystroke.modifiers.control);
+        if find_key && event.keystroke.key == "f" {
+            self.start_search(cx);
+            cx.stop_propagation();
+            return;
+        }
         // A keystroke with the command key belongs to the application's
         // bindings, not the child's input. While the IME is composing,
         // the platform already has the key.
@@ -727,6 +895,7 @@ impl Render for TerminalView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .id("terminal-view")
+            .relative()
             .size_full()
             .overflow_hidden()
             .bg(cx.theme().background)
@@ -758,6 +927,9 @@ impl Render for TerminalView {
                     view: cx.entity(),
                     focus: self.focus.clone(),
                 })
+            })
+            .when_some(self.search.as_ref(), |el, search| {
+                el.child(self.render_search(search, cx))
             })
     }
 }
