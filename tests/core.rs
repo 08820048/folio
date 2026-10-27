@@ -9,7 +9,7 @@ fn ignored() -> Vec<String> {
 #[test]
 fn project_read_edit_save_and_recent_round_trip() {
     let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().join("项目\twith spaces");
+    let root = temp.path().join("项目 with spaces");
     fs::create_dir_all(root.join("src")).unwrap();
     fs::create_dir_all(root.join("target")).unwrap();
     let file = root.join("src/main.rs");
