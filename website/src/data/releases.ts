@@ -31,10 +31,66 @@ export type Release = {
 /** Newest first. */
 export const releases: Release[] = [
   {
+    version: "0.1.7",
+    build: 10,
+    date: "2026-10-27",
+    latest: true,
+    summary: "Bigger files, a search that arrives while it runs, and the reading paths filled in.",
+    notes: [
+      {
+        kind: "added",
+        text: "Files over 32 MiB open in a read-only page viewer, and binary or non-UTF-8 files open as hex.",
+      },
+      {
+        kind: "added",
+        text: "Project search runs in parallel and streams hits as it scans; Stop keeps the partial list, and the path filter includes or excludes by fragment.",
+      },
+      {
+        kind: "added",
+        text: "Review marks in the changes list and diff header are saved with the session.",
+      },
+      {
+        kind: "added",
+        text: "Markdown relative images render in place, and relative links to project files open in Folio.",
+      },
+      {
+        kind: "added",
+        text: "Images zoom and pan: footer buttons, Cmd-scroll or pinch, 25–800%.",
+      },
+      {
+        kind: "added",
+        text: "The terminal has scrollback search with next and previous match.",
+      },
+      {
+        kind: "improved",
+        text: "The file tree and quick-open index follow .gitignore.",
+      },
+      {
+        kind: "improved",
+        text: "Quick open ranks names and remembers each project's recent files.",
+      },
+      {
+        kind: "improved",
+        text: "Tabs have keyboard navigation, a scrolling strip, and Cmd-Shift-T to reopen; Save All and code-size zoom join the shortcuts.",
+      },
+      {
+        kind: "improved",
+        text: "The file tree takes F2 rename, Delete, Shift-F10, Home/End and type-ahead.",
+      },
+      {
+        kind: "improved",
+        text: "Multi-cursor is complete: Option-click adds a caret, arrows move every caret, and word/line deletes apply to all of them.",
+      },
+      {
+        kind: "improved",
+        text: "Accessibility labels were filled in, and Windows builds now get a source-level CI check.",
+      },
+    ],
+  },
+  {
     version: "0.1.6",
     build: 9,
     date: "2026-09-22",
-    latest: true,
     summary: "Swift and C# light up, and the side terminal reads as its own panel.",
     notes: [
       {

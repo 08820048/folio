@@ -3,7 +3,7 @@
 Notable changes to Folio. The detailed, dated implementation log is
 `docs/开发进度.md`; this file is the shorter public-facing view.
 
-## Unreleased
+## 0.1.7 — 2026-10-27
 
 ### Added
 

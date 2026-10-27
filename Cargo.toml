@@ -1,6 +1,6 @@
 [package]
 name = "folio"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2024"
 description = "A small native code reading and editing workspace"
 license = "PolyForm-Noncommercial-1.0.0"
