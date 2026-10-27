@@ -745,6 +745,8 @@ outstanding acceptance items are in
 - [SUPPORT.md](SUPPORT.md) — where to ask and what to include
 - [CHANGELOG.md](CHANGELOG.md) — the shorter public history
 - [GOVERNANCE.md](GOVERNANCE.md) — maintainer, review, releases
+- [docs/accessibility.md](docs/accessibility.md) — keyboard, VoiceOver,
+  contrast and Windows acceptance checklist
 
 ## License
 

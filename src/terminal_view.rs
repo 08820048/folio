@@ -25,8 +25,8 @@ use gpui::{
     EventEmitter, FocusHandle, Focusable, Font, FontStyle, FontWeight, GlobalElementId, Hsla,
     InputHandler, InspectorElementId, IntoElement, KeyDownEvent, Keystroke, LayoutId, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Overflow, ParentElement, Pixels, Point, Render,
-    ScrollWheelEvent, SharedString, Style, Styled, TextAlign, TextRun, UTF16Selection,
-    UnderlineStyle, Window, div, fill, point, prelude::*, px, relative, rgb, size,
+    ScrollWheelEvent, SharedString, StatefulInteractiveElement, Style, Styled, TextAlign, TextRun,
+    UTF16Selection, UnderlineStyle, Window, div, fill, point, prelude::*, px, relative, rgb, size,
 };
 use gpui_component::ActiveTheme;
 
@@ -736,6 +736,9 @@ impl TerminalView {
             format!("{}/{}", search.selected + 1, search.hits.len())
         };
         div()
+            .id("terminal-search")
+            .role(gpui::Role::Group)
+            .aria_label("Terminal search")
             .absolute()
             .top_0()
             .left_0()

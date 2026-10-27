@@ -781,6 +781,7 @@ impl Folio {
                             .id(("row", i))
                             .role(Role::TreeItem)
                             .aria_label(row.entry.name.clone())
+                            .aria_selected(selected)
                             .relative()
                             .w_full()
                             .h(px(TREE_ROW_HEIGHT))
@@ -970,6 +971,7 @@ impl Folio {
         let path = menu.target.path();
         div()
             .id("tree-menu")
+            .role(Role::Menu)
             .absolute()
             .left(menu.position.x)
             .top(menu.position.y)
@@ -1004,7 +1006,7 @@ impl Folio {
                         });
                         let row = div()
                             .id(("menu-item", index))
-                            .role(Role::Button)
+                            .role(Role::MenuItem)
                             .aria_label(label.clone())
                             .h(px(MENU_ROW))
                             .px_2()

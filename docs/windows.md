@@ -21,6 +21,13 @@ download stays **Coming soon** until that installer is signed.
 - A release `Folio.exe` is a GUI process (`windows_subsystem`), so launching
   it does not open a console.
 
+## Automated check
+
+`.github/workflows/ci.yml` now runs `cargo check --locked --features
+desktop-tests` and the library tests on `windows-latest` for every push and
+pull request. That catches compile and target-specific code, but it is not a
+substitute for the manual list below.
+
 ## Build (on a Windows machine)
 
 Visual Studio Build Tools with the MSVC C++ workload, plus rustup:

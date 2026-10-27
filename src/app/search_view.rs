@@ -446,6 +446,12 @@ impl Folio {
         let width = if panel == Panel::Search { 720. } else { 520. };
         div()
             .id("panel")
+            .role(Role::Dialog)
+            .aria_label(if panel == Panel::Files {
+                "Quick Open"
+            } else {
+                "Project Search"
+            })
             .absolute()
             .top(px(48.))
             .left(relative(0.5))
@@ -664,6 +670,9 @@ impl Folio {
                                     let label = this.relative_path(&path);
                                     div()
                                         .id(("match", i))
+                                        .role(Role::ListItem)
+                                        .aria_label(label.clone())
+                                        .aria_selected(i == this.match_selected)
                                         .h(px(30.))
                                         .px_2()
                                         .flex()
@@ -889,7 +898,10 @@ impl Folio {
                     .hits
                     .first()
                     .map(|hit| Position::new(hit.line, hit.column));
-                base.px_2()
+                base.role(Role::ListItem)
+                    .aria_label(format!("{label}, {count} matches"))
+                    .aria_selected(selected)
+                    .px_2()
                     .on_click(cx.listener(move |this, _, window, cx| {
                         if let Some(position) = position {
                             this.goto = Some((path.clone(), position));
@@ -920,7 +932,11 @@ impl Folio {
                 let line = found.line + 1;
                 let path = self.search.results[file].path.clone();
                 let position = Position::new(found.line, found.column);
-                base.pl(px(18.))
+                let aria = format!("{}:{line} {preview}", self.relative_path(&path));
+                base.role(Role::ListItem)
+                    .aria_label(aria)
+                    .aria_selected(selected)
+                    .pl(px(18.))
                     .pr_2()
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.goto = Some((path.clone(), position));
