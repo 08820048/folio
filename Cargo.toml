@@ -70,7 +70,7 @@ image = { version = "0.25", optional = true, default-features = false, features 
 tree-sitter = { version = "0.26", optional = true }
 tree-sitter-asm = { version = "0.24", optional = true }
 tree-sitter-containerfile = { version = "0.9", optional = true }
-tree-sitter-dart = { version = "0.2", optional = true }
+tree-sitter-dart = { version = "0.3", optional = true }
 tree-sitter-elm = { version = "5.9", optional = true }
 tree-sitter-erlang = { version = "0.21", optional = true }
 tree-sitter-fish = { version = "3.6", optional = true }
