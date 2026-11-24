@@ -618,7 +618,20 @@ impl LargeFile {
 struct BracketPaint {
     rainbow: TextDecorationCollection,
     last_rainbow: Vec<TextDecoration>,
+    /// A rescan waiting for typing to pause. Only big buffers wait: see
+    /// [`BRACKETS_DEBOUNCE_ABOVE`]. Dropping it cancels the rescan.
+    pending: Option<Task<()>>,
 }
+
+/// Above this many bytes, rainbow brackets are rescanned once typing pauses
+/// rather than on every keystroke. The scan copies the whole buffer: 1 MB
+/// takes ~3 ms and 5 MB ~15 ms before a single decoration is built
+/// (2026-11-24), so at the top of the highlight limit every key would cost
+/// most of a frame. In the meantime the existing colours ride along with the
+/// edit (decorations are shifted by `adjust_for_edit`); only brackets typed
+/// during the pause wait for their colour.
+const BRACKETS_DEBOUNCE_ABOVE: usize = 256 * 1024;
+const BRACKETS_DEBOUNCE: Duration = Duration::from_millis(150);
 #[derive(Clone)]
 struct Row {
     entry: Entry,

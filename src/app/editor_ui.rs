@@ -53,7 +53,7 @@ impl Folio {
                         doc.dirty = editor.read(cx).is_modified(&doc.saved);
                         doc.revision = doc.revision.wrapping_add(1);
                     }
-                    this.refresh_brackets(editor, cx);
+                    this.refresh_brackets_after_edit(editor, cx);
                     this.update_title(window);
                     cx.notify();
                 }
@@ -71,7 +71,36 @@ impl Folio {
         BracketPaint {
             rainbow,
             last_rainbow: Vec::new(),
+            pending: None,
         }
+    }
+
+    /// `refresh_brackets` after an edit: at once for an ordinary file, after
+    /// a pause in typing for a big one.
+    pub(super) fn refresh_brackets_after_edit(
+        &mut self,
+        editor: &Entity<EditorState>,
+        cx: &mut Context<Self>,
+    ) {
+        if editor.read(cx).snapshot().len() <= BRACKETS_DEBOUNCE_ABOVE {
+            self.refresh_brackets(editor, cx);
+            return;
+        }
+        let Some(doc) = std::iter::once(&mut self.project)
+            .chain(self.parked.iter_mut())
+            .flat_map(|project| project.documents.values_mut())
+            .find(|doc| &doc.editor == editor)
+        else {
+            return;
+        };
+        let weak_editor = editor.downgrade();
+        doc.brackets.pending = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(BRACKETS_DEBOUNCE).await;
+            let Some(editor) = weak_editor.upgrade() else {
+                return;
+            };
+            let _ = this.update(cx, |this, cx| this.refresh_brackets(&editor, cx));
+        }));
     }
 
     pub(super) fn refresh_brackets(
