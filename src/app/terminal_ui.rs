@@ -12,25 +12,13 @@ impl Folio {
             return;
         }
         let view = cx.new(|cx| TerminalView::new(&root, 80, 24, cx));
-        let watch = Self::watch_terminal(&view, cx);
         self.terminals.insert(
             root,
             TerminalTabs {
                 views: vec![view],
                 active: 0,
-                last_run: None,
-                _watches: vec![watch],
             },
         );
-    }
-
-    pub(super) fn watch_terminal(
-        view: &Entity<TerminalView>,
-        cx: &mut Context<Self>,
-    ) -> Subscription {
-        cx.subscribe(view, |_, _, _: &TerminalBusy, cx| {
-            cx.notify();
-        })
     }
 
     /// A fresh terminal tab, focused and showing.
@@ -41,15 +29,11 @@ impl Folio {
         self.terminal_open = true;
         let view = cx.new(|cx| TerminalView::new(&root, 80, 24, cx));
         view.update(cx, |view, cx| view.focus_handle().focus(window, cx));
-        let watch = Self::watch_terminal(&view, cx);
         let tabs = self.terminals.entry(root).or_insert(TerminalTabs {
             views: vec![],
             active: 0,
-            last_run: None,
-            _watches: vec![],
         });
         tabs.views.push(view);
-        tabs._watches.push(watch);
         tabs.active = tabs.views.len() - 1;
         cx.notify();
     }
@@ -79,9 +63,6 @@ impl Folio {
                 return;
             }
             tabs.views.remove(index);
-            if index < tabs._watches.len() {
-                drop(tabs._watches.remove(index));
-            }
             if tabs.views.is_empty() {
                 true
             } else {
@@ -162,14 +143,11 @@ impl Folio {
             .iter()
             .map(|view| {
                 let view = view.read(cx);
-                match (view.title().map(str::to_string), view.is_run(), view.exit()) {
-                    (Some(title), _, _) => title,
-                    (None, true, Some(Some(code))) => format!("Run · exited ({code})"),
-                    (None, true, Some(None)) => "Run · exited".to_string(),
-                    (None, true, None) => "Run".to_string(),
-                    (None, false, Some(Some(code))) => format!("Terminal · exited ({code})"),
-                    (None, false, Some(None)) => "Terminal · exited".to_string(),
-                    (None, false, None) => "Terminal".to_string(),
+                match (view.title().map(str::to_string), view.exit()) {
+                    (Some(title), _) => title,
+                    (None, Some(Some(code))) => format!("Terminal · exited ({code})"),
+                    (None, Some(None)) => "Terminal · exited".to_string(),
+                    (None, None) => "Terminal".to_string(),
                 }
             })
             .collect();

@@ -57,7 +57,7 @@ paths. Check:
    Terminal, Open with Default App.
 4. Git status, diff, blame and the GitHub clone flow with Windows paths and
    `\\?\` prefixes.
-5. ConPTY terminal, IME, copy/paste, URL opening and Run (`cmd.exe /S /C`).
+5. ConPTY terminal, IME, copy/paste and URL opening.
 6. Session restore, atomic save and the unsaved-recovery file under
    `%APPDATA%\Folio`.
 7. Keyboard-only pass, then Narrator.

@@ -636,7 +636,6 @@ impl Folio {
             document.revision = document.revision.wrapping_add(1);
         }
         self.refresh_brackets(&editor, cx);
-        self.refresh_runnables(&editor, cx);
         if let Some(project) = self.project_mut(project_id) {
             if let Some(document) = project.documents.get_mut(path) {
                 document.dirty = document.editor.read(cx).is_modified(&document.saved);
@@ -1575,9 +1574,7 @@ impl Folio {
                 }
             }
         }
-        for (path, mut document) in orphans {
-            // A new root can mean a different Cargo.toml above the file.
-            document.can_run = None;
+        for (path, document) in orphans {
             let home = std::iter::once(&mut self.project)
                 .chain(self.parked.iter_mut())
                 .find(|project| {

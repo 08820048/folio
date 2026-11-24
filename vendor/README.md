@@ -80,15 +80,14 @@ rather than a read of the whole crate.
 - `input/base/element.rs` — drawing every selection as a path of its own and
   every caret as a quad, in the coordinates the primary's already used. The
   pair of brackets under the caret is drawn as a slightly larger wash behind
-  both characters. Runnable lines get a play control in the gutter. When
+  both characters. When
   cursor animation is on, each caret is a four-corner spring path instead
   of a snap.
 - `input/base/cursor_animation.rs` — new. The damped-spring four-corner
   caret glide, adapted from Zed / vscode-neovide-cursor.
 - `input/base/state.rs` / `input/editor/decorations.rs` /
   `input/editor/mod.rs` — `set_bracket_pairs` so Folio can hand the editor
-  the rainbow pairs; the caret match is computed on paint. `set_runnables`
-  marks gutter lines that run.
+  the rainbow pairs; the caret match is computed on paint.
 - `input/editor/indent.rs` — `line_break_at`: what Enter inserts and where the
   caret goes in it. `indent_of_next_line` was deleted, its next-line branch
   having been unreachable.

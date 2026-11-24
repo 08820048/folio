@@ -1,10 +1,9 @@
 use gpui::{
-    AnyElement, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable,
+    App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable,
     IntoElement, Render, RenderOnce, SharedString, Subscription, Window,
 };
 use ropey::Rope;
 use std::cell::RefCell;
-use std::rc::Rc;
 
 use super::{InputBaseState, InputEvent, TabSize, TextDecoration, TextDecorationCollection};
 
@@ -141,21 +140,6 @@ impl EditorState {
         self.base.read(cx).bracket_pairs.clone()
     }
 
-    pub fn set_runnables(
-        &mut self,
-        lines: Vec<usize>,
-        on_click: Option<Rc<dyn Fn(usize, &mut Window, &mut App)>>,
-        icon: Option<Rc<dyn Fn(&App) -> AnyElement>>,
-        cx: &mut Context<Self>,
-    ) {
-        self.base.update(cx, |state, cx| {
-            state.set_runnables(lines, on_click, icon, cx)
-        });
-    }
-
-    pub fn runnable_lines(&self, cx: &App) -> Vec<usize> {
-        self.base.read(cx).runnable_lines().to_vec()
-    }
 
     #[doc(hidden)]
     pub fn base_state(&self) -> &Entity<InputBaseState> {

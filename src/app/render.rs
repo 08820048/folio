@@ -166,9 +166,6 @@ impl Render for Folio {
             .on_action(cx.listener(|this, _: &CheckForUpdates, window, cx| {
                 this.check_for_updates(window, cx)
             }))
-            .on_action(cx.listener(|this, _: &Run, window, cx| this.run_or_stop(None, window, cx)))
-            .on_action(cx.listener(|this, _: &Rerun, window, cx| this.rerun(window, cx)))
-            .on_action(cx.listener(|this, _: &StopRun, window, cx| this.stop_run(window, cx)))
             .on_action(
                 cx.listener(|this, _: &ToggleComment, window, cx| this.toggle_comment(window, cx)),
             )

@@ -127,30 +127,12 @@ impl Folio {
                     })
                     .when_some(self.available_update.as_ref(), |el, update| {
                         el.child(self.render_update_badge(update, cx))
-                    })
-                    .when(self.run_is_busy(cx), |el| {
-                        el.child(Self::icon_button(
-                            "stop",
-                            Icon::new(IconName::Pause).text_color(run_stop_color(cx)),
-                            "Stop",
-                            |this, window, cx| this.stop_run(window, cx),
-                            cx,
-                        ))
-                    })
-                    .when(!self.run_is_busy(cx) && self.can_run_active(cx), |el| {
-                        el.child(Self::icon_button(
-                            "run",
-                            Icon::new(IconName::Play).text_color(cx.theme().success),
-                            "Run",
-                            |this, window, cx| this.run_code(None, window, cx),
-                            cx,
-                        ))
                     }),
             )
             .into_any_element()
     }
 
-    /// "Update available" in the title bar, left of the run control. Plain
+    /// "Update available" at the right end of the title bar. Plain
     /// green text with the arrow, no pill; clicking hands over to the
     /// platform updater.
     pub(super) fn render_update_badge(
