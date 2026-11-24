@@ -16,6 +16,18 @@ Sparkle 私钥        登录钥匙串，account = Folio Sparkle
 
 第一次在这台机器上发版，先跑一次 `./scripts/sparkle-keys.sh`。公钥写入 `packaging/sparkle_public.txt`，私钥只进钥匙串。
 
+Release 链接预编译的 Metal 着色器，所以发版机器要有 Xcode 和它的 Metal Toolchain（只有 Command Line Tools 不够）：
+
+```sh
+xcodebuild -downloadComponent MetalToolchain
+# Xcode 不是 xcode-select 指向的那一个时，构建前设：
+export DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer
+```
+
+`scripts/package.sh` 找不到 `metal` 会直接停下。`FOLIO_RUNTIME_SHADERS=1` 可以绕过，代价是每个新版本第一次打开多花 300–600ms 编着色器。二进制超过 64 MiB 也会停下（`FOLIO_MAX_BINARY_MIB` 可改），理由写在脚本里。
+
+性能抽查：`python3 -I scripts/perf-startup.py --clean target/release/folio`。
+
 ## 发一版
 
 1. 改 `Cargo.toml` 的 `version` 和 `packaging/release.env` 里的 `VERSION` / `BUILD`。`BUILD` 必须比上一版大（Sparkle 比的是它）。

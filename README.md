@@ -535,18 +535,18 @@ truncated" when it hits that ceiling.
 ## Syntax highlighting
 
 Highlighting comes from Tree-sitter. gpui-component ships 37 grammars;
-`src/syntax.rs` registers 23 more through the public `LanguageRegistry`:
+`src/syntax.rs` registers 19 more through the public `LanguageRegistry`:
 
 | Source | Languages |
 | --- | --- |
 | Bundled with the component | Rust, C, C++, C#, Go, Zig, Swift, Java, Kotlin, Scala, Python, Ruby, PHP, Lua, Bash, Elixir, TypeScript, TSX, JavaScript, HTML, CSS, Astro, Svelte, EJS, ERB, JSON, TOML, YAML, CMake, Make, Markdown, SQL, GraphQL, Protocol Buffers, Diff, JsDoc |
-| Added here | XML, DTD, INI, Dockerfile, Nix, PowerShell, Fish, Vim script, Git commit messages, regex, Vue, Dart, R, assembly, Solidity, Haskell, OCaml, Erlang, Elm, Gleam, SCSS, Less |
+| Added here | XML, DTD, INI, Dockerfile, Nix, PowerShell, Fish, Vim script, regex, Vue, Dart, R, assembly, Solidity, Erlang, Elm, Gleam, SCSS, Less |
 
 The extension-to-language map is `src/buffer.rs::language`. Whole-name matches
 win over extensions and cover the extensionless or easily misread files:
 `Dockerfile` / `Dockerfile.dev`, `Containerfile`, `Makefile`, `CMakeLists.txt`,
 `Gemfile` / `Rakefile` / `Vagrantfile`, the `.zshrc` family, `.editorconfig`,
-`.vimrc`, `.Rprofile`, `Cargo.lock` / `Pipfile`, `COMMIT_EDITMSG`, `.env` /
+`.vimrc`, `.Rprofile`, `Cargo.lock` / `Pipfile`, `.env` /
 `.env.local` and others. Uppercase `.C` / `.H` stay C++ by convention. An
 unknown extension returns `text`: no highlighting, no error.
 
@@ -560,12 +560,13 @@ have a build script that actually enables the cfg gating that constant.
 others. All were excluded.
 
 The grammar tables are static data compiled into the binary and parsed only
-when a matching file is opened, so startup, memory and scrolling are
-unaffected. The cost is on disk: the release binary grows from about 21 MB to
-about 73 MB. The four most expensive are OCaml at 13.8 MB, Objective-C at
-11.4 MB, Haskell at 8.1 MB and Git commit messages at 4.2 MB; every other one
-is under 3.4 MB. To drop one, remove its entry from `src/syntax.rs` and its
-dependency from `Cargo.toml`. The `syntax` feature can be turned off as a
+when a matching file is opened, so they cost no work at runtime. They do cost
+the first launch of every install and update: macOS checks a new executable
+before it runs, and that check grows with its size. OCaml, Objective-C, Haskell
+and Git commit messages were dropped for that reason (75.7 → 60.7 MiB, first
+launch 1320 → 1105ms median); those files now read as plain text. To drop
+another, remove its entry from `src/syntax.rs` and its dependency from
+`Cargo.toml`. `scripts/package.sh` refuses a release binary over 64 MiB. The `syntax` feature can be turned off as a
 whole, which falls every extension back to plain text.
 
 ## Checks
@@ -714,8 +715,9 @@ not animate — it is drawn at its width. Notices slide in from
 the right edge and, unless they are errors, slide back out after two seconds. Times in the recent list are the English
 relative strings `just now`, `N hours ago` and `N days ago` rather than anything
 formatted for the system locale, and the interface itself is English only. The
-cold-start target (≤300ms) is still missed — the development machine measured
-1048ms in release — and the Windows, Linux, input-method and accessibility
+cold-start target (≤300ms) is met for a warm start (about 200–250ms) but not
+for the first launch of a new build (about 1.1s, most of it macOS checking the
+new executable before `main`; see the PRD's §8.1) — and the Windows, Linux, input-method and accessibility
 checks have not been run.
 
 The specification in [docs/Folio需求文档.md](docs/Folio需求文档.md) is revised

@@ -46,6 +46,21 @@ if [ "$cargo_version" != "$VERSION" ]; then
     exit 1
 fi
 
+# Size is launch time. macOS checks a newly seen executable before its first
+# run, and that check grows with the file (~200 ms + ~6 ms/MB, measured
+# 2026-11-24); every install and every update pays it. The budget stops a
+# release from growing without anyone deciding it should: raise it on purpose,
+# in the same change that needs it. 60.7 MiB on 2026-11-24.
+if [ "$profile" = release ]; then
+    max_mib=${FOLIO_MAX_BINARY_MIB:-64}
+    bytes=$(stat -f %z "target/release/folio")
+    if [ "$bytes" -gt $((max_mib * 1024 * 1024)) ]; then
+        printf 'target/release/folio is %s bytes, over the %s MiB budget.\n' "$bytes" "$max_mib" >&2
+        printf 'See scripts/package.sh; FOLIO_MAX_BINARY_MIB overrides it.\n' >&2
+        exit 1
+    fi
+fi
+
 sparkle_dir=$(sh scripts/sparkle.sh)
 
 bundle="target/Folio.app"

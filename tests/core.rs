@@ -113,7 +113,8 @@ fn language_mapping_names_registered_grammars() {
     case("Cargo.lock", "toml");
     case(".env", "ini");
     case(".env.local", "ini");
-    case("COMMIT_EDITMSG", "gitcommit");
+    // Grammars dropped for binary size (src/syntax.rs) read as plain text.
+    case("COMMIT_EDITMSG", "text");
     // Extensions.
     case("a.xml", "xml");
     case("a.xaml", "xml");
@@ -125,14 +126,13 @@ fn language_mapping_names_registered_grammars() {
     case("a.nix", "nix");
     case("a.dart", "dart");
     case("a.r", "r");
-    case("a.hs", "haskell");
-    case("a.ml", "ocaml");
-    case("a.mli", "ocaml");
+    case("a.hs", "text");
+    case("a.ml", "text");
     case("a.erl", "erlang");
     case("a.elm", "elm");
     case("a.gleam", "gleam");
     case("a.sol", "solidity");
-    case("a.m", "objc");
+    case("a.m", "text");
     case("a.s", "asm");
     case("a.ps1", "powershell");
     case("config.fish", "fish");

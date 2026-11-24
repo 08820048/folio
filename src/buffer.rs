@@ -102,9 +102,6 @@ pub fn language(path: &Path) -> &'static str {
         ".rprofile" | ".renviron" => Some("r"),
         "cargo.lock" | "pipfile" | "poetry.lock" | "gopkg.lock" => Some("toml"),
         "dockerfile" | "containerfile" => Some("dockerfile"),
-        "commit_editmsg" | "merge_msg" | "tag_editmsg" | "git-rebase-todo" | ".gitmessage" => {
-            Some("gitcommit")
-        }
         _ => None,
     };
     if let Some(language) = named {
@@ -134,7 +131,6 @@ pub fn language(path: &Path) -> &'static str {
         "zig" | "zon" => "zig",
         "dart" => "dart",
         "nix" => "nix",
-        "m" | "mm" => "objc",
         "s" | "asm" | "nasm" => "asm",
         // JVM
         "java" => "java",
@@ -151,12 +147,8 @@ pub fn language(path: &Path) -> &'static str {
         "ps1" | "psm1" | "psd1" => "powershell",
         "ex" | "exs" => "elixir",
         "erl" | "hrl" => "erlang",
-        // Functional
-        "hs" | "lhs" => "haskell",
-        // The interface grammar shares the implementation query in the upstream
-        // crate, and that query does not compile against it, so `.mli` reuses the
-        // implementation grammar and is highlighted approximately.
-        "ml" | "mli" => "ocaml",
+        // Functional. Haskell and OCaml grammars were dropped for size
+        // (src/syntax.rs), so `.hs` / `.ml` read as plain text.
         "elm" => "elm",
         "gleam" => "gleam",
         "r" => "r",
@@ -214,9 +206,8 @@ pub fn line_comment(language: &str) -> Option<&'static str> {
         | "dart" | "typescript" | "tsx" | "javascript" | "php" | "solidity" | "less" | "scss"
         | "sass" | "protobuf" => "//",
         "python" | "ruby" | "bash" | "fish" | "powershell" | "r" | "elixir" | "perl" | "toml"
-        | "yaml" | "make" | "dockerfile" | "ini" | "nix" | "cmake" | "gitignore" | "gitcommit"
-        | "graphql" => "#",
-        "sql" | "lua" | "haskell" | "elm" => "--",
+        | "yaml" | "make" | "dockerfile" | "ini" | "nix" | "cmake" | "gitignore" | "graphql" => "#",
+        "sql" | "lua" | "elm" => "--",
         "erlang" => "%",
         "asm" => ";",
         _ => return None,

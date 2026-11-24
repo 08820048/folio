@@ -3,6 +3,29 @@
 Notable changes to Folio. The detailed, dated implementation log is
 `docs/开发进度.md`; this file is the shorter public-facing view.
 
+## Unreleased
+
+### Removed
+
+- Run (`⌘R` / `⇧⌘R`, the gutter and title-bar Play, the Run tab). It was a
+  task runner, which the product brief rules out; the `⌘J` terminal is the way
+  to run a command. Typing no longer rescans the whole buffer for runnable
+  lines on every keystroke.
+- OCaml, Objective-C, Haskell and Git commit message highlighting. Those four
+  grammars were a fifth of the binary, and binary size is first-launch time on
+  macOS; the files now open as plain text.
+
+### Changed
+
+- Release builds link precompiled Metal shaders instead of compiling them from
+  source when the first window opens (318–642 ms whenever the Metal cache
+  misses). `cargo run` still compiles them at runtime, so building from source
+  needs only the Command Line Tools.
+- Rainbow brackets in files over 256 KB are recomputed once typing pauses
+  rather than on every keystroke.
+- Release binary 75.7 → 60.7 MiB; first launch of a new build 1320 → 1105 ms
+  median. `scripts/package.sh` enforces a 64 MiB budget.
+
 ## 0.1.7 — 2026-10-27
 
 ### Added

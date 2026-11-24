@@ -3,7 +3,7 @@
 //! gpui-component registers 37 grammars; every other file fell back to plain
 //! text. Highlighting is resolved by name through `LanguageRegistry`, and that
 //! registry is public, so more grammars can be added here without patching the
-//! component. This table adds 23 more.
+//! component. This table adds 19 more.
 //!
 //! Several built-ins are also replaced. `.tsx` shipped with only the TypeScript
 //! overlay query (no JS keywords, strings, or JSX tags), and `.json` treated
@@ -36,22 +36,24 @@
 //!   so the const never exists.
 //!
 //! Grammar tables are linked into the binary as static data and are only parsed
-//! when a matching file is opened, so this costs startup, memory and scroll
-//! performance nothing. It does cost disk: the release binary grows from ~21 MB
-//! to ~73 MB. Measured per grammar (object code, KB):
+//! when a matching file is opened, so they cost no work at runtime. They do cost
+//! size, and size is not free: macOS checks a newly seen executable before its
+//! first run, and that check grows with the file — about 200 ms plus ~6 ms per
+//! MB, measured 2026-11-24. Every install and every update pays it once.
+//! Measured per grammar (object code, KB):
 //!
 //! | grammar | KB | grammar | KB | grammar | KB |
 //! | --- | ---: | --- | ---: | --- | ---: |
-//! | ocaml | 13796 | dart | 3356 | r | 980 |
-//! | objc | 11404 | vim | 3352 | erlang | 868 |
-//! | haskell | 8064 | powershell | 2076 | gleam | 692 |
-//! | gitcommit | 4152 | solidity | 1100 | rest | < 400 |
+//! | dart | 3356 | solidity | 1100 | erlang | 868 |
+//! | vim | 3352 | r | 980 | gleam | 692 |
+//! | powershell | 2076 | | | rest | < 400 |
 //!
-//! Drop an entry here and its dependency in `Cargo.toml` to reclaim the space;
-//! `folio::buffer::language` will then fall back to `text` for those extensions.
-//! Known limitation: `.mli` is highlighted with the OCaml implementation grammar,
-//! because the crate shares one query that does not compile against the
-//! interface grammar.
+//! OCaml (13.8 MB), Objective-C (11.4 MB), Haskell (8.1 MB) and Git commit
+//! messages (4.2 MB) were here and were dropped on 2026-11-24 for that reason:
+//! together they were about half the binary. Their files now read as plain
+//! text. Drop an entry here and its dependency in `Cargo.toml` to reclaim more;
+//! `folio::buffer::language` must stop returning the name too, or the test at
+//! the bottom fails.
 
 use folio::buffer;
 use gpui::HighlightStyle;
@@ -193,12 +195,6 @@ fn grammars() -> Vec<Grammar> {
             tree_sitter_vim::INJECTIONS_QUERY
         ),
         grammar!(
-            "gitcommit",
-            tree_sitter_gitcommit::LANGUAGE.into(),
-            tree_sitter_gitcommit::HIGHLIGHTS_QUERY,
-            tree_sitter_gitcommit::INJECTIONS_QUERY
-        ),
-        grammar!(
             "regex",
             tree_sitter_regex::LANGUAGE.into(),
             tree_sitter_regex::HIGHLIGHTS_QUERY
@@ -225,13 +221,6 @@ fn grammars() -> Vec<Grammar> {
             tree_sitter_r::LOCALS_QUERY
         ),
         grammar!(
-            "objc",
-            tree_sitter_objc::LANGUAGE.into(),
-            tree_sitter_objc::HIGHLIGHTS_QUERY,
-            tree_sitter_objc::INJECTIONS_QUERY,
-            tree_sitter_objc::LOCALS_QUERY
-        ),
-        grammar!(
             "asm",
             tree_sitter_asm::LANGUAGE.into(),
             tree_sitter_asm::HIGHLIGHTS_QUERY
@@ -244,23 +233,6 @@ fn grammars() -> Vec<Grammar> {
             tree_sitter_solidity::LOCALS_QUERY
         ),
         // Functionally-flavoured languages
-        grammar!(
-            "haskell",
-            tree_sitter_haskell::LANGUAGE.into(),
-            tree_sitter_haskell::HIGHLIGHTS_QUERY,
-            tree_sitter_haskell::INJECTIONS_QUERY,
-            tree_sitter_haskell::LOCALS_QUERY
-        ),
-        grammar!(
-            "ocaml",
-            tree_sitter_ocaml::LANGUAGE_OCAML.into(),
-            tree_sitter_ocaml::HIGHLIGHTS_QUERY,
-            "",
-            tree_sitter_ocaml::LOCALS_QUERY
-        ),
-        // `ocaml_interface` / `ocaml_type` cannot be registered: the crate ships a
-        // single `HIGHLIGHTS_QUERY` that matches on `shebang`, a node only the
-        // implementation grammar has, so `Query::new` rejects it for the others.
         grammar!(
             "erlang",
             tree_sitter_erlang::LANGUAGE.into(),
@@ -534,20 +506,14 @@ mod tests {
             "config.fish",
             "a.vim",
             ".vimrc",
-            "COMMIT_EDITMSG",
             "a.regex",
             "a.vue",
             "a.dart",
             "a.r",
             ".Rprofile",
-            "a.m",
-            "a.mm",
             "a.s",
             "a.asm",
             "a.sol",
-            "a.hs",
-            "a.ml",
-            "a.mli",
             "a.erl",
             "a.elm",
             "a.gleam",
