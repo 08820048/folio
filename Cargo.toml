@@ -13,7 +13,14 @@ keywords = ["editor", "gpui", "rust", "markdown", "code-reading"]
 categories = ["development-tools", "text-editors"]
 
 [features]
-default = ["desktop"]
+default = ["desktop", "runtime-shaders"]
+# Compile GPUI's Metal shaders from source when the first window opens instead
+# of linking a metallib built ahead of time. On by default because building the
+# metallib needs Xcode's Metal Toolchain, and `cargo run` should only need the
+# Command Line Tools. The price is the first launch after every new binary:
+# the driver compiles the shaders on the spot (~570 ms measured 2026-11-24)
+# before it caches them. Release packages turn it off (scripts/package.sh).
+runtime-shaders = ["gpui_platform?/runtime_shaders"]
 desktop-tests = ["desktop", "gpui/test-support"]
 # Extra Tree-sitter grammars registered at runtime by src/syntax.rs.
 # Kept behind a feature so a library-only build (`cargo test --locked`) does not
@@ -97,7 +104,7 @@ alacritty_terminal = { version = "0.26", optional = true }
 # The official GPUI crates MUST stay on the same commit (see Cargo.lock).
 # Build with --locked. Dependency upgrades are a separate, tested change.
 gpui = { git = "https://github.com/zed-industries/zed", optional = true }
-gpui_platform = { git = "https://github.com/zed-industries/zed", optional = true, features = ["font-kit", "runtime_shaders", "x11", "wayland"] }
+gpui_platform = { git = "https://github.com/zed-industries/zed", optional = true, features = ["font-kit", "x11", "wayland"] }
 gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "f3ba893bd6a996ab0699266ba774b5bbb7f0ca1c", optional = true, features = ["tree-sitter-languages"] }
 gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", rev = "f3ba893bd6a996ab0699266ba774b5bbb7f0ca1c", optional = true }
 

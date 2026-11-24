@@ -15,7 +15,25 @@ if [ "${1:-}" = "--debug" ]; then
     profile=debug
     cargo build --locked --target-dir target
 else
-    cargo build --locked --release --target-dir target
+    # A release ships precompiled Metal shaders: with runtime shaders the first
+    # launch of every new version spends ~570 ms compiling them before the
+    # window can draw. That needs Xcode's Metal Toolchain
+    # (`xcodebuild -downloadComponent MetalToolchain`). FOLIO_RUNTIME_SHADERS=1
+    # packages without it, for a machine that only has the Command Line Tools.
+    if [ "${FOLIO_RUNTIME_SHADERS:-0}" = 1 ]; then
+        cargo build --locked --release --target-dir target
+    else
+        if ! xcrun -sdk macosx metal --version >/dev/null 2>&1; then
+            printf '%s\n' \
+                'The Metal shader compiler is not available.' \
+                'Install it with: xcodebuild -downloadComponent MetalToolchain' \
+                '(with DEVELOPER_DIR or xcode-select pointing at Xcode), or set' \
+                'FOLIO_RUNTIME_SHADERS=1 to package with runtime shaders.' >&2
+            exit 1
+        fi
+        cargo build --locked --release --target-dir target \
+            --no-default-features --features desktop
+    fi
 fi
 
 cargo_version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)

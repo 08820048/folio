@@ -16,8 +16,11 @@ fn main() {
     gpui_platform::application()
         .with_assets(assets::Assets)
         .run(|cx| {
+            app::perf_mark("run");
             gpui_component::init(cx);
+            app::perf_mark("component_init");
             syntax::register_extra_languages();
+            app::perf_mark("languages");
             gpui_component::set_locale("en");
             if let Err(error) = cx.text_system().add_fonts(
                 BUNDLED_FONTS
@@ -27,6 +30,7 @@ fn main() {
             ) {
                 eprintln!("Could not load bundled fonts: {error}");
             }
+            app::perf_mark("fonts");
             let modifier = if cfg!(target_os = "macos") {
                 "cmd"
             } else {
@@ -276,6 +280,7 @@ fn main() {
                     MenuItem::action("Actual Size", ZoomReset),
                 ]),
             ]);
+            app::perf_mark("keys_menus");
             let state = WindowState::load(&config_dir().join("window.json"));
             let bounds = state
                 .main
@@ -288,8 +293,11 @@ fn main() {
                     ..TitleBar::window_options()
                 },
                 |window, cx| {
+                    app::perf_mark("window_open");
                     let view = cx.new(|cx| Folio::new(window, cx));
+                    app::perf_mark("folio_new");
                     view.update(cx, |app, cx| app.start_session(window, cx));
+                    app::perf_mark("session");
                     let weak = view.downgrade();
                     window.on_window_should_close(cx, move |window, cx| {
                         let _ = weak.update(cx, |this, cx| this.close_window(window, cx));
@@ -299,6 +307,7 @@ fn main() {
                 },
             )
             .expect("Failed to open the Folio window");
+            app::perf_mark("window_ready");
             cx.activate(true);
         });
 }

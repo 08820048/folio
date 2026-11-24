@@ -65,6 +65,16 @@ pub fn note_launch() {
     let _ = LAUNCH.get_or_init(Instant::now);
 }
 
+/// One `FOLIO_PERF` line: milliseconds since launch at a named point of
+/// startup, so the first-frame number can be split into its parts.
+pub fn perf_mark(label: &str) {
+    if perf_on()
+        && let Some(start) = LAUNCH.get()
+    {
+        eprintln!("folio_mark {label} ms={:.1}", perf_ms(*start));
+    }
+}
+
 fn perf_on() -> bool {
     std::env::var_os("FOLIO_PERF").is_some()
 }
