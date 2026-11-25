@@ -379,14 +379,11 @@ impl Folio {
                     this.activate_terminal_tab(index, window, cx)
                 }),
             )
-            .child(Self::glass(
-                if run {
-                    GlassIcon::Run
-                } else {
-                    GlassIcon::Terminal
-                },
-                16.,
-            ))
+            .child(if run {
+                Self::glass(GlassIcon::Run, 16., Tone::Blue)
+            } else {
+                Self::glass(GlassIcon::Terminal, 16., glass_tone(active, cx))
+            })
             .child(
                 div()
                     .min_w_0()

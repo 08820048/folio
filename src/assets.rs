@@ -7,8 +7,9 @@
 //! `icons/<name>.svg` paths, everything else falls through untouched.
 //!
 //! The line icons are Lucide (ISC, `assets/icons/LICENSE.txt`). The main
-//! surfaces use the Black Glass set in `assets/icons/glass` instead, see
-//! [`GlassIcon`] and the rule in AGENTS.md. The file-type logos in
+//! surfaces use the glass sets in `assets/icons/glass` (Black Glass) and
+//! `assets/icons/glass-blue` (Glass) instead, see [`GlassIcon`] and the rule
+//! in AGENTS.md. The file-type logos in
 //! `crate::file_icons` are served here too.
 
 use crate::file_icons::FILE_TYPE_ICONS;
@@ -39,9 +40,10 @@ const ICONS: &[(&str, &[u8])] = &[(
     include_bytes!("../assets/icons/gap-horizontal.svg"),
 )];
 
-/// A Black Glass icon: a full-colour raster, drawn with `gpui::img` at its own
-/// colours, never tinted. The PNGs are 96px so they stay sharp up to 48pt on a
-/// Retina display.
+/// A glass icon: a full-colour raster drawn with `gpui::img` at its own
+/// colours, never tinted. Each comes in two materials from the same set of
+/// shapes, see [`Tone`]. The PNGs are 96px so they stay sharp up to 48pt on
+/// a Retina display.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GlassIcon {
     Branch,
@@ -49,12 +51,22 @@ pub enum GlassIcon {
     Files,
     Layout,
     Open,
+    Preview,
     QuickOpen,
     Recent,
     Run,
     Search,
     Settings,
     Terminal,
+}
+
+/// The two glass materials. Black Glass is the resting state on the light
+/// theme; Glass (blue) marks what is active or primary there, and is the
+/// only material on the dark theme, where black glass disappears.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tone {
+    Black,
+    Blue,
 }
 
 impl GlassIcon {
@@ -65,6 +77,7 @@ impl GlassIcon {
         Self::Files,
         Self::Layout,
         Self::Open,
+        Self::Preview,
         Self::QuickOpen,
         Self::Recent,
         Self::Run,
@@ -73,20 +86,29 @@ impl GlassIcon {
         Self::Terminal,
     ];
 
-    pub fn path(self) -> &'static str {
+    fn stem(self) -> &'static str {
         match self {
-            Self::Branch => "icons/glass/branch.png",
-            Self::Changes => "icons/glass/changes.png",
-            Self::Files => "icons/glass/files.png",
-            Self::Layout => "icons/glass/layout.png",
-            Self::Open => "icons/glass/open.png",
-            Self::QuickOpen => "icons/glass/quickopen.png",
-            Self::Recent => "icons/glass/recent.png",
-            Self::Run => "icons/glass/run.png",
-            Self::Search => "icons/glass/search.png",
-            Self::Settings => "icons/glass/settings.png",
-            Self::Terminal => "icons/glass/terminal.png",
+            Self::Branch => "branch",
+            Self::Changes => "changes",
+            Self::Files => "files",
+            Self::Layout => "layout",
+            Self::Open => "open",
+            Self::Preview => "preview",
+            Self::QuickOpen => "quickopen",
+            Self::Recent => "recent",
+            Self::Run => "run",
+            Self::Search => "search",
+            Self::Settings => "settings",
+            Self::Terminal => "terminal",
         }
+    }
+
+    pub fn path(self, tone: Tone) -> SharedString {
+        let dir = match tone {
+            Tone::Black => "glass",
+            Tone::Blue => "glass-blue",
+        };
+        format!("icons/{dir}/{}.png", self.stem()).into()
     }
 }
 
@@ -112,6 +134,10 @@ const GLASS: &[(&str, &[u8])] = &[
         include_bytes!("../assets/icons/glass/open.png"),
     ),
     (
+        "icons/glass/preview.png",
+        include_bytes!("../assets/icons/glass/preview.png"),
+    ),
+    (
         "icons/glass/quickopen.png",
         include_bytes!("../assets/icons/glass/quickopen.png"),
     ),
@@ -134,6 +160,54 @@ const GLASS: &[(&str, &[u8])] = &[
     (
         "icons/glass/terminal.png",
         include_bytes!("../assets/icons/glass/terminal.png"),
+    ),
+    (
+        "icons/glass-blue/branch.png",
+        include_bytes!("../assets/icons/glass-blue/branch.png"),
+    ),
+    (
+        "icons/glass-blue/changes.png",
+        include_bytes!("../assets/icons/glass-blue/changes.png"),
+    ),
+    (
+        "icons/glass-blue/files.png",
+        include_bytes!("../assets/icons/glass-blue/files.png"),
+    ),
+    (
+        "icons/glass-blue/layout.png",
+        include_bytes!("../assets/icons/glass-blue/layout.png"),
+    ),
+    (
+        "icons/glass-blue/open.png",
+        include_bytes!("../assets/icons/glass-blue/open.png"),
+    ),
+    (
+        "icons/glass-blue/preview.png",
+        include_bytes!("../assets/icons/glass-blue/preview.png"),
+    ),
+    (
+        "icons/glass-blue/quickopen.png",
+        include_bytes!("../assets/icons/glass-blue/quickopen.png"),
+    ),
+    (
+        "icons/glass-blue/recent.png",
+        include_bytes!("../assets/icons/glass-blue/recent.png"),
+    ),
+    (
+        "icons/glass-blue/run.png",
+        include_bytes!("../assets/icons/glass-blue/run.png"),
+    ),
+    (
+        "icons/glass-blue/search.png",
+        include_bytes!("../assets/icons/glass-blue/search.png"),
+    ),
+    (
+        "icons/glass-blue/settings.png",
+        include_bytes!("../assets/icons/glass-blue/settings.png"),
+    ),
+    (
+        "icons/glass-blue/terminal.png",
+        include_bytes!("../assets/icons/glass-blue/terminal.png"),
     ),
 ];
 
@@ -183,11 +257,13 @@ mod tests {
             "`{path}` is not in the asset source"
         );
         for icon in GlassIcon::ALL {
-            assert!(
-                assets.load(icon.path()).unwrap().is_some(),
-                "`{}` is not in the asset source",
-                icon.path()
-            );
+            for tone in [Tone::Black, Tone::Blue] {
+                let path = icon.path(tone);
+                assert!(
+                    assets.load(&path).unwrap().is_some(),
+                    "`{path}` is not in the asset source"
+                );
+            }
         }
         // Anything the component library ships must keep working.
         let bundled = assets.load("icons/close.svg").unwrap();

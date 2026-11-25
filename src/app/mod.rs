@@ -7,6 +7,7 @@ mod render;
 mod search_view;
 mod settings_view;
 mod shell_view;
+mod status_bar;
 mod tabs_view;
 mod terminal_ui;
 mod workspace_view;
@@ -15,7 +16,7 @@ use settings_view::{AboutView, SettingsView};
 #[cfg(test)]
 use settings_view::{GROUPS, Page};
 
-use crate::assets::{FolioIcon, GlassIcon};
+use crate::assets::{FolioIcon, GlassIcon, Tone};
 use crate::file_icons;
 use crate::preview::{self, Content};
 use crate::syntax;
@@ -208,6 +209,37 @@ fn workspace_chrome(cx: &App) -> Hsla {
         0x141516
     } else {
         0xE9E9E7
+    })
+    .into()
+}
+
+/// Which glass a surface gets: blue for what is active or primary, black at
+/// rest on the light theme; always blue on dark, where black glass sinks
+/// into the ground.
+fn glass_tone(active: bool, cx: &App) -> Tone {
+    if active || cx.theme().is_dark() {
+        Tone::Blue
+    } else {
+        Tone::Black
+    }
+}
+
+/// Git "modified": brass, from the Black Glass palette.
+fn git_modified_color(cx: &App) -> Hsla {
+    rgb(if cx.theme().is_dark() {
+        0xD2B064
+    } else {
+        0x9A7A2E
+    })
+    .into()
+}
+
+/// Git "added" / untracked: moss green.
+fn git_added_color(cx: &App) -> Hsla {
+    rgb(if cx.theme().is_dark() {
+        0x86BC8C
+    } else {
+        0x4F7A55
     })
     .into()
 }
@@ -460,25 +492,24 @@ fn sync_appearance(
     if let Some(family) = settings.font_family.clone() {
         theme.font_family = family.into();
     }
-    // Light is the Black Glass design (2026-11-25): a monochrome light table
-    // (ground, paper, graphite ink) so the glass icons are the only material
-    // in the window, and one steel-blue accent for caret, selection, focus
-    // and links. Dark keeps the earlier palette until it gets its own pass.
-    theme.background = rgb(if dark { 0x181A1C } else { 0xF8F8F6 }).into();
-    theme.foreground = rgb(if dark { 0xDCDDD8 } else { 0x1D1D1F }).into();
-    theme.sidebar = rgb(if dark { 0x1D1F21 } else { 0xEFEFED }).into();
-    theme.popover = rgb(if dark { 0x1D1F21 } else { 0xF8F8F6 }).into();
-    theme.muted_foreground = rgb(if dark { 0x929792 } else { 0x6B6B70 }).into();
-    theme.border = rgb(if dark { 0x2B2E30 } else { 0xD7D7D3 }).into();
-    theme.accent_foreground = rgb(if dark { 0xBECBAD } else { 0x3A6690 }).into();
-    theme.list_active = rgb(if dark { 0x2B3031 } else { 0xD9DDE2 }).into();
-    theme.list_active_border = rgb(if dark { 0x3A4042 } else { 0xD9DDE2 }).into();
-    theme.list_hover = rgb(if dark { 0x25292B } else { 0xE4E4E1 }).into();
-    if !dark {
-        theme.caret = rgb(0x3A6690).into();
-        theme.selection = rgb(0xD3DEE9).into();
-        theme.ring = rgb(0x3A6690).into();
-    }
+    // The Glass design (2026-11-25): a monochrome light table (ground,
+    // paper, graphite ink) so the glass icons are the only material in the
+    // window, and one accent, the blue of the Glass icons, for caret,
+    // selection, focus and links. Dark is the same table with the lights
+    // off; it uses the blue glass, since black glass sinks into it.
+    theme.background = rgb(if dark { 0x1E1F21 } else { 0xF8F8F6 }).into();
+    theme.foreground = rgb(if dark { 0xE4E4E1 } else { 0x1D1D1F }).into();
+    theme.sidebar = rgb(if dark { 0x1A1B1D } else { 0xEFEFED }).into();
+    theme.popover = rgb(if dark { 0x242528 } else { 0xF8F8F6 }).into();
+    theme.muted_foreground = rgb(if dark { 0x8E8E94 } else { 0x6B6B70 }).into();
+    theme.border = rgb(if dark { 0x2F3033 } else { 0xD7D7D3 }).into();
+    theme.accent_foreground = rgb(if dark { 0x6EA4F2 } else { 0x2B63D0 }).into();
+    theme.list_active = rgb(if dark { 0x2A3344 } else { 0xD9E1EE }).into();
+    theme.list_active_border = theme.list_active;
+    theme.list_hover = rgb(if dark { 0x26282B } else { 0xE4E4E1 }).into();
+    theme.caret = theme.accent_foreground;
+    theme.ring = theme.accent_foreground;
+    theme.selection = rgb(if dark { 0x27426E } else { 0xD5E1F7 }).into();
     theme.title_bar = theme.background;
     theme.title_bar_border = theme.border;
     let background = theme.background;
@@ -488,77 +519,77 @@ fn sync_appearance(
     highlight.style.editor_background = Some(background);
     highlight.style.editor_foreground = Some(foreground);
     highlight.style.editor_gutter_background = Some(background);
-    highlight.style.editor_active_line = Some(rgb(if dark { 0x212628 } else { 0xF0F1F1 }).into());
+    highlight.style.editor_active_line = Some(rgb(if dark { 0x232528 } else { 0xF0F1F3 }).into());
     highlight.style.editor_line_number = Some(muted);
-    if !dark {
-        highlight.style.syntax = glass_syntax(&highlight.style.syntax);
-    }
+    highlight.style.syntax = glass_syntax(&highlight.style.syntax, dark);
     if let Some(window) = window {
         window.refresh();
     }
 }
 
-/// The light syntax palette from the Black Glass design: five quiet hues
-/// (keyword steel, string green, type plum, function umber, comment grey)
+/// The syntax palette from the Glass design: five quiet hues
+/// (keyword blue, string green, type plum, function umber, comment grey)
 /// and everything else in ink or muted ink, so code reads as text first.
 /// `ThemeStyle`'s fields are private, so the palette goes in through the
 /// same serde shape a theme file would use.
 fn glass_syntax(
     base: &gpui_component::highlighter::SyntaxColors,
+    dark: bool,
 ) -> gpui_component::highlighter::SyntaxColors {
-    const KEYWORD: &str = "#3A6690";
-    const STRING: &str = "#4F7A55";
-    const TYPE: &str = "#7A4F86";
-    const FUNCTION: &str = "#8A5A24";
-    const COMMENT: &str = "#9A9A9E";
-    const INK: &str = "#1D1D1F";
-    const MUTED: &str = "#6B6B70";
-    let palette: &[(&str, &str, bool)] = &[
-        ("keyword", KEYWORD, false),
-        ("label", KEYWORD, false),
-        ("tag", KEYWORD, false),
-        ("string", STRING, false),
-        ("string.escape", STRING, false),
-        ("string.regex", STRING, false),
-        ("string.special", STRING, false),
-        ("string.special.symbol", STRING, false),
-        ("text.literal", STRING, false),
-        ("type", TYPE, false),
-        ("constructor", TYPE, false),
-        ("enum", TYPE, false),
-        ("variant", TYPE, false),
-        ("constant", TYPE, false),
-        ("number", TYPE, false),
-        ("boolean", TYPE, false),
-        ("function", FUNCTION, false),
-        ("comment", COMMENT, true),
-        ("comment.doc", COMMENT, true),
-        ("comment_doc", COMMENT, true),
-        ("attribute", MUTED, false),
-        ("preproc", MUTED, false),
-        ("operator", MUTED, false),
-        ("punctuation", MUTED, false),
-        ("punctuation.bracket", MUTED, false),
-        ("punctuation.delimiter", MUTED, false),
-        ("punctuation.special", MUTED, false),
-        ("embedded", INK, false),
-        ("property", INK, false),
-        ("variable", INK, false),
-        ("variable.special", KEYWORD, false),
-        ("variable_special", KEYWORD, false),
+    let pick = |light: &'static str, night: &'static str| if dark { night } else { light };
+    let keyword = pick("#2F5FB3", "#7AA7EE");
+    let string = pick("#4F7A55", "#8DBE8F");
+    let ty = pick("#7A4F86", "#C49BD6");
+    let function = pick("#8A5A24", "#DDAE72");
+    let comment = pick("#9A9A9E", "#6F7075");
+    let ink = pick("#1D1D1F", "#E4E4E1");
+    let muted = pick("#6B6B70", "#9A9AA0");
+    let palette: [(&str, &str, bool); 32] = [
+        ("keyword", keyword, false),
+        ("label", keyword, false),
+        ("tag", keyword, false),
+        ("string", string, false),
+        ("string.escape", string, false),
+        ("string.regex", string, false),
+        ("string.special", string, false),
+        ("string.special.symbol", string, false),
+        ("text.literal", string, false),
+        ("type", ty, false),
+        ("constructor", ty, false),
+        ("enum", ty, false),
+        ("variant", ty, false),
+        ("constant", ty, false),
+        ("number", ty, false),
+        ("boolean", ty, false),
+        ("function", function, false),
+        ("comment", comment, true),
+        ("comment.doc", comment, true),
+        ("comment_doc", comment, true),
+        ("attribute", muted, false),
+        ("preproc", muted, false),
+        ("operator", muted, false),
+        ("punctuation", muted, false),
+        ("punctuation.bracket", muted, false),
+        ("punctuation.delimiter", muted, false),
+        ("punctuation.special", muted, false),
+        ("embedded", ink, false),
+        ("property", ink, false),
+        ("variable", ink, false),
+        ("variable.special", keyword, false),
+        ("variable_special", keyword, false),
     ];
     let Ok(serde_json::Value::Object(mut map)) = serde_json::to_value(base) else {
         return base.clone();
     };
     for (key, color, italic) in palette {
-        if !map.contains_key(*key) {
+        if !map.contains_key(key) {
             continue;
         }
         let mut style = serde_json::json!({ "color": color });
-        if *italic {
+        if italic {
             style["font_style"] = "italic".into();
         }
-        map.insert((*key).to_string(), style);
+        map.insert(key.to_string(), style);
     }
     serde_json::from_value(serde_json::Value::Object(map)).unwrap_or_else(|_| base.clone())
 }
@@ -674,6 +705,10 @@ struct Document {
     /// that looks at the filesystem (`Cargo.toml`, `go.mod`), so it is
     /// answered once per document, not per keystroke; `None` is "not yet".
     can_run: Option<bool>,
+    /// "Spaces: 4" / "Tabs: 4", for the status bar.
+    indent_label: SharedString,
+    /// "LF" or "CRLF", as the file was read.
+    line_ending: &'static str,
     /// What Run does for the whole file (`cargo run`), shown in the title
     /// bar. `None` until the first scan, or when nothing resolves.
     run_command: Option<SharedString>,
@@ -1341,6 +1376,9 @@ struct Project {
     /// touches the file, and it survives a restart through the session.
     reviewed: HashSet<PathBuf>,
     git_status: HashMap<String, char>,
+    /// The checked-out branch, read with the status. Shown in the title
+    /// and status bars.
+    git_branch: Option<String>,
     files: Vec<PathBuf>,
     /// Files opened from quick open, the tree or a search, newest first. Used
     /// to order an empty quick-open list; it is view state, not disk state.
@@ -1387,6 +1425,7 @@ impl Default for Project {
             read_only: HashSet::new(),
             reviewed: HashSet::new(),
             git_status: HashMap::new(),
+            git_branch: None,
             files: Vec::new(),
             recent_files: Vec::new(),
             closed_tabs: Vec::new(),
@@ -1569,6 +1608,9 @@ struct MarkdownLinkTarget(WeakEntity<Folio>);
 impl Global for MarkdownLinkTarget {}
 
 pub struct Folio {
+    /// Caret position in the status bar. Its own view so a caret move
+    /// redraws one label instead of the whole window.
+    cursor_status: Entity<status_bar::CursorStatus>,
     project: Project,
     parked: Vec<Project>,
     project_order: Vec<PathBuf>,
@@ -1943,7 +1985,10 @@ impl Folio {
         let window_file = config_dir().join("window.json");
         let settings_bounds = WindowState::load(&window_file).settings;
         let settings_ignored = settings.ignored.clone();
+        let folio = cx.entity().downgrade();
+        let cursor_status = cx.new(|_| status_bar::CursorStatus::new(folio));
         let mut this = Self {
+            cursor_status,
             project: Project::default(),
             parked: vec![],
             project_order: vec![],
@@ -3250,6 +3295,13 @@ impl Folio {
                         } else {
                             buffer::language(&path)
                         };
+                        let line_ending = if text.contains("\r\n") { "CRLF" } else { "LF" };
+                        let indent_label: SharedString = if indent.hard_tabs {
+                            format!("Tabs: {}", indent.columns)
+                        } else {
+                            format!("Spaces: {}", indent.columns)
+                        }
+                        .into();
                         let saved: SharedString = text.into();
                         let tabs = TabSize {
                             tab_size: indent.columns,
@@ -3294,6 +3346,8 @@ impl Folio {
                                 large,
                                 preview,
                                 can_run: None,
+                                indent_label,
+                                line_ending,
                                 run_command: None,
                                 runnables_pending: None,
                                 brackets,

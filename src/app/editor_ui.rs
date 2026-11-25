@@ -269,7 +269,7 @@ impl Folio {
                     .text_color(run_stop_color(cx))
                     .into_any_element()
             } else {
-                Self::glass(GlassIcon::Run, 14.).into_any_element()
+                Self::glass(GlassIcon::Run, 14., Tone::Blue).into_any_element()
             }
         });
         editor.update(cx, |state, cx| {

@@ -27,8 +27,9 @@ Building from source on a Windows machine is the same document.
 first build downloads dependencies; the app itself never needs the network. The
 code fonts JetBrains Mono, Fira Code and Source Code Pro are embedded in the
 binary. Their licenses are in `assets/OFL.txt` and `assets/fonts/`. The main surfaces (activity
-bar, title bar, Run, terminal tabs, start page, quick open) use the Black Glass
-icons in `assets/icons/glass/`; the small line icons are the Lucide set bundled
+bar, title bar, Run, terminal tabs, status bar, start page, quick open) use the
+glass icons in `assets/icons/glass/` (Black Glass) and `assets/icons/glass-blue/`
+(Glass); the small line icons are the Lucide set bundled
 with gpui-component, plus `gap-horizontal`, vendored in `assets/icons/` under
 the `LICENSE.txt` in that directory.
 
@@ -148,9 +149,10 @@ folder and render inline; a relative link to another file in the project opens
 it in Folio, `http(s)` / `mailto` links go to the system opener, and a file
 outside the project opens in the default app. Reference-style images and raw
 HTML `<img>` tags are left as text. A jump from search lands in source so the
-hit is visible. Large files stay in source. The main surfaces use full-colour Black Glass
-icons (`GlassIcon` in `src/assets.rs`, PNGs in `assets/icons/glass/` drawn with
-`gpui::img`, never tinted); the small controls (close, split, chevrons) stay
+hit is visible. Large files stay in source. The main surfaces use full-colour glass
+icons (`GlassIcon` in `src/assets.rs`, PNGs drawn with `gpui::img`, never
+tinted): black glass at rest on the light theme, blue glass for what is active
+or primary there and for everything on the dark theme; the small controls (close, split, chevrons) stay
 Lucide. No icon button draws a background box. `src/assets.rs` wraps the
 bundled asset source so both sets are served from the same `icons/` namespace.
 

@@ -1073,7 +1073,7 @@ impl Folio {
         }
         let task = cx
             .background_executor()
-            .spawn(async move { git::status(&root) });
+            .spawn(async move { (git::status(&root), git::current_branch(&root)) });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
@@ -1085,6 +1085,8 @@ impl Folio {
                     this.refresh_git_project(project_id, cx);
                     return;
                 }
+                let (result, branch) = result;
+                project.git_branch = branch;
                 match result {
                     Ok(status) => project.git_status = status,
                     Err(e) => this.error(format!("Could not read git status: {e}"), cx),

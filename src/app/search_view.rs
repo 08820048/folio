@@ -581,7 +581,10 @@ impl Folio {
                 cx.theme().muted_foreground
             })
             .when(active, |el| el.font_weight(FontWeight::MEDIUM))
-            .child(Self::glass(icon, 16.).when(!active, |el| el.grayscale(true).opacity(0.6)))
+            .child(
+                Self::glass(icon, 16., glass_tone(active, cx))
+                    .when(!active, |el| el.grayscale(true).opacity(0.6)),
+            )
             .hover(|el| el.text_color(cx.theme().foreground))
             .focus_visible(|el| el.text_color(cx.theme().accent_foreground))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())

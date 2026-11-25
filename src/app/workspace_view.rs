@@ -86,6 +86,7 @@ impl Folio {
                             "activity-bar-toggle",
                             GlassIcon::Layout,
                             "Toggle activity bar",
+                            false,
                             |this, _, cx| this.toggle_activity_bar(cx),
                             cx,
                         ))
@@ -125,6 +126,25 @@ impl Folio {
                     .when_some(self.available_update.as_ref(), |el, update| {
                         el.child(self.render_update_badge(update, cx))
                     })
+                    // Markdown opens rendered; the eye flips it to source.
+                    .when_some(
+                        doc.filter(|_| {
+                            self.project
+                                .active()
+                                .is_some_and(|p| buffer::is_markdown(p))
+                        })
+                        .filter(|doc| !doc.large),
+                        |el, doc| {
+                            el.child(Self::glass_button(
+                                "markdown-preview",
+                                GlassIcon::Preview,
+                                "Markdown Preview",
+                                doc.preview,
+                                |this, window, cx| this.toggle_markdown_preview(window, cx),
+                                cx,
+                            ))
+                        },
+                    )
                     .when(self.run_is_busy(cx), |el| {
                         el.child(self.render_run_button(true, cx))
                     })
@@ -187,7 +207,9 @@ impl Folio {
                 el.pl(px(9.))
                     .child(div().size(px(8.)).rounded(px(1.5)).bg(red))
             })
-            .when(!busy, |el| el.child(Self::glass(GlassIcon::Run, 16.)))
+            .when(!busy, |el| {
+                el.child(Self::glass(GlassIcon::Run, 16., Tone::Blue))
+            })
             .child(
                 div()
                     .text_size(ui(12.))

@@ -337,6 +337,13 @@ pub fn status(root: &Path) -> io::Result<HashMap<String, char>> {
     Ok(status)
 }
 
+/// The checked-out branch, or the short commit when HEAD is detached.
+/// None outside a repository.
+pub fn current_branch(root: &Path) -> Option<String> {
+    git_stdout(root, &["symbolic-ref", "--short", "-q", "HEAD"])
+        .or_else(|| git_stdout(root, &["rev-parse", "--short", "HEAD"]))
+}
+
 /// Dirty and untracked paths, sorted, so the changes list does not jump.
 pub fn changed_paths(status: &HashMap<String, char>) -> Vec<(String, char)> {
     let mut files: Vec<_> = status

@@ -48,6 +48,7 @@ impl Folio {
         id: &'static str,
         icon: GlassIcon,
         label: &'static str,
+        active: bool,
         activate: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
         cx: &Context<Self>,
     ) -> AnyElement {
@@ -58,6 +59,7 @@ impl Folio {
             .group(id)
             .role(Role::Button)
             .aria_label(label)
+            .aria_selected(active)
             .focusable()
             .tab_index(0)
             .size(px(24.))
@@ -78,16 +80,16 @@ impl Folio {
                 }
             }))
             .child(
-                Self::glass(icon, 16.)
+                Self::glass(icon, 16., glass_tone(active, cx))
                     .opacity(0.85)
                     .group_hover(id, |style| style.opacity(1.)),
             )
             .into_any_element()
     }
 
-    /// A Black Glass icon at `size` points, in its own colours.
-    pub(super) fn glass(icon: GlassIcon, size: f32) -> Img {
-        img(icon.path()).size(px(size)).flex_shrink_0()
+    /// A glass icon at `size` points, in its own colours.
+    pub(super) fn glass(icon: GlassIcon, size: f32, tone: Tone) -> Img {
+        img(icon.path(tone)).size(px(size)).flex_shrink_0()
     }
 
     /// A rail entry: a bare glass icon on a 44pt-tall target. The surface it
@@ -143,11 +145,13 @@ impl Folio {
                     .bg(cx.theme().foreground)
                     .when(!active, |el| el.invisible()),
             )
-            .child(Self::glass(icon, 24.).when(!active, |el| {
-                el.grayscale(true)
-                    .opacity(0.6)
-                    .group_hover(id, |style| style.opacity(0.9))
-            }))
+            .child(
+                Self::glass(icon, 24., glass_tone(active, cx)).when(!active, |el| {
+                    el.grayscale(true)
+                        .opacity(0.6)
+                        .group_hover(id, |style| style.opacity(0.9))
+                }),
+            )
             .into_any_element()
     }
 
@@ -243,7 +247,7 @@ impl Folio {
                     cx.stop_propagation();
                 }
             }))
-            .child(Self::glass(icon, 36.))
+            .child(Self::glass(icon, 36., glass_tone(false, cx)))
             .child(
                 div()
                     .flex_1()
@@ -368,7 +372,7 @@ impl Folio {
                     .gap_2()
                     .px(px(12.))
                     .pb(px(10.))
-                    .child(Self::glass(GlassIcon::Recent, 16.))
+                    .child(Self::glass(GlassIcon::Recent, 16., glass_tone(false, cx)))
                     .child(
                         div()
                             .text_size(ui(12.))
@@ -1031,15 +1035,38 @@ impl Folio {
                             )
                             .children(guides)
                             .child(icon)
-                            .child(div().flex_1().min_w_0().truncate().child(row.entry.name))
-                            .when_some(status, |el, status| {
-                                el.child(Icon::new(IconName::Asterisk).xsmall().text_color(
+                            // A changed file is named in its git colour with the
+                            // letter at the right: M brass, A green.
+                            .child({
+                                let status_color = status.map(|status| {
                                     if status == 'U' {
-                                        cx.theme().success
+                                        git_added_color(cx)
                                     } else {
-                                        cx.theme().warning
-                                    },
-                                ))
+                                        git_modified_color(cx)
+                                    }
+                                });
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .when_some(status_color, |el, color| el.text_color(color))
+                                    .child(row.entry.name)
+                            })
+                            .when_some(status, |el, status| {
+                                el.child(
+                                    div()
+                                        .flex_shrink_0()
+                                        .pr_1()
+                                        .font_family(cx.theme().mono_font_family.clone())
+                                        .text_size(ui(11.))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(if status == 'U' {
+                                            git_added_color(cx)
+                                        } else {
+                                            git_modified_color(cx)
+                                        })
+                                        .child(if status == 'U' { "A" } else { "M" }),
+                                )
                             })
                             .when(selected, |el| {
                                 el.child(

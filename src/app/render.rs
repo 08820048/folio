@@ -505,7 +505,6 @@ impl Render for Folio {
                                     .h_full()
                                     .pt(px(WORKSPACE_INSET))
                                     .pr(px(WORKSPACE_INSET))
-                                    .pb(px(WORKSPACE_INSET))
                                     .pl(px(if self.activity_bar {
                                         WORKSPACE_RAIL_GAP
                                     } else {
@@ -518,6 +517,9 @@ impl Render for Folio {
                         self.render_launcher(cx)
                     }),
             )
+            .when(self.project.workspace.is_some(), |el| {
+                el.child(self.render_status_bar(cx))
+            })
             .when(self.clone_open, |el| el.child(self.render_clone_prompt(cx)))
             .when_some(self.panel, |el, panel| {
                 el.child(self.render_panel(panel, cx))
