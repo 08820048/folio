@@ -124,7 +124,14 @@ impl Folio {
     /// split button on the right — Zed's entry — is reachable with one file.
     /// No hairline under the strip: it is the same surface as the code, not
     /// a second chrome bar inside the rounded card.
-    pub(super) fn render_tabs(&self, pane: usize, cx: &Context<Self>) -> AnyElement {
+    /// A pane's tabs. `in_title` is the single-pane layout, where the tabs
+    /// live in the title bar: no strip of their own, no step arrows.
+    pub(super) fn render_tabs(
+        &self,
+        pane: usize,
+        in_title: bool,
+        cx: &Context<Self>,
+    ) -> AnyElement {
         let tabs = self
             .project
             .panes
@@ -143,22 +150,26 @@ impl Folio {
             .debug_selector(|| format!("editor-tabs-{pane}"))
             .flex_shrink_0()
             .w_full()
-            .h(px(TAB_HEIGHT))
+            .when(in_title, |el| el.flex_1().min_w_0().h_full())
+            .when(!in_title, |el| {
+                el.h(px(TAB_HEIGHT))
+                    .px_1()
+                    .border_b_1()
+                    .border_color(cx.theme().border)
+            })
             .flex()
             .items_center()
-            // The strip is the ground the active tab is cut out of: the
-            // active tab is paper, the same sheet as the editor under it.
-            .bg(cx.theme().sidebar)
-            .child(
-                div()
-                    .h_full()
-                    .flex()
-                    .flex_shrink_0()
-                    .items_center()
-                    .pl(px(2.))
-                    .child(self.render_tab_step(pane, -1, cx))
-                    .child(self.render_tab_step(pane, 1, cx)),
-            )
+            .when(!in_title, |el| {
+                el.child(
+                    div()
+                        .h_full()
+                        .flex()
+                        .flex_shrink_0()
+                        .items_center()
+                        .child(self.render_tab_step(pane, -1, cx))
+                        .child(self.render_tab_step(pane, 1, cx)),
+                )
+            })
             // The strip itself scrolls horizontally: with enough tabs, the
             // ones past the right edge would otherwise be unreachable except
             // by the two arrows. The arrows and the split button stay fixed.
@@ -170,6 +181,7 @@ impl Folio {
                     .h_full()
                     .flex()
                     .items_center()
+                    .gap(px(2.))
                     .overflow_x_scroll()
                     .track_scroll(&scroll)
                     .children(
@@ -298,7 +310,7 @@ impl Folio {
             .role(Role::Button)
             .aria_label(name(path))
             .aria_selected(selected)
-            .h_full()
+            .h(px(28.))
             .min_w_0()
             .max_w(px(200.))
             .pl(px(12.))
@@ -307,7 +319,9 @@ impl Folio {
             .items_center()
             .gap_2()
             .flex_shrink_0()
-            .rounded_t(px(6.))
+            .rounded(px(7.))
+            // Pressing a tab must not start the title bar's window drag.
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .cursor_pointer()
             .text_size(ui(12.))
             .text_color(if selected {
@@ -315,7 +329,13 @@ impl Folio {
             } else {
                 cx.theme().muted_foreground
             })
-            .when(selected, |el| el.bg(cx.theme().background))
+            .border_1()
+            .border_color(gpui::transparent_black())
+            .when(selected, |el| {
+                el.bg(cx.theme().background)
+                    .border_color(cx.theme().border)
+                    .shadow_xs()
+            })
             .when(!selected, |el| {
                 el.hover(|el| el.text_color(cx.theme().foreground))
             })

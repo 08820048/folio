@@ -243,15 +243,13 @@ impl Folio {
                 .w(px(self.terminal_width))
                 .h_full()
                 .flex()
-                .border_l_1()
-                .border_color(cx.theme().border)
-                .rounded_tr(px(WORKSPACE_RADIUS))
-                .rounded_br(px(WORKSPACE_RADIUS))
+                // The gap before the sheet is the handle that drags its width.
                 .child(
                     div()
                         .id("terminal-resize")
-                        .w(px(4.))
+                        .w(px(PANEL_GAP))
                         .h_full()
+                        .flex_shrink_0()
                         .cursor_col_resize()
                         .on_mouse_down(
                             MouseButton::Left,
@@ -265,6 +263,11 @@ impl Folio {
                         .h_full()
                         .flex()
                         .flex_col()
+                        .overflow_hidden()
+                        .rounded(px(WORKSPACE_RADIUS))
+                        .border_1()
+                        .border_color(cx.theme().border)
+                        .bg(cx.theme().background)
                         .child(tab_strip)
                         .child(body),
                 )
@@ -277,8 +280,6 @@ impl Folio {
                 .flex_col()
                 .border_t_1()
                 .border_color(cx.theme().border)
-                .rounded_br(px(WORKSPACE_RADIUS))
-                .when(!self.sidebar, |el| el.rounded_bl(px(WORKSPACE_RADIUS)))
                 // The top edge drags the height, the way the sidebar's edge
                 // drags the width.
                 .child(

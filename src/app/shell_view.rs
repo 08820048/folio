@@ -92,11 +92,9 @@ impl Folio {
         img(icon.path(tone)).size(px(size)).flex_shrink_0()
     }
 
-    /// A rail entry: a bare glass icon on a 44pt-tall target. The surface it
-    /// opens is showing → full colour plus a 2px graphite bar on the rail's
-    /// left edge; otherwise the icon is greyed and dimmed. No tile behind
-    /// it, on hover either (AGENTS.md).
-    pub(super) fn rail_icon(
+    /// One segment of the side panel's switch: glass icon and label. The
+    /// selected one sits on a paper chip; the rest are greyed glass.
+    fn panel_segment(
         id: &'static str,
         icon: GlassIcon,
         label: &'static str,
@@ -108,24 +106,35 @@ impl Folio {
         let keyboard = activate.clone();
         div()
             .id(id)
-            .group(id)
-            .role(Role::Button)
+            .role(Role::Tab)
             .aria_label(label)
+            .aria_selected(active)
             .focusable()
             .tab_index(0)
-            .relative()
-            .w(px(ACTIVITY_BAR_WIDTH))
-            .h(px(44.))
-            .flex_shrink_0()
+            .flex_1()
+            .min_w_0()
+            .h(px(28.))
             .flex()
             .items_center()
             .justify_center()
+            .gap(px(6.))
+            .rounded(px(7.))
             .cursor_pointer()
-            // Keyboard focus shows as the bar, since the icon has no tint.
-            .focus_visible(|el| el.opacity(0.85))
-            .tooltip(move |window, cx| {
-                gpui_component::tooltip::Tooltip::new(label).build(window, cx)
+            .text_size(ui(12.))
+            .text_color(if active {
+                cx.theme().foreground
+            } else {
+                cx.theme().muted_foreground
             })
+            .when(active, |el| {
+                el.bg(cx.theme().background)
+                    .font_weight(FontWeight::MEDIUM)
+                    .shadow_xs()
+            })
+            .when(!active, |el| {
+                el.hover(|el| el.text_color(cx.theme().foreground))
+            })
+            .focus_visible(|el| el.text_color(cx.theme().accent_foreground))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(move |this, _, window, cx| activate(this, window, cx)))
             .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
@@ -135,80 +144,102 @@ impl Folio {
                 }
             }))
             .child(
-                div()
-                    .absolute()
-                    .left_0()
-                    .top(px(11.))
-                    .w(px(2.))
-                    .h(px(22.))
-                    .rounded_r(px(2.))
-                    .bg(cx.theme().foreground)
-                    .when(!active, |el| el.invisible()),
+                Self::glass(icon, 16., glass_tone(active, cx))
+                    .when(!active, |el| el.grayscale(true).opacity(0.7)),
             )
-            .child(
-                Self::glass(icon, 24., glass_tone(active, cx)).when(!active, |el| {
-                    el.grayscale(true)
-                        .opacity(0.6)
-                        .group_hover(id, |style| style.opacity(0.9))
-                }),
-            )
+            .child(label)
             .into_any_element()
     }
 
-    /// The far-left rail: small icons, no names. The first one is the
-    /// file tree; the rest open the surfaces Folio already has.
-    pub(super) fn render_activity_bar(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// The left panel in the daily layout: a Files / Changes / Search switch
+    /// on top, the tree or the change list under it, and the terminal and
+    /// settings at the foot. It sits on the window ground, not in a card.
+    pub(super) fn render_side_panel(&self, cx: &mut Context<Self>) -> AnyElement {
+        let searching = self.panel == Some(Panel::Search);
+        let tree = self.sidebar_kind == SidebarKind::Tree && !searching;
+        let changes = self.sidebar_kind == SidebarKind::Changes && !searching;
+        let dark = cx.theme().is_dark();
         div()
-            .id("activity-bar")
-            .w(px(ACTIVITY_BAR_WIDTH))
+            .id("side-panel")
+            .w(px(self.sidebar_width))
             .h_full()
             .flex_shrink_0()
             .flex()
             .flex_col()
-            .items_center()
-            .pt_1()
-            .pb_2()
-            .child(Self::rail_icon(
-                "rail-files",
-                GlassIcon::Files,
-                "File Tree",
-                self.sidebar && self.sidebar_kind == SidebarKind::Tree,
-                |this, _, cx| this.toggle_file_tree(cx),
-                cx,
-            ))
-            .child(Self::rail_icon(
-                "rail-changes",
-                GlassIcon::Changes,
-                "Changes",
-                self.sidebar && self.sidebar_kind == SidebarKind::Changes,
-                |this, _, cx| this.toggle_changes_list(cx),
-                cx,
-            ))
-            .child(Self::rail_icon(
-                "rail-search",
-                GlassIcon::Search,
-                "Search",
-                self.panel == Some(Panel::Search),
-                |this, window, cx| this.show_search(false, window, cx),
-                cx,
-            ))
-            .child(Self::rail_icon(
-                "rail-terminal",
-                GlassIcon::Terminal,
-                "Terminal",
-                self.terminal_open,
-                |this, window, cx| this.toggle_terminal(window, cx),
-                cx,
-            ))
-            .child(div().flex_1())
-            .child(Self::rail_icon(
-                "rail-settings",
-                GlassIcon::Settings,
-                "Settings",
-                false,
-                |this, _, cx| this.show_settings(cx),
-                cx,
-            ))
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .mx_1()
+                    .mb(px(8.))
+                    .p(px(3.))
+                    .flex()
+                    .gap(px(2.))
+                    .rounded(px(9.))
+                    .bg(if dark {
+                        gpui::white().opacity(0.05)
+                    } else {
+                        gpui::black().opacity(0.05)
+                    })
+                    .child(Self::panel_segment(
+                        "panel-files",
+                        GlassIcon::Files,
+                        "Files",
+                        tree,
+                        |this, window, cx| this.show_side(SidebarKind::Tree, window, cx),
+                        cx,
+                    ))
+                    .child(Self::panel_segment(
+                        "panel-changes",
+                        GlassIcon::Changes,
+                        "Changes",
+                        changes,
+                        |this, window, cx| this.show_side(SidebarKind::Changes, window, cx),
+                        cx,
+                    ))
+                    .child(Self::panel_segment(
+                        "panel-search",
+                        GlassIcon::Search,
+                        "Search",
+                        searching,
+                        |this, window, cx| this.show_search(false, window, cx),
+                        cx,
+                    )),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .child(match self.sidebar_kind {
+                        SidebarKind::Tree => self.render_tree(cx),
+                        SidebarKind::Changes => self.render_changes_list(cx),
+                    }),
+            )
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .h(px(32.))
+                    .px_1()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(Self::glass_button(
+                        "panel-terminal",
+                        GlassIcon::Terminal,
+                        "Terminal",
+                        self.terminal_open,
+                        |this, window, cx| this.toggle_terminal(window, cx),
+                        cx,
+                    ))
+                    .child(Self::glass_button(
+                        "panel-settings",
+                        GlassIcon::Settings,
+                        "Settings",
+                        false,
+                        |this, _, cx| this.show_settings(cx),
+                        cx,
+                    )),
+            )
             .into_any_element()
     }
 

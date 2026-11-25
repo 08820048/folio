@@ -29,9 +29,6 @@ pub struct Settings {
     pub hard_tabs: bool,
     /// Whether the file tree starts open. The `⌘B` toggle writes this back.
     pub sidebar: bool,
-    /// Whether the icon rail on the far left starts open. The title-bar
-    /// toggle writes this back.
-    pub activity_bar: bool,
     /// Folder names the tree never descends into and the index never walks.
     pub ignored: Vec<String>,
     /// Wrap long lines in the editor. Off by default: code is read as a grid.
@@ -50,7 +47,6 @@ impl Default for Settings {
             tab_size: 4,
             hard_tabs: false,
             sidebar: true,
-            activity_bar: true,
             soft_wrap: false,
             cursor_animation: true,
             ignored: crate::tree::DEFAULT_IGNORED

@@ -104,8 +104,26 @@ impl Render for Folio {
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| {
                 this.toggle_file_tree(cx);
             }))
-            .on_action(cx.listener(|this, _: &ToggleActivityBar, _, cx| {
-                this.toggle_activity_bar(cx);
+            .on_action(cx.listener(|this, _: &ToggleFocus, window, cx| {
+                let on = !this.focus;
+                this.set_focus(on, window, cx);
+            }))
+            .on_action(
+                cx.listener(|this, _: &ExitFocus, window, cx| this.set_focus(false, window, cx)),
+            )
+            // Esc leaves focus mode unless something closer wants it: an open
+            // panel or menu, or an editor with more than a plain caret.
+            .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if this.focus
+                    && event.keystroke.key == "escape"
+                    && event.keystroke.modifiers == Modifiers::none()
+                    && this.panel.is_none()
+                    && this.menu.is_none()
+                    && !this.active_has_selection(cx)
+                {
+                    this.set_focus(false, window, cx);
+                    cx.stop_propagation();
+                }
             }))
             .on_action(
                 cx.listener(|this, _: &ToggleTerminal, window, cx| {
@@ -485,7 +503,7 @@ impl Render for Folio {
                 cx.stop_propagation();
                 cx.notify();
             }))
-            .child(self.render_titlebar(cx))
+            .child(self.render_titlebar(window, cx))
             .child(
                 div()
                     .flex_1()
@@ -494,31 +512,19 @@ impl Render for Folio {
                     .child(if self.project.workspace.is_some() {
                         div()
                             .size_full()
-                            .flex()
-                            .when(self.activity_bar, |el| {
-                                el.child(self.render_activity_bar(cx))
+                            .when(!self.focus, |el| {
+                                el.pr(px(WORKSPACE_INSET))
+                                    .pb(px(WORKSPACE_INSET))
+                                    .pl(px(WORKSPACE_INSET))
                             })
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .h_full()
-                                    .pt(px(WORKSPACE_INSET))
-                                    .pr(px(WORKSPACE_INSET))
-                                    .pl(px(if self.activity_bar {
-                                        WORKSPACE_RAIL_GAP
-                                    } else {
-                                        WORKSPACE_INSET
-                                    }))
-                                    .child(self.render_workspace(window, cx)),
-                            )
+                            .child(self.render_workspace(window, cx))
                             .into_any_element()
                     } else {
                         self.render_launcher(cx)
                     }),
             )
-            .when(self.project.workspace.is_some(), |el| {
-                el.child(self.render_status_bar(cx))
+            .when(self.focus && self.project.workspace.is_some(), |el| {
+                el.child(self.render_focus_dock(cx))
             })
             .when(self.clone_open, |el| el.child(self.render_clone_prompt(cx)))
             .when_some(self.panel, |el, panel| {

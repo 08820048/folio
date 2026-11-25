@@ -26,8 +26,8 @@ Building from source on a Windows machine is the same document.
 `rust-toolchain.toml` pins Rust 1.95.0 and rustup installs it on demand. The
 first build downloads dependencies; the app itself never needs the network. The
 code fonts JetBrains Mono, Fira Code and Source Code Pro are embedded in the
-binary. Their licenses are in `assets/OFL.txt` and `assets/fonts/`. The main surfaces (activity
-bar, title bar, Run, terminal tabs, status bar, start page, quick open) use the
+binary. Their licenses are in `assets/OFL.txt` and `assets/fonts/`. The main surfaces (title
+bar, side-panel switch, Run, terminal tabs, focus dock, start page, quick open) use the
 glass icons in `assets/icons/glass/` (Black Glass) and `assets/icons/glass-blue/`
 (Glass); the small line icons are the Lucide set bundled
 with gpui-component, plus `gap-horizontal`, vendored in `assets/icons/` under
@@ -78,8 +78,8 @@ next launch, with each project's tabs in order and the file that was on screen
 | Find in file | ⌘F | Ctrl+F |
 | Replace in file | ⌥⌘F | Ctrl+Alt+F |
 | Go to line | ⌘G | Ctrl+G |
-| Toggle activity bar | title-bar button | title-bar button |
-| Toggle sidebar | ⌘B | Ctrl+B |
+| Toggle side panel | ⌘B (or the title-bar button) | Ctrl+B |
+| Focus mode | ⌘K Z (Esc leaves) | Ctrl+K Z (Esc leaves) |
 | Toggle terminal | ⌘J | Ctrl+J |
 | Run | ⌘R | Ctrl+R |
 | Run again | ⇧⌘R | Ctrl+Shift+R |
@@ -98,13 +98,18 @@ next launch, with each project's tabs in order and the file that was on screen
 | Close project | ⌘W | Ctrl+W |
 | Quit | ⌘Q | Ctrl+Q |
 
-The title bar and content area follow the system appearance. The activity-bar
-toggle, the project name and the file's relative path sit in that order to the
-right of the macOS traffic lights; the old centred title and second-line path
-bar are gone. A project opens as a rounded card on a quieter frame: the file
-tree and the editor share that card. The far-left rail is icons only — the
-first one is the file tree — and the title-bar button shows or hides the rail
-itself. The file tree is drag-resizable. Its top row shows the project
+The title bar and content area follow the system appearance. The title bar is
+one row: the side-panel toggle, the tabs, a command bar (project, branch,
+changed-file count; click or ⌘P for quick open), Focus and Run. With a split,
+each pane keeps a tab strip of its own. The side panel sits on the window
+ground with a Files / Changes / Search switch on top and the terminal and
+settings at its foot; the editor and the terminal (docked right by default)
+are separate rounded sheets. Each pane has a header row: the file's path on
+the left; caret, language, encoding, indentation and line endings on the right.
+Focus mode (⌘K Z, or Focus in the title bar; Esc leaves) hides the panel and
+the terminal without stopping either, centres the code in a reading column,
+and moves the entries into a floating dock, with a Running pill above it while
+a Run is going. The side panel is drag-resizable. Its top row shows the project
 folder's name and collapses or expands the whole tree on click, keeping
 subdirectory state, and it also answers to Enter, Space and the left and right
 arrows. The file tree takes the arrow keys, Home/End, Enter, F2 to rename,
@@ -447,8 +452,8 @@ appearance. The traffic lights are still the real ones.
 
 The sidebar is a tree. Three headings collapse, and the four pages under them
 are the screens: interface font and size, code font and size, tab size and
-indent character, and the folder names the tree and search skip. The file tree
-and activity bar are toggled from the window itself, not from here. A heading is not a page itself, so clicking one toggles
+indent character, and the folder names the tree and search skip. The side panel
+is toggled from the window itself, not from here. A heading is not a page itself, so clicking one toggles
 it and clicking a page selects it. Each row is the setting's name and what it
 does stacked on the left and its control flush right, with a hairline
 underneath. Numbers step, two-way choices toggle, and both live in one bordered
@@ -496,8 +501,8 @@ holding a bare rectangle, still loads as the main window.
 
 The `⌘P` panel's "Files" and "Contents" tabs switch between the two lookups in
 one place. `⇧⌘F` opens the content side directly and `⇧⌘H` also reveals the
-replace row. Because both lookups share one panel, the activity-bar search
-icon is the on-screen entry; `⌘P` and the menu items still open it on the
+replace row. Because both lookups share one panel, the side panel's Search
+segment is the on-screen entry; `⌘P` and the menu items still open it on the
 file-name side.
 
 Search is live: 140ms after typing stops, a parallel background scan of the

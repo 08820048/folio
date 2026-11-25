@@ -16,14 +16,22 @@ Notable changes to Folio. The detailed, dated implementation log is
 - New look (Glass). A monochrome light table: grey ground, paper editor,
   graphite ink, and one accent taken from the blue glass icons, with a quieter
   five-hue syntax palette; dark mode is the same table with the lights off.
-  The activity bar, title bar, Run, terminal tabs, status bar, start page and
+  The title bar, side panel, Run, terminal tabs, focus dock, start page and
   quick open use full-colour glass icons: black at rest and blue when active
   on light, blue throughout on dark. The title-bar Run shows the command it
   starts and turns into Stop while it runs; the terminal's Run tab gets a
   running dot and its own Stop. The start page is two columns, actions on the
   left and recent projects on the right.
-- A status bar: branch, number of changed files (click for the list), caret
-  position, language, encoding, indentation and line endings.
+- A new layout. The title bar is one row: side-panel toggle, tabs, a command
+  bar (project › branch ●changes, ⌘P), Focus and Run. The icon rail is gone:
+  the side panel has a Files / Changes / Search switch on top and sits on the
+  window ground, and the editor and terminal (now docked right by default)
+  are separate sheets. Each pane has a header with the path on the left and
+  caret, language, encoding, indentation and line endings on the right.
+- Focus mode (⌘K Z, Esc leaves): the panel and terminal hide without
+  stopping, the code centres in a reading column under a large file heading,
+  and a floating dock holds Files, Quick Open, Search, Changes, Terminal, Run
+  and Settings, with a Running pill above it while a Run is going.
 - The file tree names changed files in their git colour with an M / A at the
   right, and Markdown files get a preview toggle in the title bar.
 - Typing rescans the gutter Play once the keys pause (300 ms) instead of

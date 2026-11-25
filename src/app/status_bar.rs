@@ -1,11 +1,10 @@
-//! The status bar under the workspace card: branch and change count on the
-//! left; caret, language, encoding, indentation and line endings on the
-//! right. Plain muted text, no separators or chips (Black Glass design).
+//! The pane header (breadcrumb, caret, language, encoding, indentation,
+//! line endings) and the caret view it embeds. Plain muted text, no chips.
 
 use super::*;
 
-/// Height of the status bar strip.
-pub(super) const STATUS_BAR_HEIGHT: f32 = 26.;
+/// Height of the row over a pane's code.
+pub(super) const PANE_HEADER_HEIGHT: f32 = 32.;
 
 /// "Ln 19, Col 42" for the active editor.
 ///
@@ -98,67 +97,71 @@ pub(super) fn language_label(id: &str) -> SharedString {
 }
 
 impl Folio {
-    pub(super) fn render_status_bar(&self, cx: &Context<Self>) -> AnyElement {
+    /// The row over a pane's code: the file's place in the project on the
+    /// left; caret, language, encoding, indentation and line endings on the
+    /// right. Branch and change count live in the title bar's command bar.
+    pub(super) fn render_pane_header(&self, index: usize, cx: &Context<Self>) -> AnyElement {
         let muted = cx.theme().muted_foreground;
-        let changed = self.project.git_status.len();
-        let doc = self
+        let Some(path) = self.project.panes.get(index).and_then(|p| p.active.clone()) else {
+            return div().into_any_element();
+        };
+        let doc = self.project.documents.get(&path);
+        let parts: Vec<String> = self
             .project
-            .active()
-            .and_then(|path| self.project.documents.get(path).map(|doc| (path, doc)));
+            .workspace
+            .as_ref()
+            .and_then(|w| path.strip_prefix(&w.root).ok())
+            .map(|rel| {
+                rel.iter()
+                    .map(|part| part.to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_else(|| vec![name(&path)]);
+        let last = parts.len().saturating_sub(1);
+        let crumbs = div()
+            .min_w_0()
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .overflow_hidden()
+            .children(parts.into_iter().enumerate().flat_map(|(i, part)| {
+                let sep = (i > 0).then(|| {
+                    div()
+                        .text_color(muted.opacity(0.6))
+                        .child("›")
+                        .into_any_element()
+                });
+                let label = div()
+                    .when(i == last, |el| el.text_color(cx.theme().foreground))
+                    .child(part)
+                    .into_any_element();
+                sep.into_iter().chain(std::iter::once(label))
+            }));
         div()
-            .id("status-bar")
-            .h(px(STATUS_BAR_HEIGHT))
+            .id(("pane-header", index))
+            .h(px(PANE_HEADER_HEIGHT))
             .flex_shrink_0()
             .flex()
             .items_center()
-            .gap(px(18.))
-            .pl(px(if self.activity_bar {
-                ACTIVITY_BAR_WIDTH + WORKSPACE_RAIL_GAP + 8.
-            } else {
-                WORKSPACE_INSET + 8.
-            }))
-            .pr(px(WORKSPACE_INSET + 8.))
+            .gap(px(16.))
+            .px(px(16.))
             .text_size(ui(11.))
             .text_color(muted)
-            .when_some(self.project.git_branch.clone(), |el, branch| {
-                el.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(6.))
-                        .child(
-                            Self::glass(GlassIcon::Branch, 13., glass_tone(false, cx)).opacity(0.8),
-                        )
-                        .child(
-                            div()
-                                .font_family(cx.theme().mono_font_family.clone())
-                                .child(branch),
-                        ),
-                )
-            })
-            .when(changed > 0, |el| {
-                el.child(
-                    div()
-                        .id("status-changed")
-                        .cursor_pointer()
-                        .text_color(git_modified_color(cx))
-                        .hover(|el| el.text_color(cx.theme().foreground))
-                        .on_click(cx.listener(|this, _, _, cx| this.toggle_changes_list(cx)))
-                        .child(format!("{changed} changed")),
-                )
-            })
+            .child(crumbs)
             .child(div().flex_1())
-            .when_some(doc, |el, (path, doc)| {
+            .when_some(doc, |el, doc| {
                 let language = if doc.large {
                     "text"
                 } else {
-                    buffer::language(path)
+                    buffer::language(&path)
                 };
-                el.child(self.cursor_status.clone())
-                    .child(language_label(language))
-                    .child("UTF-8")
-                    .child(doc.indent_label.clone())
-                    .child(doc.line_ending)
+                el.when(self.project.focused == index, |el| {
+                    el.child(self.cursor_status.clone())
+                })
+                .child(language_label(language))
+                .child("UTF-8")
+                .child(doc.indent_label.clone())
+                .child(doc.line_ending)
             })
             .into_any_element()
     }

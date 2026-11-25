@@ -345,7 +345,6 @@ fn settings_round_trip_defaults_and_clamping() {
     assert_eq!(defaults.tab_size, 4);
     assert!(!defaults.hard_tabs);
     assert!(defaults.sidebar);
-    assert!(defaults.activity_bar);
     assert!(defaults.cursor_animation);
     assert!(defaults.ignored.contains(&"node_modules".to_string()));
 
@@ -359,6 +358,11 @@ fn settings_round_trip_defaults_and_clamping() {
     edited.ignored = vec!["dist".into(), "vendor".into()];
     folio::settings::save(&file, &edited).unwrap();
     assert_eq!(folio::settings::load(&file).unwrap(), edited);
+
+    // A file from before the icon rail went away still loads.
+    let older = temp.path().join("config/older.json");
+    fs::write(&older, r#"{"activity_bar": false, "tab_size": 2}"#).unwrap();
+    assert_eq!(folio::settings::load(&older).unwrap().tab_size, 2);
 
     // A hand-edited file that asks for something unusable is pulled back into
     // range rather than rejected.

@@ -1,5 +1,6 @@
 mod diff_ui;
 mod editor_ui;
+mod focus_view;
 mod menu_ui;
 mod notices;
 mod project_ui;
@@ -157,14 +158,13 @@ fn font_options(mut installed: Vec<String>, current: Option<&str>, code: bool) -
     options
 }
 
-/// The far-left icon rail: icons only, no labels. 48pt fits a 24pt glass
-/// icon with room around it (Black Glass design, 2026-11-25); the rail plus
-/// the gap before the card stays at or under 52pt.
-const ACTIVITY_BAR_WIDTH: f32 = 48.;
-/// Space between the rail and the rounded card. `ACTIVITY_BAR_WIDTH` +
-/// this is the whole left chrome strip.
-const WORKSPACE_RAIL_GAP: f32 = 4.;
-const _: () = assert!((ACTIVITY_BAR_WIDTH + WORKSPACE_RAIL_GAP) as i32 <= 52);
+/// Height of the unified title bar: window controls, tabs, command bar,
+/// Run. Taller than gpui-component's 34pt so the tabs sit in it as pills.
+const TITLE_BAR_HEIGHT: f32 = 46.;
+/// Width of the reading column in focus mode.
+const FOCUS_COLUMN: f32 = 920.;
+/// Gap between the side panel, the editor sheet and the terminal sheet.
+const PANEL_GAP: f32 = 8.;
 /// Space between the window chrome and the rounded workspace card.
 const WORKSPACE_INSET: f32 = 8.;
 /// Corner radius of the workspace card. Children that paint their own
@@ -608,7 +608,8 @@ actions!(
         ProjectReplace,
         GoToLine,
         ToggleSidebar,
-        ToggleActivityBar,
+        ToggleFocus,
+        ExitFocus,
         ToggleTerminal,
         TerminalCopy,
         TerminalPaste,
@@ -1630,9 +1631,9 @@ pub struct Folio {
     diff_against: DiffAgainst,
     /// Cached name of the branch `DiffAgainst::Branch` uses.
     diff_branch: Option<String>,
-    /// The far-left icon rail. Independent of the file tree: hiding the
-    /// rail does not close the tree, and `⌘B` does not hide the rail.
-    activity_bar: bool,
+    /// Focus mode (⌘K Z): panels and terminal hide, the code sits in a
+    /// centred reading column, and a floating dock holds the entries.
+    focus: bool,
     sidebar_width: f32,
     resizing: bool,
     /// Share of the editor column the first pane takes when split.
@@ -2004,7 +2005,7 @@ impl Folio {
             diff_layout: DiffLayout::Unified,
             diff_against: DiffAgainst::Head,
             diff_branch: None,
-            activity_bar: settings.activity_bar,
+            focus: false,
             sidebar_width: 240.,
             resizing: false,
             pane_ratio: 0.5,
@@ -2012,7 +2013,7 @@ impl Folio {
             terminals: HashMap::new(),
             terminal_open: false,
             terminal_height: 260.,
-            terminal_right: false,
+            terminal_right: true,
             terminal_width: 420.,
             resizing_terminal: false,
             run_after_save: None,
@@ -3028,7 +3029,6 @@ impl Folio {
         self.sync_cursor_animation(cx);
         // These two settings are the stored state the toggles write back.
         self.sidebar = self.settings.sidebar;
-        self.activity_bar = self.settings.activity_bar;
         // Editors pick the new wrap up on the next frame of the main window.
         if ignored_changed {
             self.sync_disk_watch();

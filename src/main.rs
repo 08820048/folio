@@ -76,6 +76,8 @@ fn main() {
                 ),
                 KeyBinding::new(&format!("{modifier}-g"), GoToLine, Some("Folio")),
                 KeyBinding::new(&format!("{modifier}-b"), ToggleSidebar, Some("Folio")),
+                // VS Code's Zen Mode chord. ⌃⌘F is macOS full screen.
+                KeyBinding::new(&format!("{modifier}-k z"), ToggleFocus, Some("Folio")),
                 // The dock, like the sidebar a toggle: hiding it keeps the
                 // child running.
                 KeyBinding::new(&format!("{modifier}-j"), ToggleTerminal, Some("Folio")),
@@ -266,7 +268,7 @@ fn main() {
                     MenuItem::action("Replace in File", input::Replace),
                 ]),
                 Menu::new("View").items([
-                    MenuItem::action("Toggle Activity Bar", ToggleActivityBar),
+                    MenuItem::action("Focus Mode", ToggleFocus),
                     MenuItem::action("Toggle Sidebar", ToggleSidebar),
                     MenuItem::action("Terminal", ToggleTerminal),
                     MenuItem::action("Changes", ToggleChanges),
@@ -290,6 +292,11 @@ fn main() {
                 WindowOptions {
                     window_bounds: Some(bounds),
                     window_min_size: Some(MAIN_WINDOW_MIN),
+                    // Centred in the 46pt unified title bar.
+                    titlebar: Some(gpui::TitlebarOptions {
+                        traffic_light_position: Some(point(px(14.), px(15.))),
+                        ..TitleBar::title_bar_options()
+                    }),
                     ..TitleBar::window_options()
                 },
                 |window, cx| {

@@ -2328,10 +2328,10 @@ fn the_run_tab_is_busy_until_the_command_exits(cx: &mut TestAppContext) {
     cx.run_until_parked();
 }
 
-/// The icon rail and the file tree are two toggles. The title-bar
-/// button owns the rail; `⌘B` and the first rail icon own the tree.
+/// Focus mode hides the side panel and the terminal without closing
+/// either: leaving it brings back exactly what was showing.
 #[gpui::test]
-fn the_activity_bar_and_the_file_tree_are_separate(cx: &mut TestAppContext) {
+fn focus_mode_hides_panels_and_gives_them_back(cx: &mut TestAppContext) {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().canonicalize().unwrap();
     std::fs::write(root.join("main.rs"), "// original\n").unwrap();
@@ -2354,28 +2354,19 @@ fn the_activity_bar_and_the_file_tree_are_separate(cx: &mut TestAppContext) {
     });
     cx.run_until_parked();
 
-    view.update(cx, |app, _| {
-        assert!(app.activity_bar);
+    view.update_in(cx, |app, window, cx| {
         assert!(app.sidebar);
-    });
-
-    view.update(cx, |app, cx| {
-        app.toggle_activity_bar(cx);
-        assert!(!app.activity_bar);
-        assert!(app.sidebar, "hiding the rail leaves the tree");
-    });
-
-    view.update(cx, |app, cx| {
-        app.toggle_file_tree(cx);
-        assert!(!app.sidebar);
-        assert!(!app.activity_bar, "hiding the tree leaves the rail");
-    });
-
-    view.update(cx, |app, cx| {
-        app.toggle_activity_bar(cx);
-        app.toggle_file_tree(cx);
-        assert!(app.activity_bar);
-        assert!(app.sidebar);
+        assert!(!app.focus);
+        app.show_side(SidebarKind::Changes, window, cx);
+        assert_eq!(app.sidebar_kind, SidebarKind::Changes);
+        app.set_focus(true, window, cx);
+        assert!(app.focus);
+        assert!(app.sidebar, "focus hides the panel, it does not close it");
+        app.set_focus(false, window, cx);
+        assert!(!app.focus);
+        assert_eq!(app.sidebar_kind, SidebarKind::Changes);
+        app.show_side(SidebarKind::Tree, window, cx);
+        assert_eq!(app.sidebar_kind, SidebarKind::Tree);
     });
 }
 
