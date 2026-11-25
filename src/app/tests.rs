@@ -4951,3 +4951,58 @@ fn right_terminal_dock_and_split_panes_keep_their_own_columns(cx: &mut TestAppCo
         "pane 1's tab strip ({right:?}) must not run under the right dock ({dock:?})"
     );
 }
+
+/// `⇧⌘P` is quick open with a `>`: typing narrows the commands, Enter runs
+/// the selected one and closes the palette, and the command moves to the
+/// top of an empty palette next time.
+#[gpui::test]
+fn the_command_palette_filters_and_runs_commands(cx: &mut TestAppContext) {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    std::fs::write(root.join("main.rs"), "fn main() {}\n").unwrap();
+    cx.update(gpui_component::init);
+    let cx = cx.add_empty_window();
+    let view = cx.update(|window, cx| {
+        cx.new(|cx| {
+            let mut app = Folio::new(window, cx);
+            app.recent_task = None;
+            app.recent_file = root.join("recent.json");
+            app.settings_file = root.join("settings.json");
+            app.window_file = root.join("window.json");
+            app.settings = Settings::default();
+            app.applied_ignored = app.settings.ignored.clone();
+            app
+        })
+    });
+    view.update_in(cx, |app, window, cx| {
+        app.request(Next::Open(root.clone()), window, cx)
+    });
+    cx.run_until_parked();
+
+    view.update_in(cx, |app, window, cx| {
+        app.show_command_palette(window, cx);
+        assert_eq!(app.panel, Some(Panel::Files));
+        assert_eq!(app.command_matches.len(), commands::COMMANDS.len());
+        app.query
+            .update(cx, |query, cx| query.set_value(">focus mo", window, cx));
+        app.filter(cx);
+        let first = commands::COMMANDS[app.command_matches[0]].name;
+        assert_eq!(first, "Focus Mode");
+        assert!(app.matches.is_empty(), "no files in command mode");
+    });
+    // The action itself goes out through the window's dispatch, which
+    // reaches Folio only when it is the window's root, as in the app; here
+    // the palette's side of it is checked.
+    view.update_in(cx, |app, window, cx| app.accept_match(window, cx));
+    cx.run_until_parked();
+    view.update_in(cx, |app, window, cx| {
+        assert_eq!(app.panel, None, "running a command closes the palette");
+        assert_eq!(app.recent_commands, vec!["Focus Mode"]);
+        app.show_command_palette(window, cx);
+        assert_eq!(
+            commands::COMMANDS[app.command_matches[0]].name,
+            "Focus Mode",
+            "the last command run comes first"
+        );
+    });
+}

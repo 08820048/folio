@@ -76,6 +76,11 @@ fn main() {
                 ),
                 KeyBinding::new(&format!("{modifier}-g"), GoToLine, Some("Folio")),
                 KeyBinding::new(&format!("{modifier}-b"), ToggleSidebar, Some("Folio")),
+                KeyBinding::new(
+                    &format!("{modifier}-shift-p"),
+                    CommandPalette,
+                    Some("Folio"),
+                ),
                 // VS Code's Zen Mode chord. ⌃⌘F is macOS full screen.
                 KeyBinding::new(&format!("{modifier}-k z"), ToggleFocus, Some("Folio")),
                 // The dock, like the sidebar a toggle: hiding it keeps the
@@ -225,6 +230,7 @@ fn main() {
                     MenuItem::action("Open Project…", OpenProject),
                     MenuItem::action("Clone from GitHub…", CloneFromGithub),
                     MenuItem::action("Quick Open…", QuickOpen),
+                    MenuItem::action("Command Palette…", CommandPalette),
                     MenuItem::action("Find in Project…", ProjectSearch),
                     MenuItem::action("Replace in Project…", ProjectReplace),
                     MenuItem::separator(),

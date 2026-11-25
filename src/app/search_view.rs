@@ -415,6 +415,10 @@ impl Folio {
 
     pub(super) fn accept_match(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let query = self.query.read(cx).value();
+        if query.trim_start().starts_with('>') {
+            self.run_selected_command(window, cx);
+            return;
+        }
         if let Some(line) = query.trim().strip_prefix(':') {
             if let Ok(line) = line.parse::<u32>()
                 && line > 0
@@ -665,6 +669,7 @@ impl Folio {
     pub(super) fn render_file_finder(&self, cx: &mut Context<Self>) -> AnyElement {
         let query = self.query.read(cx).value();
         let jumping = query.starts_with(':');
+        let commanding = query.trim_start().starts_with('>');
         div()
             .flex()
             .flex_col()
@@ -678,7 +683,9 @@ impl Folio {
                     .px_2()
                     .text_size(ui(11.))
                     .text_color(cx.theme().muted_foreground)
-                    .child(if self.project.indexing {
+                    .child(if commanding {
+                        "Commands · type to filter · ↑ ↓ · Enter to run"
+                    } else if self.project.indexing {
                         "Indexing files…"
                     } else if jumping {
                         "Enter to go to the line · Esc to close"
@@ -688,7 +695,8 @@ impl Folio {
                         "↑ ↓ to choose · Enter to open · Esc to close"
                     }),
             )
-            .when(!jumping, |el| {
+            .when(commanding, |el| el.child(self.render_command_list(cx)))
+            .when(!jumping && !commanding, |el| {
                 el.child(
                     uniform_list(
                         "quick-results",
@@ -747,6 +755,64 @@ impl Folio {
                 )
             })
             .into_any_element()
+    }
+
+    /// The palette's rows: the command's name, and its shortcut on the right.
+    fn render_command_list(&self, cx: &mut Context<Self>) -> AnyElement {
+        if self.command_matches.is_empty() {
+            return div()
+                .px_2()
+                .py_3()
+                .text_size(ui(12.))
+                .text_color(cx.theme().muted_foreground)
+                .child("No matching command")
+                .into_any_element();
+        }
+        uniform_list(
+            "command-results",
+            self.command_matches.len(),
+            cx.processor(|this, range: std::ops::Range<usize>, window, cx| {
+                range
+                    .map(|i| {
+                        let command = &commands::COMMANDS[this.command_matches[i]];
+                        let action = (command.action)();
+                        let shortcut = commands::shortcut(action.as_ref(), window);
+                        div()
+                            .id(("command", i))
+                            .role(Role::ListItem)
+                            .aria_label(command.name)
+                            .aria_selected(i == this.match_selected)
+                            .w_full()
+                            .h(px(30.))
+                            .px(px(10.))
+                            .flex()
+                            .items_center()
+                            .gap(px(10.))
+                            .text_size(ui(13.))
+                            .rounded(px(6.))
+                            .when(i == this.match_selected, |el| el.bg(cx.theme().list_active))
+                            .hover(|el| el.bg(cx.theme().list_hover))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.match_selected = i;
+                                this.run_selected_command(window, cx)
+                            }))
+                            .child(div().flex_1().min_w_0().truncate().child(command.name))
+                            .when_some(shortcut, |el, keys| {
+                                el.child(
+                                    div()
+                                        .flex_shrink_0()
+                                        .text_size(ui(11.))
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(keys),
+                                )
+                            })
+                    })
+                    .collect()
+            }),
+        )
+        .track_scroll(&self.quick_scroll)
+        .h(px((self.command_matches.len().min(12) * 30) as f32))
+        .into_any_element()
     }
 
     /// `⇧⌘F`: project-wide content search with optional replace.

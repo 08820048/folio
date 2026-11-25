@@ -1,3 +1,4 @@
+mod commands;
 mod diff_ui;
 mod editor_ui;
 mod focus_view;
@@ -610,6 +611,7 @@ actions!(
         GoToLine,
         ToggleSidebar,
         ToggleFocus,
+        CommandPalette,
         ExitFocus,
         ToggleTerminal,
         TerminalCopy,
@@ -1668,6 +1670,10 @@ pub struct Folio {
     panel: Option<Panel>,
     matches: Vec<PathBuf>,
     match_selected: usize,
+    /// Quick open in command mode (`>`): indexes into `commands::COMMANDS`.
+    command_matches: Vec<usize>,
+    /// Commands run from the palette, newest first, for an empty `>`.
+    recent_commands: Vec<&'static str>,
     /// The open right-click menu, if any.
     menu: Option<ContextMenu>,
     /// Zed's `⌘K` then an arrow. Cleared by the next key.
@@ -2039,6 +2045,8 @@ impl Folio {
             panel: None,
             matches: vec![],
             match_selected: 0,
+            command_matches: Vec::new(),
+            recent_commands: Vec::new(),
             menu: None,
             split_chord: false,
             tab_drop: None,
@@ -3605,6 +3613,14 @@ impl Folio {
     fn filter(&mut self, cx: &App) {
         let query = self.query.read(cx).value();
         let query = query.trim();
+        // `>` is the command palette.
+        if let Some(command) = query.strip_prefix('>') {
+            self.matches.clear();
+            let command = command.to_string();
+            self.filter_commands(&command);
+            return;
+        }
+        self.command_matches.clear();
         // `:123` is a line jump, not a file search; the result list is hidden
         // while it is on, so there is nothing to filter.
         if query.starts_with(':') {

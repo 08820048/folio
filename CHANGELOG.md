@@ -11,6 +11,11 @@ Notable changes to Folio. The detailed, dated implementation log is
   grammars were a fifth of the binary, and binary size is first-launch time on
   macOS; the files now open as plain text.
 
+### Added
+
+- Command palette (⇧⌘P, or type `>` in quick open): every command by name,
+  with its shortcut, fuzzy-matched; the ones run recently come first.
+
 ### Changed
 
 - New look (Glass). A monochrome light table: grey ground, paper editor,
