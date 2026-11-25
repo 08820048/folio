@@ -104,6 +104,9 @@ impl Render for Folio {
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| {
                 this.toggle_file_tree(cx);
             }))
+            .on_action(
+                cx.listener(|this, _: &GoToSymbol, window, cx| this.show_symbols(window, cx)),
+            )
             .on_action(cx.listener(|this, _: &CommandPalette, window, cx| {
                 this.show_command_palette(window, cx)
             }))
@@ -485,11 +488,11 @@ impl Render for Folio {
                         match panel {
                             Panel::Search => this.move_search_selection(down),
                             Panel::Files => {
-                                let count = if this.command_matches.is_empty() {
-                                    this.matches.len()
-                                } else {
-                                    this.command_matches.len()
-                                };
+                                let count = this
+                                    .matches
+                                    .len()
+                                    .max(this.command_matches.len())
+                                    .max(this.symbol_matches.len());
                                 let last = count.saturating_sub(1);
                                 this.match_selected = if down {
                                     (this.match_selected + 1).min(last)

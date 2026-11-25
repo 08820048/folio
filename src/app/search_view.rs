@@ -419,6 +419,10 @@ impl Folio {
             self.run_selected_command(window, cx);
             return;
         }
+        if query.trim_start().starts_with('@') {
+            self.jump_to_selected_symbol(window, cx);
+            return;
+        }
         if let Some(line) = query.trim().strip_prefix(':') {
             if let Ok(line) = line.parse::<u32>()
                 && line > 0
@@ -670,6 +674,7 @@ impl Folio {
         let query = self.query.read(cx).value();
         let jumping = query.starts_with(':');
         let commanding = query.trim_start().starts_with('>');
+        let outlining = query.trim_start().starts_with('@');
         div()
             .flex()
             .flex_col()
@@ -685,6 +690,8 @@ impl Folio {
                     .text_color(cx.theme().muted_foreground)
                     .child(if commanding {
                         "Commands · type to filter · ↑ ↓ · Enter to run"
+                    } else if outlining {
+                        "Symbols in this file · type to filter · Enter to go"
                     } else if self.project.indexing {
                         "Indexing files…"
                     } else if jumping {
@@ -696,7 +703,8 @@ impl Folio {
                     }),
             )
             .when(commanding, |el| el.child(self.render_command_list(cx)))
-            .when(!jumping && !commanding, |el| {
+            .when(outlining, |el| el.child(self.render_symbol_list(cx)))
+            .when(!jumping && !commanding && !outlining, |el| {
                 el.child(
                     uniform_list(
                         "quick-results",
@@ -812,6 +820,98 @@ impl Folio {
         )
         .track_scroll(&self.quick_scroll)
         .h(px((self.command_matches.len().min(12) * 30) as f32))
+        .into_any_element()
+    }
+
+    /// Go to Symbol's rows: a kind marker, the name indented by nesting,
+    /// and the line number on the right.
+    fn render_symbol_list(&self, cx: &mut Context<Self>) -> AnyElement {
+        if self.symbol_matches.is_empty() {
+            return div()
+                .px_2()
+                .py_3()
+                .text_size(ui(12.))
+                .text_color(cx.theme().muted_foreground)
+                .child(if self.symbols.is_empty() {
+                    "No symbols in this file"
+                } else {
+                    "No matching symbol"
+                })
+                .into_any_element();
+        }
+        let filtering = !self.query.read(cx).value().trim_start()[1..]
+            .trim()
+            .is_empty();
+        uniform_list(
+            "symbol-results",
+            self.symbol_matches.len(),
+            cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
+                range
+                    .map(|i| {
+                        let symbol = &this.symbols[this.symbol_matches[i]];
+                        let marker = match symbol.kind {
+                            crate::symbols::Kind::Function => git_modified_color(cx),
+                            crate::symbols::Kind::Type => cx.theme().accent_foreground,
+                            crate::symbols::Kind::Module => git_added_color(cx),
+                        };
+                        div()
+                            .id(("symbol", i))
+                            .role(Role::ListItem)
+                            .aria_label(symbol.name.clone())
+                            .aria_selected(i == this.match_selected)
+                            .w_full()
+                            .h(px(28.))
+                            .px(px(10.))
+                            // Nesting reads only in source order; a filtered
+                            // list is flat.
+                            .pl(px(10.
+                                + if filtering {
+                                    0.
+                                } else {
+                                    symbol.depth as f32 * 14.
+                                }))
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .text_size(ui(13.))
+                            .rounded(px(6.))
+                            .when(i == this.match_selected, |el| el.bg(cx.theme().list_active))
+                            .hover(|el| el.bg(cx.theme().list_hover))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.match_selected = i;
+                                this.jump_to_selected_symbol(window, cx)
+                            }))
+                            .child(
+                                div()
+                                    .w(px(14.))
+                                    .flex_shrink_0()
+                                    .text_size(ui(11.))
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(marker)
+                                    .child(symbol.kind.letter()),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .font_family(cx.theme().mono_font_family.clone())
+                                    .text_size(ui(12.))
+                                    .child(symbol.name.clone()),
+                            )
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .text_size(ui(11.))
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(format!(":{}", symbol.line + 1)),
+                            )
+                    })
+                    .collect()
+            }),
+        )
+        .track_scroll(&self.quick_scroll)
+        .h(px((self.symbol_matches.len().min(14) * 28) as f32))
         .into_any_element()
     }
 

@@ -81,6 +81,7 @@ next launch, with each project's tabs in order and the file that was on screen
 | Toggle side panel | ⌘B (or the title-bar button) | Ctrl+B |
 | Focus mode | ⌘K Z (Esc leaves) | Ctrl+K Z (Esc leaves) |
 | Command palette | ⇧⌘P (or `>` in quick open) | Ctrl+Shift+P |
+| Go to symbol in file | ⇧⌘O in the editor (or `@` in quick open) | Ctrl+Shift+O |
 | Toggle terminal | ⌘J | Ctrl+J |
 | Run | ⌘R | Ctrl+R |
 | Run again | ⇧⌘R | Ctrl+Shift+R |

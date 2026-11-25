@@ -612,6 +612,7 @@ actions!(
         ToggleSidebar,
         ToggleFocus,
         CommandPalette,
+        GoToSymbol,
         ExitFocus,
         ToggleTerminal,
         TerminalCopy,
@@ -1674,6 +1675,11 @@ pub struct Folio {
     command_matches: Vec<usize>,
     /// Commands run from the palette, newest first, for an empty `>`.
     recent_commands: Vec<&'static str>,
+    /// Go to Symbol (`@`): the active file's outline, the file and a hash
+    /// of the text it was read from, and the indexes the query keeps.
+    symbols: Vec<crate::symbols::Symbol>,
+    symbols_for: Option<(PathBuf, u64)>,
+    symbol_matches: Vec<usize>,
     /// The open right-click menu, if any.
     menu: Option<ContextMenu>,
     /// Zed's `⌘K` then an arrow. Cleared by the next key.
@@ -2047,6 +2053,9 @@ impl Folio {
             match_selected: 0,
             command_matches: Vec::new(),
             recent_commands: Vec::new(),
+            symbols: Vec::new(),
+            symbols_for: None,
+            symbol_matches: Vec::new(),
             menu: None,
             split_chord: false,
             tab_drop: None,
@@ -3613,14 +3622,22 @@ impl Folio {
     fn filter(&mut self, cx: &App) {
         let query = self.query.read(cx).value();
         let query = query.trim();
-        // `>` is the command palette.
+        // `>` is the command palette, `@` the active file's symbols.
         if let Some(command) = query.strip_prefix('>') {
             self.matches.clear();
+            self.symbol_matches.clear();
             let command = command.to_string();
             self.filter_commands(&command);
             return;
         }
         self.command_matches.clear();
+        if let Some(symbol) = query.strip_prefix('@') {
+            self.matches.clear();
+            let symbol = symbol.to_string();
+            self.filter_symbols(&symbol, cx);
+            return;
+        }
+        self.symbol_matches.clear();
         // `:123` is a line jump, not a file search; the result list is hidden
         // while it is on, so there is nothing to filter.
         if query.starts_with(':') {

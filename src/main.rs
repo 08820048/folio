@@ -5,6 +5,7 @@ mod assets;
 mod file_icons;
 mod preview;
 mod sparkle;
+mod symbols;
 mod syntax;
 mod terminal_view;
 use app::*;
@@ -80,6 +81,13 @@ fn main() {
                     &format!("{modifier}-shift-p"),
                     CommandPalette,
                     Some("Folio"),
+                ),
+                // ⇧⌘O is New Project elsewhere; in the code it is the outline,
+                // as in VS Code and Zed.
+                KeyBinding::new(
+                    &format!("{modifier}-shift-o"),
+                    GoToSymbol,
+                    Some("FolioEditor"),
                 ),
                 // VS Code's Zen Mode chord. ⌃⌘F is macOS full screen.
                 KeyBinding::new(&format!("{modifier}-k z"), ToggleFocus, Some("Folio")),
@@ -231,6 +239,7 @@ fn main() {
                     MenuItem::action("Clone from GitHub…", CloneFromGithub),
                     MenuItem::action("Quick Open…", QuickOpen),
                     MenuItem::action("Command Palette…", CommandPalette),
+                    MenuItem::action("Go to Symbol…", GoToSymbol),
                     MenuItem::action("Find in Project…", ProjectSearch),
                     MenuItem::action("Replace in Project…", ProjectReplace),
                     MenuItem::separator(),

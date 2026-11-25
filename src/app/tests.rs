@@ -5006,3 +5006,66 @@ fn the_command_palette_filters_and_runs_commands(cx: &mut TestAppContext) {
         );
     });
 }
+
+/// `@` in quick open lists the active file's symbols from its parse; typing
+/// filters them, Enter puts the caret on the definition, and an edit to the
+/// file is reflected the next time the list opens.
+#[gpui::test]
+fn go_to_symbol_lists_the_outline_and_jumps(cx: &mut TestAppContext) {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let file = root.join("main.rs");
+    std::fs::write(&file, "struct Point;\n\nfn main() {}\n\nfn helper() {}\n").unwrap();
+    cx.update(gpui_component::init);
+    cx.update(|_| crate::syntax::register_extra_languages());
+    let cx = cx.add_empty_window();
+    let view = cx.update(|window, cx| {
+        cx.new(|cx| {
+            let mut app = Folio::new(window, cx);
+            app.recent_task = None;
+            app.recent_file = root.join("recent.json");
+            app.settings_file = root.join("settings.json");
+            app.window_file = root.join("window.json");
+            app.settings = Settings::default();
+            app.applied_ignored = app.settings.ignored.clone();
+            app
+        })
+    });
+    view.update_in(cx, |app, window, cx| {
+        app.request(Next::Open(root.clone()), window, cx)
+    });
+    cx.run_until_parked();
+    view.update_in(cx, |app, window, cx| {
+        app.open_file(file.clone(), window, cx)
+    });
+    cx.run_until_parked();
+
+    view.update_in(cx, |app, window, cx| {
+        app.show_symbols(window, cx);
+        let names: Vec<_> = app
+            .symbol_matches
+            .iter()
+            .map(|i| app.symbols[*i].name.as_str())
+            .collect();
+        assert_eq!(names, vec!["Point", "main", "helper"]);
+        app.query
+            .update(cx, |query, cx| query.set_value("@help", window, cx));
+        app.filter(cx);
+        assert_eq!(app.symbols[app.symbol_matches[0]].name, "helper");
+        app.accept_match(window, cx);
+        assert_eq!(app.panel, None);
+        assert_eq!(app.caret_line(cx), Some(4));
+    });
+    view.update_in(cx, |app, window, cx| {
+        let editor = app.project.documents[&file].editor.clone();
+        editor.update(cx, |state, cx| {
+            state.set_value("fn renamed() {}\n", window, cx)
+        });
+    });
+    cx.run_until_parked();
+    view.update_in(cx, |app, window, cx| {
+        app.show_symbols(window, cx);
+        assert_eq!(app.symbols.len(), 1);
+        assert_eq!(app.symbols[0].name, "renamed");
+    });
+}

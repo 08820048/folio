@@ -22,6 +22,7 @@ macro_rules! commands {
 pub(super) const COMMANDS: &[Command] = commands![
     "Quick Open…" => QuickOpen,
     "Go to Line…" => GoToLine,
+    "Go to Symbol…" => GoToSymbol,
     "Find in Project…" => ProjectSearch,
     "Replace in Project…" => ProjectReplace,
     "Save" => Save,
@@ -187,6 +188,108 @@ impl Folio {
         self.recent_commands.truncate(8);
         self.close_panel(window, cx);
         window.dispatch_action((command.action)(), cx);
+    }
+}
+
+impl Folio {
+    /// Go to Symbol is quick open with an `@` in front.
+    pub(super) fn show_symbols(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.project.workspace.is_none() || self.project_loading || self.prompting {
+            return;
+        }
+        self.clone_open = false;
+        self.panel = Some(Panel::Files);
+        self.query.update(cx, |query, cx| {
+            query.set_value("@", window, cx);
+            query.focus(window, cx);
+        });
+        self.filter(cx);
+        cx.notify();
+    }
+
+    /// Fill `symbol_matches` for the text after the `@`, reparsing the
+    /// active file only when its text changed since the last look. An empty query
+    /// is the whole outline in source order.
+    pub(super) fn filter_symbols(&mut self, query: &str, cx: &App) {
+        let current = self.project.active().cloned().and_then(|path| {
+            let doc = self.project.documents.get(&path)?;
+            Some((path, doc.large, doc.editor.read(cx).value()))
+        });
+        match current {
+            None => {
+                self.symbols.clear();
+                self.symbols_for = None;
+            }
+            Some((path, large, text)) => {
+                // Keyed by the text itself: a reload from disk replaces it
+                // without the edit event that bumps the revision.
+                let key = (path.clone(), {
+                    use std::hash::{Hash, Hasher};
+                    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                    text.hash(&mut hasher);
+                    hasher.finish()
+                });
+                if self.symbols_for.as_ref() != Some(&key) {
+                    self.symbols = if large {
+                        Vec::new()
+                    } else {
+                        gpui_component::highlighter::LanguageRegistry::singleton()
+                            .language(buffer::language(&path))
+                            .and_then(|config| config.language)
+                            .map(|language| crate::symbols::outline(&language, &text))
+                            .unwrap_or_default()
+                    };
+                    self.symbols_for = Some(key);
+                }
+            }
+        }
+        let query = query.trim().to_lowercase();
+        let mut ranked: Vec<(i32, usize)> = self
+            .symbols
+            .iter()
+            .enumerate()
+            .filter_map(|(index, symbol)| {
+                score(&symbol.name, &query).map(|score| {
+                    let order = if query.is_empty() {
+                        -(index as i32)
+                    } else {
+                        score
+                    };
+                    (order, index)
+                })
+            })
+            .collect();
+        ranked.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+        self.symbol_matches = ranked.into_iter().map(|(_, index)| index).collect();
+        self.match_selected = 0;
+    }
+
+    /// Put the caret on the selected symbol's line and close the panel.
+    pub(super) fn jump_to_selected_symbol(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(line) = self
+            .symbol_matches
+            .get(self.match_selected)
+            .and_then(|index| self.symbols.get(*index))
+            .map(|symbol| symbol.line)
+        else {
+            return;
+        };
+        let Some(doc) = self
+            .project
+            .active()
+            .and_then(|path| self.project.documents.get(path))
+        else {
+            return;
+        };
+        let base = doc.editor.read(cx).base_state().clone();
+        self.close_panel(window, cx);
+        base.update(cx, |base, cx| {
+            base.set_cursor_position(
+                gpui_component::input::Position::new(line as u32, 0),
+                window,
+                cx,
+            )
+        });
     }
 }
 

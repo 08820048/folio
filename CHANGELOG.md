@@ -15,6 +15,9 @@ Notable changes to Folio. The detailed, dated implementation log is
 
 - Command palette (⇧⌘P, or type `>` in quick open): every command by name,
   with its shortcut, fuzzy-matched; the ones run recently come first.
+- Go to Symbol (⇧⌘O in the editor, or `@` in quick open): the file's
+  functions, types and modules from its Tree-sitter parse, nested as in the
+  source, filterable, Enter to jump. No language server needed.
 
 ### Changed
 
