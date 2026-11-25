@@ -485,20 +485,29 @@ impl Folio {
             .flex()
             .items_center()
             .gap_1()
-            .child(self.panel_tab(
-                "panel-tab-files",
-                "Files",
-                GlassIcon::QuickOpen,
-                Panel::Files,
-                cx,
-            ))
-            .child(self.panel_tab(
-                "panel-tab-search",
-                "Contents",
-                GlassIcon::Search,
-                Panel::Search,
-                cx,
-            ))
+            .child(segmented::track(9., cx).child(self.panel_slide.render(
+                "palette-switch",
+                usize::from(panel == Panel::Search),
+                px(2.),
+                false,
+                vec![
+                    self.panel_tab(
+                        "panel-tab-files",
+                        "Files",
+                        GlassIcon::QuickOpen,
+                        Panel::Files,
+                        cx,
+                    ),
+                    self.panel_tab(
+                        "panel-tab-search",
+                        "Contents",
+                        GlassIcon::Search,
+                        Panel::Search,
+                        cx,
+                    ),
+                ],
+                segmented::raised_chip(6., cx),
+            )))
             .child(div().flex_1())
             .when(panel == Panel::Search, |el| {
                 el.child(self.option_toggle(
@@ -569,7 +578,7 @@ impl Folio {
             .focusable()
             .tab_index(0)
             .h(px(24.))
-            .px_2()
+            .px(px(10.))
             .flex()
             .items_center()
             .gap(px(6.))

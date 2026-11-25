@@ -838,20 +838,33 @@ impl Folio {
             .gap_1()
             .border_b_1()
             .border_color(cx.theme().border)
-            .child(self.diff_choice(
-                "md-preview",
-                "Preview",
-                preview,
-                |this, window, cx| this.set_markdown_preview(true, window, cx),
-                cx,
-            ))
-            .child(self.diff_choice(
-                "md-source",
-                "Source",
-                !preview,
-                |this, window, cx| this.set_markdown_preview(false, window, cx),
-                cx,
-            ))
+            .child(
+                segmented::track(7., cx)
+                    .p(px(2.))
+                    .child(self.markdown_slide.render(
+                        "markdown-mode",
+                        usize::from(!preview),
+                        px(0.),
+                        false,
+                        vec![
+                            self.diff_choice(
+                                "md-preview",
+                                "Preview",
+                                preview,
+                                |this, window, cx| this.set_markdown_preview(true, window, cx),
+                                cx,
+                            ),
+                            self.diff_choice(
+                                "md-source",
+                                "Source",
+                                !preview,
+                                |this, window, cx| this.set_markdown_preview(false, window, cx),
+                                cx,
+                            ),
+                        ],
+                        segmented::raised_chip(5., cx),
+                    )),
+            )
             .into_any_element()
     }
 

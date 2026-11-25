@@ -506,45 +506,99 @@ impl Folio {
                             .child(self.relative_path(&view.path)),
                     )
                     .child(summary)
-                    .child(self.diff_choice(
-                        "diff-head",
-                        "HEAD",
-                        self.diff_against == DiffAgainst::Head,
-                        |this, window, cx| this.set_diff_against(DiffAgainst::Head, window, cx),
-                        cx,
-                    ))
-                    .child(self.diff_choice(
-                        "diff-branch",
-                        branch,
-                        self.diff_against == DiffAgainst::Branch,
-                        |this, window, cx| this.set_diff_against(DiffAgainst::Branch, window, cx),
-                        cx,
-                    ))
-                    .child(self.diff_choice(
-                        "diff-unified",
-                        "Unified",
-                        !split,
-                        |this, _, cx| this.set_diff_layout(DiffLayout::Unified, cx),
-                        cx,
-                    ))
-                    .child(self.diff_choice(
-                        "diff-split",
-                        "Split",
-                        split,
-                        |this, _, cx| this.set_diff_layout(DiffLayout::Split, cx),
-                        cx,
-                    ))
-                    .child(self.diff_choice(
-                        "diff-reviewed",
-                        if reviewed {
-                            "Reviewed"
-                        } else {
-                            "Mark reviewed"
-                        },
-                        reviewed,
-                        move |this, _, cx| this.toggle_reviewed(&reviewed_path, cx),
-                        cx,
-                    ))
+                    .child(
+                        segmented::track(7., cx)
+                            .p(px(2.))
+                            .child(self.diff_base_slide.render(
+                                "diff-base",
+                                usize::from(self.diff_against == DiffAgainst::Branch),
+                                px(0.),
+                                false,
+                                vec![
+                                    self.diff_choice(
+                                        "diff-head",
+                                        "HEAD",
+                                        self.diff_against == DiffAgainst::Head,
+                                        |this, window, cx| {
+                                            this.set_diff_against(DiffAgainst::Head, window, cx)
+                                        },
+                                        cx,
+                                    ),
+                                    self.diff_choice(
+                                        "diff-branch",
+                                        branch,
+                                        self.diff_against == DiffAgainst::Branch,
+                                        |this, window, cx| {
+                                            this.set_diff_against(DiffAgainst::Branch, window, cx)
+                                        },
+                                        cx,
+                                    ),
+                                ],
+                                segmented::raised_chip(5., cx),
+                            )),
+                    )
+                    .child(
+                        segmented::track(7., cx)
+                            .p(px(2.))
+                            .child(self.diff_layout_slide.render(
+                                "diff-layout",
+                                usize::from(split),
+                                px(0.),
+                                false,
+                                vec![
+                                    self.diff_choice(
+                                        "diff-unified",
+                                        "Unified",
+                                        !split,
+                                        |this, _, cx| this.set_diff_layout(DiffLayout::Unified, cx),
+                                        cx,
+                                    ),
+                                    self.diff_choice(
+                                        "diff-split",
+                                        "Split",
+                                        split,
+                                        |this, _, cx| this.set_diff_layout(DiffLayout::Split, cx),
+                                        cx,
+                                    ),
+                                ],
+                                segmented::raised_chip(5., cx),
+                            )),
+                    )
+                    // A toggle, not a choice between options: a check and
+                    // green when on, nothing sliding.
+                    .child(
+                        div()
+                            .id("diff-reviewed")
+                            .role(Role::Button)
+                            .aria_label(if reviewed {
+                                "Reviewed"
+                            } else {
+                                "Mark reviewed"
+                            })
+                            .aria_selected(reviewed)
+                            .h(px(20.))
+                            .px(px(8.))
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .cursor_pointer()
+                            .text_size(ui(11.))
+                            .text_color(if reviewed {
+                                git_added_color(cx)
+                            } else {
+                                cx.theme().muted_foreground
+                            })
+                            .hover(|el| el.opacity(0.8))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.toggle_reviewed(&reviewed_path, cx)
+                            }))
+                            .when(reviewed, |el| el.child(Icon::new(IconName::Check).xsmall()))
+                            .child(if reviewed {
+                                "Reviewed"
+                            } else {
+                                "Mark reviewed"
+                            }),
+                    )
                     .child(Self::icon_button(
                         "diff-prev-file",
                         IconName::ChevronUp,
@@ -704,16 +758,22 @@ impl Folio {
             .id(id)
             .role(Role::Button)
             .aria_label(label.to_string())
-            .px(px(6.))
-            .rounded(px(4.))
+            .aria_selected(selected)
+            .h(px(20.))
+            .px(px(8.))
+            .flex()
+            .items_center()
+            .rounded(px(5.))
             .cursor_pointer()
             .text_size(ui(11.))
             .text_color(if selected {
-                cx.theme().accent_foreground
+                cx.theme().foreground
             } else {
                 cx.theme().muted_foreground
             })
-            .when(selected, |el| el.bg(cx.theme().list_active))
+            .when(!selected, |el| {
+                el.hover(|el| el.text_color(cx.theme().foreground))
+            })
             .on_click(cx.listener(move |this, _, window, cx| on_click(this, window, cx)))
             .child(label.to_string())
             .into_any_element()

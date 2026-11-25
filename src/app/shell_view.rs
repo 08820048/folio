@@ -109,7 +109,6 @@ impl Folio {
     ) -> AnyElement {
         let activate = std::rc::Rc::new(activate);
         let keyboard = activate.clone();
-        let dark = cx.theme().is_dark();
         div()
             .id(id)
             .role(Role::Tab)
@@ -135,22 +134,7 @@ impl Folio {
             } else {
                 cx.theme().muted_foreground
             })
-            .when(active, |el| {
-                el.bg(rgb(if dark { 0x2C2E32 } else { 0xFFFFFF }))
-                    .border_color(if dark {
-                        gpui::white().opacity(0.08)
-                    } else {
-                        gpui::black().opacity(0.07)
-                    })
-                    .shadow(vec![BoxShadow {
-                        color: gpui::black().opacity(if dark { 0.35 } else { 0.08 }),
-                        offset: point(px(0.), px(1.)),
-                        blur_radius: px(2.),
-                        spread_radius: px(0.),
-                        inset: false,
-                    }])
-                    .font_weight(FontWeight::MEDIUM)
-            })
+            .when(active, |el| el.font_weight(FontWeight::MEDIUM))
             .when(!active, |el| {
                 el.hover(|el| el.text_color(cx.theme().foreground))
             })
@@ -183,7 +167,6 @@ impl Folio {
         let searching = self.panel == Some(Panel::Search);
         let tree = self.sidebar_kind == SidebarKind::Tree && !searching;
         let changes = self.sidebar_kind == SidebarKind::Changes && !searching;
-        let dark = cx.theme().is_dark();
         // Three icon-and-word segments need about 270pt; narrower, only the
         // selected one keeps its word.
         let words = self.sidebar_width >= 270.;
@@ -195,45 +178,51 @@ impl Folio {
             .flex()
             .flex_col()
             .child(
-                div()
+                segmented::track(10., cx)
                     .flex_shrink_0()
                     .mx_1()
                     .mb(px(8.))
-                    .p(px(3.))
-                    .flex()
-                    .gap(px(2.))
-                    .rounded(px(10.))
-                    .bg(if dark {
-                        gpui::white().opacity(0.05)
-                    } else {
-                        gpui::black().opacity(0.05)
-                    })
-                    .child(Self::panel_segment(
-                        "panel-files",
-                        GlassIcon::Files,
-                        "Files",
-                        tree,
-                        words || tree,
-                        |this, window, cx| this.show_side(SidebarKind::Tree, window, cx),
-                        cx,
-                    ))
-                    .child(Self::panel_segment(
-                        "panel-changes",
-                        GlassIcon::Changes,
-                        "Changes",
-                        changes,
-                        words || changes,
-                        |this, window, cx| this.show_side(SidebarKind::Changes, window, cx),
-                        cx,
-                    ))
-                    .child(Self::panel_segment(
-                        "panel-search",
-                        GlassIcon::Search,
-                        "Search",
-                        searching,
-                        words || searching,
-                        |this, window, cx| this.show_search(false, window, cx),
-                        cx,
+                    .child(self.side_slide.render(
+                        "side-switch",
+                        if searching {
+                            2
+                        } else if changes {
+                            1
+                        } else {
+                            0
+                        },
+                        px(2.),
+                        true,
+                        vec![
+                            Self::panel_segment(
+                                "panel-files",
+                                GlassIcon::Files,
+                                "Files",
+                                tree,
+                                words || tree,
+                                |this, window, cx| this.show_side(SidebarKind::Tree, window, cx),
+                                cx,
+                            ),
+                            Self::panel_segment(
+                                "panel-changes",
+                                GlassIcon::Changes,
+                                "Changes",
+                                changes,
+                                words || changes,
+                                |this, window, cx| this.show_side(SidebarKind::Changes, window, cx),
+                                cx,
+                            ),
+                            Self::panel_segment(
+                                "panel-search",
+                                GlassIcon::Search,
+                                "Search",
+                                searching,
+                                words || searching,
+                                |this, window, cx| this.show_search(false, window, cx),
+                                cx,
+                            ),
+                        ],
+                        segmented::raised_chip(7., cx),
                     )),
             )
             .child(

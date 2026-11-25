@@ -6,6 +6,7 @@ mod notices;
 mod project_ui;
 mod render;
 mod search_view;
+mod segmented;
 mod settings_view;
 mod shell_view;
 mod status_bar;
@@ -1609,6 +1610,13 @@ struct MarkdownLinkTarget(WeakEntity<Folio>);
 impl Global for MarkdownLinkTarget {}
 
 pub struct Folio {
+    /// Sliding selections: the side panel's switch, quick open's mode tabs,
+    /// and the diff's base and layout.
+    side_slide: segmented::Slide,
+    panel_slide: segmented::Slide,
+    diff_base_slide: segmented::Slide,
+    diff_layout_slide: segmented::Slide,
+    markdown_slide: segmented::Slide,
     /// Caret position in the status bar. Its own view so a caret move
     /// redraws one label instead of the whole window.
     cursor_status: Entity<status_bar::CursorStatus>,
@@ -1989,6 +1997,11 @@ impl Folio {
         let folio = cx.entity().downgrade();
         let cursor_status = cx.new(|_| status_bar::CursorStatus::new(folio));
         let mut this = Self {
+            side_slide: Default::default(),
+            panel_slide: Default::default(),
+            diff_base_slide: Default::default(),
+            diff_layout_slide: Default::default(),
+            markdown_slide: Default::default(),
             cursor_status,
             project: Project::default(),
             parked: vec![],

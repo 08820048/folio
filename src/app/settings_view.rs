@@ -168,6 +168,8 @@ pub(super) struct SettingsView {
     pub(super) font_select: Entity<FontSelect>,
     pub(super) code_font_select: Entity<FontSelect>,
     pub(super) ignore_query: Entity<InputState>,
+    /// The sliding selection of each two-way choice, by its id.
+    slides: std::cell::RefCell<HashMap<&'static str, segmented::Slide>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -249,6 +251,7 @@ impl SettingsView {
             font_select,
             code_font_select,
             ignore_query,
+            slides: Default::default(),
             _subscriptions: subscriptions,
         }
     }
@@ -615,24 +618,52 @@ impl SettingsView {
     ) -> AnyElement {
         let segment = |side: &str, option: (&'static str, bool, fn(&mut Settings))| {
             let (label, selected, set) = option;
-            Self::control_segment(
-                format!("{id}-{side}"),
-                label,
-                selected,
-                px(72.),
-                div().child(label).into_any_element(),
-                move |this, _, cx| this.change(set, cx),
-                cx,
-            )
+            div()
+                .id(SharedString::from(format!("{id}-{side}")))
+                .role(Role::Button)
+                .aria_label(label)
+                .aria_selected(selected)
+                .focusable()
+                .tab_index(0)
+                .w(px(68.))
+                .h(px(22.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(5.))
+                .cursor_pointer()
+                .text_size(ui(11.))
+                .text_color(if selected {
+                    cx.theme().foreground
+                } else {
+                    cx.theme().muted_foreground
+                })
+                .when(selected, |el| el.font_weight(FontWeight::MEDIUM))
+                .when(!selected, |el| {
+                    el.hover(|el| el.text_color(cx.theme().foreground))
+                })
+                .focus_visible(|el| el.text_color(cx.theme().accent_foreground))
+                .on_click(cx.listener(move |this, _, _, cx| this.change(set, cx)))
+                .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
+                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                        this.change(set, cx);
+                        cx.stop_propagation();
+                    }
+                }))
+                .child(label)
+                .into_any_element()
         };
-        Self::control_box(
-            vec![
-                segment("left", left),
-                Self::control_divider(cx),
-                segment("right", right),
-            ],
-            cx,
-        )
+        let slide = self.slides.borrow_mut().entry(id).or_default().clone();
+        segmented::track(7., cx)
+            .child(slide.render(
+                id,
+                usize::from(right.1),
+                px(0.),
+                false,
+                vec![segment("left", left), segment("right", right)],
+                segmented::raised_chip(5., cx),
+            ))
+            .into_any_element()
     }
 
     /// The rows of the open page, under its title. Everything is in one

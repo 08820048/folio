@@ -9,3 +9,4 @@
   `[patch]` 指过去，不要因此砍掉功能。钉住的版本就是这个 fork 的基线，
   升级等于对着一个具名 commit 做 rebase。当前改了哪些文件见
   `vendor/README.md`。
+- 分段切换类控件（几个选项里选一个：侧栏 Files / Changes / Search、⌘P 的 Files / Contents、Diff 的 HEAD / 分支和 Unified / Split、Markdown 的 Preview / Source、设置里的二选一）一律用 `src/app/segmented.rs` 的 `Slide`：选中态是一块单独的滑块，切换时按弹簧曲线（`spring`，约 420ms，轻微回弹）滑到新位置。不要再给选中的分段自己画背景。新增同类控件也照此办理。
