@@ -54,6 +54,7 @@ impl Folio {
                         doc.revision = doc.revision.wrapping_add(1);
                     }
                     this.refresh_brackets_after_edit(editor, cx);
+                    this.refresh_runnables_after_edit(editor, cx);
                     this.update_title(window);
                     cx.notify();
                 }
@@ -141,6 +142,338 @@ impl Folio {
             doc.brackets.rainbow.set(rainbow, cx);
         }
         editor.update(cx, |state, cx| state.set_bracket_pairs(offsets, cx));
+    }
+
+    pub(super) fn can_run_active(&self, _: &App) -> bool {
+        self.project
+            .active()
+            .and_then(|path| self.project.documents.get(path))
+            .is_some_and(|doc| doc.can_run == Some(true))
+    }
+
+    pub(super) fn set_document_can_run(&mut self, editor: &Entity<EditorState>, can_run: bool) {
+        if let Some(doc) = std::iter::once(&mut self.project)
+            .chain(self.parked.iter_mut())
+            .flat_map(|project| project.documents.values_mut())
+            .find(|doc| &doc.editor == editor)
+        {
+            doc.can_run = Some(can_run);
+        }
+    }
+
+    /// Typing rescans the gutter Play once the keys pause. The scan copies the
+    /// whole buffer into a String and regex-walks it, which is too much work
+    /// to repeat on every keystroke for an icon nobody clicks mid-word.
+    /// Opening a file or reloading it from disk still scans at once.
+    pub(super) fn refresh_runnables_after_edit(
+        &mut self,
+        editor: &Entity<EditorState>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(doc) = std::iter::once(&mut self.project)
+            .chain(self.parked.iter_mut())
+            .flat_map(|project| project.documents.values_mut())
+            .find(|doc| &doc.editor == editor)
+        else {
+            return;
+        };
+        if doc.large {
+            return;
+        }
+        let weak_editor = editor.downgrade();
+        doc.runnables_pending = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(RUNNABLES_DEBOUNCE).await;
+            let Some(editor) = weak_editor.upgrade() else {
+                return;
+            };
+            let _ = this.update(cx, |this, cx| this.refresh_runnables(&editor, cx));
+        }));
+    }
+
+    pub(super) fn refresh_runnables(
+        &mut self,
+        editor: &Entity<EditorState>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((path, large, cached, root)) = std::iter::once(&self.project)
+            .chain(self.parked.iter())
+            .flat_map(|project| {
+                let root = project.workspace.as_ref().map(|w| w.root.clone());
+                project
+                    .documents
+                    .iter()
+                    .filter(|(_, doc)| &doc.editor == editor)
+                    .map(move |(path, doc)| (path.clone(), doc.large, doc.can_run, root.clone()))
+            })
+            .next()
+        else {
+            return;
+        };
+        if large || root.is_none() {
+            self.set_document_can_run(editor, false);
+            editor.update(cx, |state, cx| {
+                state.set_runnables(Vec::new(), None, None, cx)
+            });
+            return;
+        }
+        let root = root.unwrap();
+        let can_run = cached.unwrap_or_else(|| run::can_run(&root, &path));
+        if cached.is_none() {
+            self.set_document_can_run(editor, can_run);
+        }
+        if !can_run {
+            editor.update(cx, |state, cx| {
+                state.set_runnables(Vec::new(), None, None, cx)
+            });
+            return;
+        }
+        let text = editor.read(cx).snapshot().to_string();
+        let mut lines: Vec<usize> = run::find(&path, &text)
+            .iter()
+            .map(|runnable| runnable.line)
+            .collect();
+        lines.sort_unstable();
+        lines.dedup();
+        let folio = cx.entity().downgrade();
+        let on_click = Rc::new({
+            let folio = folio.clone();
+            move |line: usize, window: &mut Window, cx: &mut App| {
+                let _ = folio.update(cx, |this, cx| this.run_or_stop(Some(line), window, cx));
+            }
+        });
+        let icon = Rc::new(move |cx: &App| {
+            let busy = folio
+                .upgrade()
+                .is_some_and(|this| this.read(cx).run_is_busy(cx));
+            if busy {
+                Icon::new(IconName::Pause)
+                    .xsmall()
+                    .text_color(run_stop_color(cx))
+                    .into_any_element()
+            } else {
+                Icon::new(IconName::Play)
+                    .xsmall()
+                    .text_color(cx.theme().success)
+                    .into_any_element()
+            }
+        });
+        editor.update(cx, |state, cx| {
+            state.set_runnables(lines, Some(on_click), Some(icon), cx)
+        });
+    }
+
+    pub(super) fn caret_line(&self, cx: &App) -> Option<usize> {
+        let path = self.project.active()?;
+        let doc = self.project.documents.get(path)?;
+        let offset = doc
+            .editor
+            .read(cx)
+            .base_state()
+            .read(cx)
+            .selected_ranges()
+            .last()?
+            .end;
+        Some(doc.editor.read(cx).snapshot().offset_to_point(offset).row)
+    }
+
+    pub(super) fn run_is_busy(&self, cx: &App) -> bool {
+        self.run_terminal(cx)
+            .is_some_and(|view| view.read(cx).is_busy())
+    }
+
+    pub(super) fn run_terminal_index(&self, cx: &App) -> Option<usize> {
+        let root = self.project.workspace.as_ref()?.root.clone();
+        self.terminals
+            .get(&root)?
+            .views
+            .iter()
+            .position(|view| view.read(cx).is_run())
+    }
+
+    pub(super) fn run_terminal(&self, cx: &App) -> Option<&Entity<TerminalView>> {
+        let index = self.run_terminal_index(cx)?;
+        let root = self.project.workspace.as_ref()?.root.clone();
+        self.terminals.get(&root)?.views.get(index)
+    }
+
+    pub(super) fn run_or_stop(
+        &mut self,
+        line: Option<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.run_is_busy(cx) {
+            self.stop_run(window, cx);
+            return;
+        }
+        self.run_code(line, window, cx);
+    }
+
+    /// Stop the Run tab's command, escalating with each press. Nothing to
+    /// stop leaves the drawer as it was.
+    pub(super) fn stop_run(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(index) = self.run_terminal_index(cx) else {
+            return;
+        };
+        let Some(view) = self.run_terminal(cx).cloned() else {
+            return;
+        };
+        if !view.read(cx).is_busy() {
+            return;
+        }
+        self.terminal_open = true;
+        if let Some(tabs) = self
+            .project
+            .workspace
+            .as_ref()
+            .map(|w| w.root.clone())
+            .and_then(|root| self.terminals.get_mut(&root))
+        {
+            tabs.active = index;
+        }
+        let step = view.update(cx, |view, cx| {
+            view.focus_handle().focus(window, cx);
+            view.stop()
+        });
+        match step {
+            StopStep::Interrupt => {}
+            StopStep::Terminate => self.warn("Still running — sent SIGTERM", cx),
+            StopStep::Kill => self.warn("Still running — sent SIGKILL", cx),
+        }
+        cx.notify();
+    }
+
+    pub(super) fn focus_run_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.terminal_open = true;
+        if let Some(index) = self.run_terminal_index(cx)
+            && let Some(tabs) = self
+                .project
+                .workspace
+                .as_ref()
+                .map(|w| w.root.clone())
+                .and_then(|root| self.terminals.get_mut(&root))
+        {
+            tabs.active = index;
+        }
+        if let Some(view) = self.run_terminal(cx).cloned() {
+            view.update(cx, |view, cx| view.focus_handle().focus(window, cx));
+        }
+        cx.notify();
+    }
+
+    pub(super) fn run_code(
+        &mut self,
+        line: Option<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let line = line.or_else(|| self.caret_line(cx));
+        let Some(path) = self.project.active().cloned() else {
+            self.warn("Open a file to run", cx);
+            return;
+        };
+        if self
+            .project
+            .documents
+            .get(&path)
+            .is_some_and(|doc| doc.dirty)
+        {
+            self.run_after_save = Some(line);
+            self.save_documents(None, window, cx);
+            return;
+        }
+        self.start_run(line, window, cx);
+    }
+
+    pub(super) fn rerun(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.run_is_busy(cx) {
+            self.focus_run_terminal(window, cx);
+            self.warn("Already running — stop it first", cx);
+            return;
+        }
+        let last = self
+            .project
+            .workspace
+            .as_ref()
+            .and_then(|workspace| self.terminals.get(&workspace.root))
+            .and_then(|tabs| tabs.last_run.clone());
+        if let Some(command) = last {
+            self.start_run_command(command, window, cx);
+        } else {
+            self.run_code(None, window, cx);
+        }
+    }
+
+    pub(super) fn start_run(
+        &mut self,
+        line: Option<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(root) = self.project.workspace.as_ref().map(|w| w.root.clone()) else {
+            return;
+        };
+        let Some(path) = self.project.active().cloned() else {
+            self.warn("Open a file to run", cx);
+            return;
+        };
+        let Some(doc) = self.project.documents.get(&path) else {
+            return;
+        };
+        let text = doc.editor.read(cx).snapshot().to_string();
+        let Some(command) = run::resolve(&root, &path, &text, line) else {
+            self.warn("Nothing to run in this file", cx);
+            return;
+        };
+        self.start_run_command(command, window, cx);
+    }
+
+    /// Start `command` in the project's Run tab, making one if there is
+    /// none. A tab whose command is still running is left alone.
+    pub(super) fn start_run_command(
+        &mut self,
+        command: run::Command,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(root) = self.project.workspace.as_ref().map(|w| w.root.clone()) else {
+            return;
+        };
+        self.terminal_open = true;
+        if self.run_is_busy(cx) {
+            self.focus_run_terminal(window, cx);
+            self.warn("Already running — stop it first", cx);
+            return;
+        }
+        if let Some(index) = self.run_terminal_index(cx) {
+            let Some(view) = self.run_terminal(cx).cloned() else {
+                return;
+            };
+            view.update(cx, |view, cx| {
+                view.respawn_command(&command.cwd, &command.shell, cx);
+                view.focus_handle().focus(window, cx);
+            });
+            if let Some(tabs) = self.terminals.get_mut(&root) {
+                tabs.last_run = Some(command);
+                tabs.active = index;
+            }
+            cx.notify();
+            return;
+        }
+        let view = cx.new(|cx| TerminalView::new_run(&command.cwd, &command.shell, 80, 24, cx));
+        let watch = Self::watch_terminal(&view, cx);
+        view.update(cx, |view, cx| view.focus_handle().focus(window, cx));
+        let tabs = self.terminals.entry(root).or_insert(TerminalTabs {
+            views: vec![],
+            active: 0,
+            last_run: None,
+            _watches: vec![],
+        });
+        tabs.last_run = Some(command);
+        tabs.views.push(view);
+        tabs._watches.push(watch);
+        tabs.active = tabs.views.len() - 1;
+        cx.notify();
     }
 
     pub(super) fn refresh_all_brackets(&mut self, cx: &mut Context<Self>) {

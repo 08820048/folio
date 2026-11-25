@@ -19,13 +19,13 @@ use crate::assets::FolioIcon;
 use crate::file_icons;
 use crate::preview::{self, Content};
 use crate::syntax;
-use crate::terminal_view::TerminalView;
+use crate::terminal_view::{StopStep, TerminalBusy, TerminalView};
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use folio::windows_update;
 use folio::{
     blame, brackets, buffer, diff, editorconfig, fs_op, git,
     recent::{self, RecentProject},
-    search, session,
+    run, search, session,
     settings::{self, Settings},
     tree::{self, Entry, EntryKind},
     watch,
@@ -36,8 +36,8 @@ use gpui_component::{
     ActiveTheme, Disableable, Icon, IconName, Root, Sizable, Theme, TitleBar,
     button::{Button, ButtonVariants},
     input::{
-        self, EditorState, Input, InputBaseState, InputEvent, InputState, Position, Rope, TabSize,
-        TextDecoration, TextDecorationCollection,
+        self, EditorState, Input, InputBaseState, InputEvent, InputState, Position, Rope, RopeExt,
+        TabSize, TextDecoration, TextDecorationCollection,
     },
     select::{SearchableVec, Select, SelectEvent, SelectState},
     text::{TextView, TextViewStyle},
@@ -48,6 +48,7 @@ use std::{
     io,
     ops::Range,
     path::{Path, PathBuf},
+    rc::Rc,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -189,6 +190,15 @@ const TREE_ICON_SIZE: f32 = 14.;
 const PROJECT_HEADER_HEIGHT: f32 = 42.;
 /// Vertical padding on the file list (`.p_1()` is 4px each side).
 const TREE_LIST_PAD: f32 = 8.;
+
+fn run_stop_color(cx: &App) -> Hsla {
+    rgb(if cx.theme().is_dark() {
+        0xC98982
+    } else {
+        0xA35B52
+    })
+    .into()
+}
 
 /// The frame the rounded workspace sits on, so the white card reads as a
 /// surface rather than disappearing into the window.
@@ -523,6 +533,9 @@ actions!(
         ZoomIn,
         ZoomOut,
         ZoomReset,
+        Run,
+        Rerun,
+        StopRun,
         ToggleComment,
         ToggleBlockComment,
         DuplicateLines,
@@ -579,6 +592,12 @@ struct Document {
     large: bool,
     /// Markdown opens rendered. Source is the same editor.
     preview: bool,
+    /// The title-bar Play is shown when this file has a command. Deciding
+    /// that looks at the filesystem (`Cargo.toml`, `go.mod`), so it is
+    /// answered once per document, not per keystroke; `None` is "not yet".
+    can_run: Option<bool>,
+    /// A gutter Play rescan waiting for typing to pause; dropping it cancels.
+    runnables_pending: Option<Task<()>>,
     brackets: BracketPaint,
     _subscription: Subscription,
 }
@@ -632,6 +651,8 @@ struct BracketPaint {
 /// during the pause wait for their colour.
 const BRACKETS_DEBOUNCE_ABOVE: usize = 256 * 1024;
 const BRACKETS_DEBOUNCE: Duration = Duration::from_millis(150);
+/// See [`Folio::refresh_runnables_after_edit`].
+const RUNNABLES_DEBOUNCE: Duration = Duration::from_millis(300);
 #[derive(Clone)]
 struct Row {
     entry: Entry,
@@ -1369,6 +1390,12 @@ enum DiskNotice {
 struct TerminalTabs {
     views: Vec<Entity<TerminalView>>,
     active: usize,
+    /// What `⇧⌘R` repeats. Kept whole, working directory included, so a
+    /// rerun does not depend on the file still being open.
+    last_run: Option<run::Command>,
+    /// Play in the title bar lives on Folio, so a busy flip has to notify
+    /// this window, not only the terminal view. One per view, in step.
+    _watches: Vec<Subscription>,
 }
 
 /// A release newer than the running build. On Windows it carries the feed
@@ -1498,6 +1525,7 @@ pub struct Folio {
     terminal_right: bool,
     terminal_width: f32,
     resizing_terminal: bool,
+    run_after_save: Option<Option<usize>>,
     generation: u64,
     open_request: u64,
     query: Entity<InputState>,
@@ -1861,6 +1889,7 @@ impl Folio {
             terminal_right: false,
             terminal_width: 420.,
             resizing_terminal: false,
+            run_after_save: None,
             generation: 0,
             open_request: 0,
             query,
@@ -3183,11 +3212,14 @@ impl Folio {
                                 revision: 0,
                                 large,
                                 preview,
+                                can_run: None,
+                                runnables_pending: None,
                                 brackets,
                                 _subscription: subscription,
                             },
                         );
                         this.refresh_brackets(&editor, cx);
+                        this.refresh_runnables(&editor, cx);
                         this.apply_goto(&path, window, cx);
                         this.focus_open_file(&path, &editor, window, cx);
                         this.project.show_path(path.clone());
@@ -3292,6 +3324,7 @@ impl Folio {
             document.revision = document.revision.wrapping_add(1);
         }
         self.refresh_brackets(&editor, cx);
+        self.refresh_runnables(&editor, cx);
         self.recovered += 1;
         true
     }
@@ -3402,13 +3435,16 @@ impl Folio {
                 }
                 this.update_title(window);
                 if errors.is_empty() {
-                    if let Some(next) = next {
+                    if let Some(line) = this.run_after_save.take() {
+                        this.start_run(line, window, cx);
+                    } else if let Some(next) = next {
                         this.request(next, window, cx);
                     } else {
                         this.toast("Saved", cx);
                         this.refresh_git(cx);
                     }
                 } else {
+                    this.run_after_save = None;
                     this.error(errors.join("\n"), cx);
                 }
                 cx.notify();

@@ -23,6 +23,8 @@ pub(super) struct LastLayout {
     pub(super) wrap_width: Option<Pixels>,
     pub(super) wrapping_indent: WrappingIndent,
     pub(super) line_number_width: Pixels,
+    /// Extra gutter on the left of the line numbers for run icons.
+    pub(super) runnable_gutter: Pixels,
     pub(super) cursor_bounds: Option<Bounds<Pixels>>,
     pub(super) text_align: TextAlign,
     pub(super) content_width: Pixels,

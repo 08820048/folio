@@ -7,16 +7,14 @@ Notable changes to Folio. The detailed, dated implementation log is
 
 ### Removed
 
-- Run (`⌘R` / `⇧⌘R`, the gutter and title-bar Play, the Run tab). It was a
-  task runner, which the product brief rules out; the `⌘J` terminal is the way
-  to run a command. Typing no longer rescans the whole buffer for runnable
-  lines on every keystroke.
 - OCaml, Objective-C, Haskell and Git commit message highlighting. Those four
   grammars were a fifth of the binary, and binary size is first-launch time on
   macOS; the files now open as plain text.
 
 ### Changed
 
+- Typing rescans the gutter Play once the keys pause (300 ms) instead of
+  copying and regex-scanning the whole buffer on every keystroke.
 - Release builds link precompiled Metal shaders instead of compiling them from
   source when the first window opens (318–642 ms whenever the Metal cache
   misses). `cargo run` still compiles them at runtime, so building from source

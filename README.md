@@ -79,6 +79,8 @@ next launch, with each project's tabs in order and the file that was on screen
 | Toggle activity bar | title-bar button | title-bar button |
 | Toggle sidebar | ⌘B | Ctrl+B |
 | Toggle terminal | ⌘J | Ctrl+J |
+| Run | ⌘R | Ctrl+R |
+| Run again | ⇧⌘R | Ctrl+Shift+R |
 | Toggle comment | ⌘/ | Ctrl+/ |
 | Fold | ⌥⌘[ | Ctrl+Alt+[ |
 | Unfold | ⌥⌘] | Ctrl+Alt+] |
@@ -109,6 +111,18 @@ type-ahead: letters jump to the next matching name, shown in the project
 header, and Escape clears it. `⌘J` opens a terminal
 drawer under the workspace, one set of tabs per project. Hiding it keeps the
 children running; closing the last tab, or the project, takes them with it.
+`⌘R` runs the current file, or the test / `main` whose body the caret is in,
+in a dedicated Run tab — Rust, Python, Go, JavaScript, Ruby and shell. A Play
+control on those lines and in the title bar does the same. Dirty buffers save
+first. The command is the tab's child, started in the crate or project
+directory by a login shell (so PATH is the one your terminal has); when it
+exits the tab is done and no prompt follows. While it is still running, Play
+(and `⌘R`, and File ▸ Stop) become Stop: the first press is Ctrl-C, the next
+SIGTERM, then SIGKILL, for programs that swallow the interrupt. `⇧⌘R`
+repeats the last command once that tab is idle. `⌘J` is still the
+interactive project shell, a separate tab. On Windows the commands are
+best-effort: they go through `cmd.exe` and expect `python`, `cargo`, `go`,
+`node` on PATH.
 While the terminal holds the keyboard, `⌘C` / `⌘V` copy and paste its
 selection and `⌘W` closes the tab — elsewhere those keys stay the editor's.
 `⌘F` searches the scrollback case-insensitively; `↑` / `↓` or `Enter` walk the
@@ -702,7 +716,7 @@ it was read. The changes view can be unified or split; its counts count rows,
 so a changed line reads as one gone and one arrived. Mac updates go through Sparkle. The packaged app asks
 `https://pub-307aebc4dfa4468d80e05e193c8f9c5b.r2.dev/appcast.xml` quietly after
 launch and once a day; a newer build shows a green **Update available** badge in
-the title bar, and clicking it opens Sparkle's window,
+the title bar, left of the run control, and clicking it opens Sparkle's window,
 which installs a signed zip from the same R2 bucket. `cargo run` has no
 framework and says so.
 There is no GitHub Release. Window geometry is written when a window closes and again

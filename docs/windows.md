@@ -17,6 +17,7 @@ download stays **Coming soon** until that installer is signed.
 - Reveal uses `explorer /select,`; trash uses the Recycle Bin via PowerShell;
   Open with Default App uses `cmd /C start`.
 - The project terminal talks to ConPTY through `alacritty_terminal`.
+- Run commands go through `cmd.exe /S /C` and quote the Windows way.
 - A release `Folio.exe` is a GUI process (`windows_subsystem`), so launching
   it does not open a console.
 
@@ -93,6 +94,6 @@ published an artifact). Do not overwrite
 - Authenticode signing of the installer
 - Title bar / window-chrome pass on Windows 11 DPI
 - IME candidate window position
-- End-to-end of trash, Explorer, and the terminal
+- End-to-end of trash, Explorer, the terminal, and Run
 
 Until those land, the site keeps the Windows button disabled.
