@@ -93,48 +93,73 @@ impl Folio {
     }
 
     /// One segment of the side panel's switch: glass icon and label. The
-    /// selected one sits on a paper chip; the rest are greyed glass.
+    /// selected one is a raised paper chip (white, hairline, soft drop),
+    /// the rest sit flat on the track. Segments size to their content, so
+    /// nothing spills out of a chip; `label` is off for the unselected ones
+    /// when the panel is too narrow for three words, and the name moves to
+    /// a tooltip.
     fn panel_segment(
         id: &'static str,
         icon: GlassIcon,
-        label: &'static str,
+        name: &'static str,
         active: bool,
+        label: bool,
         activate: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
         cx: &Context<Self>,
     ) -> AnyElement {
         let activate = std::rc::Rc::new(activate);
         let keyboard = activate.clone();
+        let dark = cx.theme().is_dark();
         div()
             .id(id)
             .role(Role::Tab)
-            .aria_label(label)
+            .aria_label(name)
             .aria_selected(active)
             .focusable()
             .tab_index(0)
-            .flex_1()
-            .min_w_0()
+            .flex_auto()
             .h(px(28.))
+            .px(px(8.))
             .flex()
             .items_center()
             .justify_center()
-            .gap(px(6.))
+            .gap(px(5.))
             .rounded(px(7.))
+            .border_1()
+            .border_color(gpui::transparent_black())
             .cursor_pointer()
             .text_size(ui(12.))
+            .whitespace_nowrap()
             .text_color(if active {
                 cx.theme().foreground
             } else {
                 cx.theme().muted_foreground
             })
             .when(active, |el| {
-                el.bg(cx.theme().background)
+                el.bg(rgb(if dark { 0x2C2E32 } else { 0xFFFFFF }))
+                    .border_color(if dark {
+                        gpui::white().opacity(0.08)
+                    } else {
+                        gpui::black().opacity(0.07)
+                    })
+                    .shadow(vec![BoxShadow {
+                        color: gpui::black().opacity(if dark { 0.35 } else { 0.08 }),
+                        offset: point(px(0.), px(1.)),
+                        blur_radius: px(2.),
+                        spread_radius: px(0.),
+                        inset: false,
+                    }])
                     .font_weight(FontWeight::MEDIUM)
-                    .shadow_xs()
             })
             .when(!active, |el| {
                 el.hover(|el| el.text_color(cx.theme().foreground))
             })
-            .focus_visible(|el| el.text_color(cx.theme().accent_foreground))
+            .when(!label, |el| {
+                el.tooltip(move |window, cx| {
+                    gpui_component::tooltip::Tooltip::new(name).build(window, cx)
+                })
+            })
+            .focus_visible(|el| el.border_color(cx.theme().ring))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(move |this, _, window, cx| activate(this, window, cx)))
             .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
@@ -144,10 +169,10 @@ impl Folio {
                 }
             }))
             .child(
-                Self::glass(icon, 16., glass_tone(active, cx))
+                Self::glass(icon, 15., glass_tone(active, cx))
                     .when(!active, |el| el.grayscale(true).opacity(0.7)),
             )
-            .child(label)
+            .when(label, |el| el.child(name))
             .into_any_element()
     }
 
@@ -159,6 +184,9 @@ impl Folio {
         let tree = self.sidebar_kind == SidebarKind::Tree && !searching;
         let changes = self.sidebar_kind == SidebarKind::Changes && !searching;
         let dark = cx.theme().is_dark();
+        // Three icon-and-word segments need about 270pt; narrower, only the
+        // selected one keeps its word.
+        let words = self.sidebar_width >= 270.;
         div()
             .id("side-panel")
             .w(px(self.sidebar_width))
@@ -174,7 +202,7 @@ impl Folio {
                     .p(px(3.))
                     .flex()
                     .gap(px(2.))
-                    .rounded(px(9.))
+                    .rounded(px(10.))
                     .bg(if dark {
                         gpui::white().opacity(0.05)
                     } else {
@@ -185,6 +213,7 @@ impl Folio {
                         GlassIcon::Files,
                         "Files",
                         tree,
+                        words || tree,
                         |this, window, cx| this.show_side(SidebarKind::Tree, window, cx),
                         cx,
                     ))
@@ -193,6 +222,7 @@ impl Folio {
                         GlassIcon::Changes,
                         "Changes",
                         changes,
+                        words || changes,
                         |this, window, cx| this.show_side(SidebarKind::Changes, window, cx),
                         cx,
                     ))
@@ -201,6 +231,7 @@ impl Folio {
                         GlassIcon::Search,
                         "Search",
                         searching,
+                        words || searching,
                         |this, window, cx| this.show_search(false, window, cx),
                         cx,
                     )),
