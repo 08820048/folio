@@ -92,10 +92,14 @@ impl Slide {
                 match from.filter(|from| *from != (x, width)) {
                     None => placed.into_any_element(),
                     Some((from_x, from_width)) => placed
+                        // GPUI asserts that an easing stays within 0..=1, and
+                        // the spring overshoots on purpose. So GPUI gets plain
+                        // time and the spring is applied here, in the animator.
                         .with_animation(
                             ElementId::NamedInteger(id.into(), generation as u64),
-                            Animation::new(SPRING_DURATION).with_easing(spring),
-                            move |el, delta| {
+                            Animation::new(SPRING_DURATION),
+                            move |el, progress| {
+                                let delta = spring(progress);
                                 el.left(px(from_x + (x - from_x) * delta))
                                     .w(px(from_width + (width - from_width) * delta))
                             },
@@ -170,7 +174,60 @@ pub(super) fn track(radius: f32, cx: &App) -> Div {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    // Not `super::*`: that brings in `gpui::test`, and `#[gpui::test]`'s own
+    // `#[test]` would then expand to itself.
+    use super::{Slide, spring};
+    use gpui::{Context, IntoElement, Render, Styled, Window, div, px};
+    use std::time::Duration;
+
+    struct Switch {
+        slide: Slide,
+        selected: usize,
+    }
+
+    impl Render for Switch {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            self.slide.render(
+                "test-switch",
+                self.selected,
+                px(2.),
+                false,
+                vec![
+                    div().w(px(60.)).h(px(20.)).into_any_element(),
+                    div().w(px(90.)).h(px(20.)).into_any_element(),
+                ],
+                div(),
+            )
+        }
+    }
+
+    /// The chip's spring overshoots, and GPUI debug-asserts that an easing
+    /// stays within 0..=1 — handing it the spring as the easing aborted the
+    /// app the moment a switch was clicked (2026-11-25). Draw a switch
+    /// through the overshoot to keep it that way.
+    #[gpui::test]
+    fn the_slide_draws_through_its_overshoot(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, _| Switch {
+            slide: Slide::default(),
+            selected: 0,
+        });
+        cx.run_until_parked();
+        view.update(cx, |switch, cx| {
+            switch.selected = 1;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        // Wall time: GPUI animations run on `Instant`, not the test clock.
+        for _ in 0..6 {
+            std::thread::sleep(Duration::from_millis(60));
+            view.update(cx, |_, cx| cx.notify());
+            cx.run_until_parked();
+        }
+        assert_eq!(
+            view.read_with(cx, |switch, _| switch.slide.0.borrow().generation),
+            2
+        );
+    }
 
     /// A new selection sets the chip off from where the old one was laid
     /// out, and restarts the animation; re-rendering the same selection does

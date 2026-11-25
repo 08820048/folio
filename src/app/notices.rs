@@ -120,7 +120,7 @@ impl Folio {
         let slide = NOTICE_WIDTH + NOTICE_INSET;
         div()
             .absolute()
-            .top(px(34. + NOTICE_INSET))
+            .top(px(TITLE_BAR_HEIGHT + NOTICE_INSET))
             .right(px(NOTICE_INSET))
             .w(px(NOTICE_WIDTH))
             .child(card)
