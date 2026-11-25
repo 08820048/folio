@@ -15,7 +15,7 @@ use settings_view::{AboutView, SettingsView};
 #[cfg(test)]
 use settings_view::{GROUPS, Page};
 
-use crate::assets::FolioIcon;
+use crate::assets::{FolioIcon, GlassIcon};
 use crate::file_icons;
 use crate::preview::{self, Content};
 use crate::syntax;
@@ -112,7 +112,7 @@ const CJK_FALLBACKS: &[&str] = &[
 
 /// How tall the tab strip is. Thin on purpose: it takes its row from the code
 /// area, so every pixel it keeps is a pixel the code does not get.
-const TAB_HEIGHT: f32 = 26.;
+const TAB_HEIGHT: f32 = 30.;
 
 /// How wide a text field in the settings is. Wide enough for a font name or a
 /// short list of ignored folders, and the same everywhere so the fields line
@@ -156,13 +156,14 @@ fn font_options(mut installed: Vec<String>, current: Option<&str>, code: bool) -
     options
 }
 
-/// The far-left icon rail. Narrow on purpose: icons only, no labels.
-/// The rail plus the gap before the card must stay at or under 40px.
-const ACTIVITY_BAR_WIDTH: f32 = 36.;
+/// The far-left icon rail: icons only, no labels. 48pt fits a 24pt glass
+/// icon with room around it (Black Glass design, 2026-11-25); the rail plus
+/// the gap before the card stays at or under 52pt.
+const ACTIVITY_BAR_WIDTH: f32 = 48.;
 /// Space between the rail and the rounded card. `ACTIVITY_BAR_WIDTH` +
 /// this is the whole left chrome strip.
 const WORKSPACE_RAIL_GAP: f32 = 4.;
-const _: () = assert!((ACTIVITY_BAR_WIDTH + WORKSPACE_RAIL_GAP) as i32 <= 40);
+const _: () = assert!((ACTIVITY_BAR_WIDTH + WORKSPACE_RAIL_GAP) as i32 <= 52);
 /// Space between the window chrome and the rounded workspace card.
 const WORKSPACE_INSET: f32 = 8.;
 /// Corner radius of the workspace card. Children that paint their own
@@ -206,7 +207,7 @@ fn workspace_chrome(cx: &App) -> Hsla {
     rgb(if cx.theme().is_dark() {
         0x141516
     } else {
-        0xFDFDFD
+        0xE9E9E7
     })
     .into()
 }
@@ -217,7 +218,7 @@ fn sidebar_rule(cx: &App) -> Hsla {
     rgb(if cx.theme().is_dark() {
         0x222426
     } else {
-        0xF0F0F0
+        0xE2E2DF
     })
     .into()
 }
@@ -459,16 +460,25 @@ fn sync_appearance(
     if let Some(family) = settings.font_family.clone() {
         theme.font_family = family.into();
     }
-    theme.background = rgb(if dark { 0x181A1C } else { 0xFFFFFF }).into();
-    theme.foreground = rgb(if dark { 0xDCDDD8 } else { 0x282D2B }).into();
-    theme.sidebar = rgb(if dark { 0x1D1F21 } else { 0xFFFFFF }).into();
-    theme.popover = theme.sidebar;
-    theme.muted_foreground = rgb(if dark { 0x929792 } else { 0x626A64 }).into();
-    theme.border = rgb(if dark { 0x2B2E30 } else { 0xE8E8E8 }).into();
-    theme.accent_foreground = rgb(if dark { 0xBECBAD } else { 0x4C6341 }).into();
-    theme.list_active = rgb(if dark { 0x2B3031 } else { 0xEFEFEF }).into();
-    theme.list_active_border = rgb(if dark { 0x3A4042 } else { 0xE0E0E0 }).into();
-    theme.list_hover = rgb(if dark { 0x25292B } else { 0xF5F5F5 }).into();
+    // Light is the Black Glass design (2026-11-25): a monochrome light table
+    // (ground, paper, graphite ink) so the glass icons are the only material
+    // in the window, and one steel-blue accent for caret, selection, focus
+    // and links. Dark keeps the earlier palette until it gets its own pass.
+    theme.background = rgb(if dark { 0x181A1C } else { 0xF8F8F6 }).into();
+    theme.foreground = rgb(if dark { 0xDCDDD8 } else { 0x1D1D1F }).into();
+    theme.sidebar = rgb(if dark { 0x1D1F21 } else { 0xEFEFED }).into();
+    theme.popover = rgb(if dark { 0x1D1F21 } else { 0xF8F8F6 }).into();
+    theme.muted_foreground = rgb(if dark { 0x929792 } else { 0x6B6B70 }).into();
+    theme.border = rgb(if dark { 0x2B2E30 } else { 0xD7D7D3 }).into();
+    theme.accent_foreground = rgb(if dark { 0xBECBAD } else { 0x3A6690 }).into();
+    theme.list_active = rgb(if dark { 0x2B3031 } else { 0xD9DDE2 }).into();
+    theme.list_active_border = rgb(if dark { 0x3A4042 } else { 0xD9DDE2 }).into();
+    theme.list_hover = rgb(if dark { 0x25292B } else { 0xE4E4E1 }).into();
+    if !dark {
+        theme.caret = rgb(0x3A6690).into();
+        theme.selection = rgb(0xD3DEE9).into();
+        theme.ring = rgb(0x3A6690).into();
+    }
     theme.title_bar = theme.background;
     theme.title_bar_border = theme.border;
     let background = theme.background;
@@ -478,11 +488,79 @@ fn sync_appearance(
     highlight.style.editor_background = Some(background);
     highlight.style.editor_foreground = Some(foreground);
     highlight.style.editor_gutter_background = Some(background);
-    highlight.style.editor_active_line = Some(rgb(if dark { 0x212628 } else { 0xF5F5F5 }).into());
+    highlight.style.editor_active_line = Some(rgb(if dark { 0x212628 } else { 0xF0F1F1 }).into());
     highlight.style.editor_line_number = Some(muted);
+    if !dark {
+        highlight.style.syntax = glass_syntax(&highlight.style.syntax);
+    }
     if let Some(window) = window {
         window.refresh();
     }
+}
+
+/// The light syntax palette from the Black Glass design: five quiet hues
+/// (keyword steel, string green, type plum, function umber, comment grey)
+/// and everything else in ink or muted ink, so code reads as text first.
+/// `ThemeStyle`'s fields are private, so the palette goes in through the
+/// same serde shape a theme file would use.
+fn glass_syntax(
+    base: &gpui_component::highlighter::SyntaxColors,
+) -> gpui_component::highlighter::SyntaxColors {
+    const KEYWORD: &str = "#3A6690";
+    const STRING: &str = "#4F7A55";
+    const TYPE: &str = "#7A4F86";
+    const FUNCTION: &str = "#8A5A24";
+    const COMMENT: &str = "#9A9A9E";
+    const INK: &str = "#1D1D1F";
+    const MUTED: &str = "#6B6B70";
+    let palette: &[(&str, &str, bool)] = &[
+        ("keyword", KEYWORD, false),
+        ("label", KEYWORD, false),
+        ("tag", KEYWORD, false),
+        ("string", STRING, false),
+        ("string.escape", STRING, false),
+        ("string.regex", STRING, false),
+        ("string.special", STRING, false),
+        ("string.special.symbol", STRING, false),
+        ("text.literal", STRING, false),
+        ("type", TYPE, false),
+        ("constructor", TYPE, false),
+        ("enum", TYPE, false),
+        ("variant", TYPE, false),
+        ("constant", TYPE, false),
+        ("number", TYPE, false),
+        ("boolean", TYPE, false),
+        ("function", FUNCTION, false),
+        ("comment", COMMENT, true),
+        ("comment.doc", COMMENT, true),
+        ("comment_doc", COMMENT, true),
+        ("attribute", MUTED, false),
+        ("preproc", MUTED, false),
+        ("operator", MUTED, false),
+        ("punctuation", MUTED, false),
+        ("punctuation.bracket", MUTED, false),
+        ("punctuation.delimiter", MUTED, false),
+        ("punctuation.special", MUTED, false),
+        ("embedded", INK, false),
+        ("property", INK, false),
+        ("variable", INK, false),
+        ("variable.special", KEYWORD, false),
+        ("variable_special", KEYWORD, false),
+    ];
+    let Ok(serde_json::Value::Object(mut map)) = serde_json::to_value(base) else {
+        return base.clone();
+    };
+    for (key, color, italic) in palette {
+        if !map.contains_key(*key) {
+            continue;
+        }
+        let mut style = serde_json::json!({ "color": color });
+        if *italic {
+            style["font_style"] = "italic".into();
+        }
+        map.insert((*key).to_string(), style);
+    }
+    serde_json::from_value(serde_json::Value::Object(map)).unwrap_or_else(|_| base.clone())
 }
 
 actions!(
@@ -596,6 +674,9 @@ struct Document {
     /// that looks at the filesystem (`Cargo.toml`, `go.mod`), so it is
     /// answered once per document, not per keystroke; `None` is "not yet".
     can_run: Option<bool>,
+    /// What Run does for the whole file (`cargo run`), shown in the title
+    /// bar. `None` until the first scan, or when nothing resolves.
+    run_command: Option<SharedString>,
     /// A gutter Play rescan waiting for typing to pause; dropping it cancels.
     runnables_pending: Option<Task<()>>,
     brackets: BracketPaint,
@@ -3213,6 +3294,7 @@ impl Folio {
                                 large,
                                 preview,
                                 can_run: None,
+                                run_command: None,
                                 runnables_pending: None,
                                 brackets,
                                 _subscription: subscription,
@@ -3868,6 +3950,19 @@ fn home_dir() -> PathBuf {
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("."))
     }
+}
+
+/// `path` with the home directory written as `~`, for display.
+fn tilde(path: &Path) -> String {
+    #[cfg(not(windows))]
+    if let Ok(rest) = path.strip_prefix(home_dir()) {
+        return if rest.as_os_str().is_empty() {
+            "~".to_string()
+        } else {
+            format!("~/{}", rest.to_string_lossy())
+        };
+    }
+    path.to_string_lossy().into_owned()
 }
 
 pub fn config_dir() -> PathBuf {

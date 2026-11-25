@@ -66,11 +66,7 @@ impl Folio {
             .active()
             .and_then(|p| self.project.documents.get(p));
         TitleBar::new()
-            .bg(if self.project.workspace.is_some() {
-                workspace_chrome(cx)
-            } else {
-                cx.theme().background
-            })
+            .bg(workspace_chrome(cx))
             // The workspace card already draws its own top edge. A second
             // line here would sit on top of that one.
             .border_color(gpui::transparent_black())
@@ -86,19 +82,20 @@ impl Folio {
                     .gap_3()
                     .pr_3()
                     .when(self.project.workspace.is_some(), |el| {
-                        el.child(Self::icon_button(
+                        el.child(Self::glass_button(
                             "activity-bar-toggle",
-                            if self.activity_bar {
-                                FolioIcon::PanelLeftDashed
-                            } else {
-                                FolioIcon::PanelRightDashed
-                            },
+                            GlassIcon::Layout,
                             "Toggle activity bar",
                             |this, _, cx| this.toggle_activity_bar(cx),
                             cx,
                         ))
                     })
-                    .child(div().text_size(ui(12.)).child(project))
+                    .child(
+                        div()
+                            .text_size(ui(12.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(project),
+                    )
                     .when(relative.is_some(), |el| {
                         el.child(div().text_color(cx.theme().muted_foreground).child("/"))
                     })
@@ -129,24 +126,86 @@ impl Folio {
                         el.child(self.render_update_badge(update, cx))
                     })
                     .when(self.run_is_busy(cx), |el| {
-                        el.child(Self::icon_button(
-                            "stop",
-                            Icon::new(IconName::Pause).text_color(run_stop_color(cx)),
-                            "Stop",
-                            |this, window, cx| this.stop_run(window, cx),
-                            cx,
-                        ))
+                        el.child(self.render_run_button(true, cx))
                     })
                     .when(!self.run_is_busy(cx) && self.can_run_active(cx), |el| {
-                        el.child(Self::icon_button(
-                            "run",
-                            Icon::new(IconName::Play).text_color(cx.theme().success),
-                            "Run",
-                            |this, window, cx| this.run_code(None, window, cx),
-                            cx,
-                        ))
+                        el.child(self.render_run_button(false, cx))
                     }),
             )
+            .into_any_element()
+    }
+
+    /// The title-bar Run: the glass Play, "Run", and the command it starts,
+    /// on a paper chip so it reads as the one primary action up there.
+    /// While a Run is going the same chip is Stop, with a red square.
+    fn render_run_button(&self, busy: bool, cx: &Context<Self>) -> AnyElement {
+        let command = if busy {
+            None
+        } else {
+            self.active_run_command()
+        };
+        let label = if busy { "Stop" } else { "Run" };
+        let red = run_stop_color(cx);
+        div()
+            .id(if busy { "stop" } else { "run" })
+            .role(Role::Button)
+            .aria_label(label)
+            .focusable()
+            .tab_index(0)
+            .h(px(26.))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .pl(px(6.))
+            .pr(px(10.))
+            .rounded(px(6.))
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().background)
+            .cursor_pointer()
+            .hover(|el| el.border_color(cx.theme().muted_foreground.opacity(0.5)))
+            .focus_visible(|el| el.border_color(cx.theme().ring))
+            .tooltip(move |window, cx| {
+                gpui_component::tooltip::Tooltip::new(label)
+                    .key_binding(
+                        gpui::Keystroke::parse("cmd-r")
+                            .ok()
+                            .map(gpui_component::kbd::Kbd::new),
+                    )
+                    .build(window, cx)
+            })
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(|this, _, window, cx| this.run_or_stop(None, window, cx)))
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                    this.run_or_stop(None, window, cx);
+                    cx.stop_propagation();
+                }
+            }))
+            .when(busy, |el| {
+                el.pl(px(9.))
+                    .child(div().size(px(8.)).rounded(px(1.5)).bg(red))
+            })
+            .when(!busy, |el| el.child(Self::glass(GlassIcon::Run, 16.)))
+            .child(
+                div()
+                    .text_size(ui(12.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .when(busy, |el| el.text_color(red))
+                    .child(label),
+            )
+            .when_some(command, |el, command| {
+                el.child(
+                    div()
+                        .max_w(px(220.))
+                        .truncate()
+                        .font_family(cx.theme().mono_font_family.clone())
+                        .text_size(ui(11.))
+                        .text_color(cx.theme().muted_foreground)
+                        .child(command),
+                )
+            })
             .into_any_element()
     }
 

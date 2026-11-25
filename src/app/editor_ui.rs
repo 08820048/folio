@@ -144,6 +144,15 @@ impl Folio {
         editor.update(cx, |state, cx| state.set_bracket_pairs(offsets, cx));
     }
 
+    /// The file-level command the title-bar Run shows next to its name.
+    /// Cached by `refresh_runnables`, which already has the text.
+    pub(super) fn active_run_command(&self) -> Option<SharedString> {
+        self.project
+            .active()
+            .and_then(|path| self.project.documents.get(path))
+            .and_then(|doc| doc.run_command.clone())
+    }
+
     pub(super) fn can_run_active(&self, _: &App) -> bool {
         self.project
             .active()
@@ -234,6 +243,15 @@ impl Folio {
             .collect();
         lines.sort_unstable();
         lines.dedup();
+        let command: Option<SharedString> =
+            run::resolve(&root, &path, &text, None).map(|command| command.shell.into());
+        if let Some(doc) = std::iter::once(&mut self.project)
+            .chain(self.parked.iter_mut())
+            .flat_map(|project| project.documents.values_mut())
+            .find(|doc| &doc.editor == editor)
+        {
+            doc.run_command = command;
+        }
         let folio = cx.entity().downgrade();
         let on_click = Rc::new({
             let folio = folio.clone();
@@ -251,10 +269,7 @@ impl Folio {
                     .text_color(run_stop_color(cx))
                     .into_any_element()
             } else {
-                Icon::new(IconName::Play)
-                    .xsmall()
-                    .text_color(cx.theme().success)
-                    .into_any_element()
+                Self::glass(GlassIcon::Run, 14.).into_any_element()
             }
         });
         editor.update(cx, |state, cx| {

@@ -146,6 +146,9 @@ impl Folio {
             .h(px(TAB_HEIGHT))
             .flex()
             .items_center()
+            // The strip is the ground the active tab is cut out of: the
+            // active tab is paper, the same sheet as the editor under it.
+            .bg(cx.theme().sidebar)
             .child(
                 div()
                     .h_full()
@@ -288,30 +291,34 @@ impl Folio {
         let open = path.clone();
         let close = path.clone();
         let menu_path = path.clone();
+        let group: SharedString = format!("tab-{pane}-{index}").into();
         div()
             .id(format!("tab-{pane}-{index}"))
+            .group(group.clone())
             .role(Role::Button)
             .aria_label(name(path))
             .aria_selected(selected)
             .h_full()
             .min_w_0()
             .max_w(px(200.))
-            .px_2()
+            .pl(px(12.))
+            .pr(px(8.))
             .flex()
             .items_center()
             .gap_2()
             .flex_shrink_0()
-            .border_r_1()
-            .border_color(sidebar_rule(cx))
+            .rounded_t(px(6.))
             .cursor_pointer()
-            .text_size(ui(11.))
+            .text_size(ui(12.))
             .text_color(if selected {
                 cx.theme().foreground
             } else {
                 cx.theme().muted_foreground
             })
-            .when(selected, |el| el.bg(cx.theme().list_active))
-            .hover(|el| el.bg(cx.theme().list_hover))
+            .when(selected, |el| el.bg(cx.theme().background))
+            .when(!selected, |el| {
+                el.hover(|el| el.text_color(cx.theme().foreground))
+            })
             .on_click(
                 cx.listener(move |this, _, window, cx| this.open_file(open.clone(), window, cx)),
             )
@@ -359,34 +366,49 @@ impl Folio {
                 }),
             )
             .child(div().flex_1().min_w_0().truncate().child(name(path)))
-            .when(dirty, |el| {
-                el.child(
-                    Icon::new(IconName::Asterisk)
-                        .xsmall()
-                        .text_color(cx.theme().warning),
-                )
-            })
+            // One 14pt slot on the right: a graphite dot while the file has
+            // unsaved edits, the close × when the tab is active or hovered
+            // (hovering a dirty tab swaps the dot for the ×).
             .child(
                 div()
-                    .id(format!("tab-close-{pane}-{index}"))
-                    .role(Role::Button)
-                    .aria_label("Close")
                     .size(px(14.))
                     .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded_sm()
-                    .cursor_pointer()
-                    .text_color(cx.theme().muted_foreground)
-                    .hover(|el| el.text_color(cx.theme().foreground))
-                    // Without this the tab underneath would take the same
-                    // click and reopen the file being closed.
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.request(Next::CloseTabs(vec![close.clone()]), window, cx)
-                    }))
-                    .child(Icon::new(IconName::Close).xsmall()),
+                    .relative()
+                    .when(dirty, |el| {
+                        el.child(
+                            div()
+                                .absolute()
+                                .size_full()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .group_hover(group.clone(), |style| style.invisible())
+                                .child(div().size(px(6.)).rounded_full().bg(cx.theme().foreground)),
+                        )
+                    })
+                    .child(
+                        div()
+                            .id(format!("tab-close-{pane}-{index}"))
+                            .role(Role::Button)
+                            .aria_label("Close")
+                            .absolute()
+                            .size_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .text_color(cx.theme().muted_foreground)
+                            .when(dirty || !selected, |el| el.invisible())
+                            .group_hover(group, |style| style.visible())
+                            .hover(|el| el.text_color(cx.theme().foreground))
+                            // Without this the tab underneath would take the same
+                            // click and reopen the file being closed.
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.request(Next::CloseTabs(vec![close.clone()]), window, cx)
+                            }))
+                            .child(Icon::new(IconName::Close).xsmall()),
+                    ),
             )
             .into_any_element()
     }

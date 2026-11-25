@@ -42,13 +42,12 @@ impl Folio {
             .into_any_element()
     }
 
-    /// A rail icon: the same hit target as [`Self::icon_button`], painted
-    /// in the accent when the surface it opens is showing.
-    pub(super) fn rail_icon(
-        id: impl Into<ElementId>,
-        icon: impl Into<Icon>,
+    /// [`Self::icon_button`] with a glass icon: full colour, slightly dimmed
+    /// until hovered. No background on any state.
+    pub(super) fn glass_button(
+        id: &'static str,
+        icon: GlassIcon,
         label: &'static str,
-        active: bool,
         activate: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
         cx: &Context<Self>,
     ) -> AnyElement {
@@ -56,6 +55,7 @@ impl Folio {
         let keyboard = activate.clone();
         div()
             .id(id)
+            .group(id)
             .role(Role::Button)
             .aria_label(label)
             .focusable()
@@ -66,13 +66,6 @@ impl Folio {
             .items_center()
             .justify_center()
             .cursor_pointer()
-            .text_color(if active {
-                cx.theme().accent_foreground
-            } else {
-                cx.theme().muted_foreground
-            })
-            .hover(|el| el.text_color(cx.theme().foreground))
-            .focus_visible(|el| el.text_color(cx.theme().accent_foreground))
             .tooltip(move |window, cx| {
                 gpui_component::tooltip::Tooltip::new(label).build(window, cx)
             })
@@ -84,7 +77,77 @@ impl Folio {
                     cx.stop_propagation();
                 }
             }))
-            .child(Icon::new(icon).small())
+            .child(
+                Self::glass(icon, 16.)
+                    .opacity(0.85)
+                    .group_hover(id, |style| style.opacity(1.)),
+            )
+            .into_any_element()
+    }
+
+    /// A Black Glass icon at `size` points, in its own colours.
+    pub(super) fn glass(icon: GlassIcon, size: f32) -> Img {
+        img(icon.path()).size(px(size)).flex_shrink_0()
+    }
+
+    /// A rail entry: a bare glass icon on a 44pt-tall target. The surface it
+    /// opens is showing → full colour plus a 2px graphite bar on the rail's
+    /// left edge; otherwise the icon is greyed and dimmed. No tile behind
+    /// it, on hover either (AGENTS.md).
+    pub(super) fn rail_icon(
+        id: &'static str,
+        icon: GlassIcon,
+        label: &'static str,
+        active: bool,
+        activate: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let activate = std::rc::Rc::new(activate);
+        let keyboard = activate.clone();
+        div()
+            .id(id)
+            .group(id)
+            .role(Role::Button)
+            .aria_label(label)
+            .focusable()
+            .tab_index(0)
+            .relative()
+            .w(px(ACTIVITY_BAR_WIDTH))
+            .h(px(44.))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            // Keyboard focus shows as the bar, since the icon has no tint.
+            .focus_visible(|el| el.opacity(0.85))
+            .tooltip(move |window, cx| {
+                gpui_component::tooltip::Tooltip::new(label).build(window, cx)
+            })
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(move |this, _, window, cx| activate(this, window, cx)))
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                    keyboard(this, window, cx);
+                    cx.stop_propagation();
+                }
+            }))
+            .child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .top(px(11.))
+                    .w(px(2.))
+                    .h(px(22.))
+                    .rounded_r(px(2.))
+                    .bg(cx.theme().foreground)
+                    .when(!active, |el| el.invisible()),
+            )
+            .child(Self::glass(icon, 24.).when(!active, |el| {
+                el.grayscale(true)
+                    .opacity(0.6)
+                    .group_hover(id, |style| style.opacity(0.9))
+            }))
             .into_any_element()
     }
 
@@ -99,12 +162,11 @@ impl Folio {
             .flex()
             .flex_col()
             .items_center()
-            .pt_2()
+            .pt_1()
             .pb_2()
-            .gap_1()
             .child(Self::rail_icon(
                 "rail-files",
-                IconName::Folder,
+                GlassIcon::Files,
                 "File Tree",
                 self.sidebar && self.sidebar_kind == SidebarKind::Tree,
                 |this, _, cx| this.toggle_file_tree(cx),
@@ -112,7 +174,7 @@ impl Folio {
             ))
             .child(Self::rail_icon(
                 "rail-changes",
-                FolioIcon::GitCompare,
+                GlassIcon::Changes,
                 "Changes",
                 self.sidebar && self.sidebar_kind == SidebarKind::Changes,
                 |this, _, cx| this.toggle_changes_list(cx),
@@ -120,7 +182,7 @@ impl Folio {
             ))
             .child(Self::rail_icon(
                 "rail-search",
-                IconName::Search,
+                GlassIcon::Search,
                 "Search",
                 self.panel == Some(Panel::Search),
                 |this, window, cx| this.show_search(false, window, cx),
@@ -128,7 +190,7 @@ impl Folio {
             ))
             .child(Self::rail_icon(
                 "rail-terminal",
-                FolioIcon::SquareTerminal,
+                GlassIcon::Terminal,
                 "Terminal",
                 self.terminal_open,
                 |this, window, cx| this.toggle_terminal(window, cx),
@@ -137,7 +199,7 @@ impl Folio {
             .child(div().flex_1())
             .child(Self::rail_icon(
                 "rail-settings",
-                IconName::Settings,
+                GlassIcon::Settings,
                 "Settings",
                 false,
                 |this, _, cx| this.show_settings(cx),
@@ -146,194 +208,299 @@ impl Folio {
             .into_any_element()
     }
 
-    pub(super) fn render_launcher(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// One start-page action: a large bare glass icon, the title, a one-line
+    /// hint and its shortcut. Hover turns the title steel blue; there is no
+    /// background block (AGENTS.md).
+    fn launcher_action(
+        id: &'static str,
+        icon: GlassIcon,
+        title: &'static str,
+        hint: &'static str,
+        kbd: Option<&'static str>,
+        activate: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let activate = std::rc::Rc::new(activate);
+        let keyboard = activate.clone();
+        let accent = cx.theme().accent_foreground;
         div()
+            .id(id)
+            .group(id)
+            .role(Role::Button)
+            .aria_label(title)
+            .focusable()
+            .tab_index(0)
             .flex()
-            .flex_col()
-            .size_full()
             .items_center()
-            .justify_center()
+            .gap(px(14.))
+            .py(px(10.))
+            .cursor_pointer()
+            .focus_visible(|el| el.text_color(accent))
+            .on_click(cx.listener(move |this, _, window, cx| activate(this, window, cx)))
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                    keyboard(this, window, cx);
+                    cx.stop_propagation();
+                }
+            }))
+            .child(Self::glass(icon, 36.))
             .child(
                 div()
-                    .w(px(470.))
+                    .flex_1()
+                    .min_w_0()
                     .flex()
                     .flex_col()
-                    .gap(px(28.))
+                    .gap(px(2.))
                     .child(
                         div()
-                            .flex()
-                            .items_center()
-                            .gap_4()
-                            .child(
-                                Icon::new(IconName::BookOpen)
-                                    .size(px(40.))
-                                    .text_color(cx.theme().accent_foreground),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_1()
-                                    .child(div().text_size(ui(32.)).child("Folio"))
-                                    .child(
-                                        div()
-                                            .text_size(ui(13.))
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child("Read the code, change a few lines."),
-                                    ),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_2()
-                            .child(
-                                Button::new("open-project")
-                                    .text()
-                                    .icon(IconName::FolderOpen)
-                                    .label(if self.loading {
-                                        "Opening…"
-                                    } else {
-                                        "Open Project…"
-                                    })
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.request(Next::Picker, window, cx)
-                                    })),
-                            )
-                            .child(
-                                Button::new("new-project")
-                                    .text()
-                                    .icon(IconName::Plus)
-                                    .label("New Project…")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.request(Next::NewProject, window, cx)
-                                    })),
-                            )
-                            .child(
-                                Button::new("clone-github")
-                                    .text()
-                                    .icon(FolioIcon::Github)
-                                    .label(if self.cloning {
-                                        "Cloning…"
-                                    } else {
-                                        "Clone from GitHub…"
-                                    })
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.request(Next::CloneFromGithub, window, cx)
-                                    })),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .flex()
-                                    .justify_between()
-                                    .text_size(ui(11.))
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("Recent Projects")
-                                    .child("⌘ O"),
-                            )
-                            .when(self.recent.is_empty(), |el| {
-                                el.child(
-                                    div()
-                                        .py_4()
-                                        .text_size(ui(13.))
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(
-                                            "Open a folder, start a new one, or clone from GitHub.",
-                                        ),
-                                )
-                            })
-                            .children(self.recent.iter().enumerate().map(|(i, item)| {
-                                let path = item.path.clone();
-                                let remove = path.clone();
-                                let keyboard_path = path.clone();
-                                div()
-                                    .id(("recent", i))
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .py_2()
-                                    .border_b_1()
-                                    .border_color(cx.theme().border)
-                                    .child(
-                                        div()
-                                            .id(("recent-open", i))
-                                            .role(Role::Button)
-                                            .aria_label(format!("Open project {}", name(&path)))
-                                            .focusable()
-                                            .tab_index(0)
-                                            .on_key_down(cx.listener(
-                                                move |this, event: &KeyDownEvent, window, cx| {
-                                                    if event.keystroke.key == "enter" {
-                                                        this.request(
-                                                            Next::Open(keyboard_path.clone()),
-                                                            window,
-                                                            cx,
-                                                        );
-                                                        cx.stop_propagation();
-                                                    }
-                                                },
-                                            ))
-                                            .flex_1()
-                                            .min_w_0()
-                                            .flex()
-                                            .flex_col()
-                                            .gap_1()
-                                            .cursor_default()
-                                            .on_click(cx.listener(move |this, _, window, cx| {
-                                                this.request(Next::Open(path.clone()), window, cx)
-                                            }))
-                                            .child(
-                                                div()
-                                                    .flex()
-                                                    .justify_between()
-                                                    .child(format!(
-                                                        "{}{}",
-                                                        name(&item.path),
-                                                        if item.available {
-                                                            ""
-                                                        } else {
-                                                            " · missing"
-                                                        }
-                                                    ))
-                                                    .child(
-                                                        div()
-                                                            .text_size(ui(11.))
-                                                            .text_color(cx.theme().muted_foreground)
-                                                            .child(relative_time(item.last_opened)),
-                                                    ),
-                                            )
-                                            .child(
-                                                div()
-                                                    .text_size(ui(11.))
-                                                    .text_color(cx.theme().muted_foreground)
-                                                    .truncate()
-                                                    .child(
-                                                        item.path.to_string_lossy().into_owned(),
-                                                    ),
-                                            ),
-                                    )
-                                    .child(Self::icon_button(
-                                        ("remove", i),
-                                        IconName::Close,
-                                        "Remove from recent projects",
-                                        move |this, _, cx| this.remove_recent(remove.clone(), cx),
-                                        cx,
-                                    ))
-                            })),
+                            .text_size(ui(13.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .group_hover(id, |style| style.text_color(accent))
+                            .child(title),
                     )
                     .child(
                         div()
                             .text_size(ui(11.))
                             .text_color(cx.theme().muted_foreground)
-                            .child("Or drop a folder here"),
+                            .child(hint),
                     ),
+            )
+            .when_some(kbd, |el, kbd| el.child(Self::kbd_label(kbd, cx)))
+            .into_any_element()
+    }
+
+    /// A shortcut written out as a small keycap.
+    pub(super) fn kbd_label(label: &'static str, cx: &Context<Self>) -> AnyElement {
+        div()
+            .flex_shrink_0()
+            .px(px(6.))
+            .py(px(1.))
+            .rounded(px(4.))
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().background)
+            .text_size(ui(11.))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(cx.theme().muted_foreground)
+            .child(label)
+            .into_any_element()
+    }
+
+    pub(super) fn render_launcher(&self, cx: &mut Context<Self>) -> AnyElement {
+        let mac = cfg!(target_os = "macos");
+        let actions = div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(Self::launcher_action(
+                "open-project",
+                GlassIcon::Open,
+                if self.loading {
+                    "Opening…"
+                } else {
+                    "Open Project…"
+                },
+                "Any folder, Git or not",
+                Some(if mac { "⌘O" } else { "Ctrl+O" }),
+                |this, window, cx| this.request(Next::Picker, window, cx),
+                cx,
+            ))
+            .child(Self::launcher_action(
+                "new-project",
+                GlassIcon::Files,
+                "New Project…",
+                "An empty folder to start in",
+                Some(if mac { "⇧⌘O" } else { "Ctrl+Shift+O" }),
+                |this, window, cx| this.request(Next::NewProject, window, cx),
+                cx,
+            ))
+            .child(Self::launcher_action(
+                "clone-github",
+                GlassIcon::Branch,
+                if self.cloning {
+                    "Cloning…"
+                } else {
+                    "Clone from GitHub…"
+                },
+                "owner/repo or a URL",
+                None,
+                |this, window, cx| this.request(Next::CloneFromGithub, window, cx),
+                cx,
+            ));
+        let intro = div()
+            .w(px(320.))
+            .flex_shrink_0()
+            .pt_2()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .text_size(ui(28.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("Folio"),
+            )
+            .child(
+                div()
+                    .mt(px(10.))
+                    .text_size(ui(13.))
+                    .text_color(cx.theme().muted_foreground)
+                    .line_height(relative(1.5))
+                    .child("Open a repository, read what changed,")
+                    .child("fix a line, run it."),
+            )
+            .child(div().mt(px(36.)).child(actions));
+        let recent = div()
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .pt(px(16.))
+            .px(px(12.))
+            .pb(px(12.))
+            .rounded(px(14.))
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().background)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px(px(12.))
+                    .pb(px(10.))
+                    .child(Self::glass(GlassIcon::Recent, 16.))
+                    .child(
+                        div()
+                            .text_size(ui(12.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(cx.theme().muted_foreground)
+                            .child("Recent"),
+                    ),
+            )
+            .when(self.recent.is_empty(), |el| {
+                el.child(
+                    div()
+                        .px(px(12.))
+                        .py_4()
+                        .text_size(ui(13.))
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Projects you open show up here."),
+                )
+            })
+            .children(self.recent.iter().enumerate().map(|(i, item)| {
+                let path = item.path.clone();
+                let remove = path.clone();
+                let keyboard_path = path.clone();
+                div()
+                    .id(("recent", i))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px(px(12.))
+                    .py(px(8.))
+                    .rounded(px(6.))
+                    .hover(|el| el.bg(cx.theme().list_hover))
+                    .child(
+                        div()
+                            .id(("recent-open", i))
+                            .role(Role::Button)
+                            .aria_label(format!("Open project {}", name(&path)))
+                            .focusable()
+                            .tab_index(0)
+                            .on_key_down(cx.listener(
+                                move |this, event: &KeyDownEvent, window, cx| {
+                                    if event.keystroke.key == "enter" {
+                                        this.request(Next::Open(keyboard_path.clone()), window, cx);
+                                        cx.stop_propagation();
+                                    }
+                                },
+                            ))
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.))
+                            .cursor_default()
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.request(Next::Open(path.clone()), window, cx)
+                            }))
+                            .child(
+                                div()
+                                    .flex()
+                                    .justify_between()
+                                    .gap_3()
+                                    .child(
+                                        div()
+                                            .text_size(ui(13.))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .when(!item.available, |el| {
+                                                el.text_color(cx.theme().muted_foreground)
+                                            })
+                                            .child(format!(
+                                                "{}{}",
+                                                name(&item.path),
+                                                if item.available { "" } else { " · missing" }
+                                            )),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_shrink_0()
+                                            .text_size(ui(11.))
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(relative_time(item.last_opened)),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .font_family(cx.theme().mono_font_family.clone())
+                                    .text_size(ui(11.))
+                                    .text_color(cx.theme().muted_foreground)
+                                    .truncate()
+                                    .child(tilde(&item.path)),
+                            ),
+                    )
+                    .child(Self::icon_button(
+                        ("remove", i),
+                        IconName::Close,
+                        "Remove from recent projects",
+                        move |this, _, cx| this.remove_recent(remove.clone(), cx),
+                        cx,
+                    ))
+            }));
+        div()
+            .relative()
+            .flex()
+            .flex_col()
+            .size_full()
+            .items_center()
+            .justify_center()
+            .pb(px(40.))
+            .bg(workspace_chrome(cx))
+            .child(
+                div()
+                    .w(px(880.))
+                    .max_w_full()
+                    .px_6()
+                    .flex()
+                    .items_start()
+                    .gap(px(56.))
+                    .child(intro)
+                    .child(recent),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .bottom(px(18.))
+                    .left_0()
+                    .right_0()
+                    .flex()
+                    .justify_center()
+                    .text_size(ui(11.))
+                    .text_color(cx.theme().muted_foreground.opacity(0.7))
+                    .child(format!(
+                        "Drop a folder anywhere to open it  ·  v{}",
+                        env!("CARGO_PKG_VERSION")
+                    )),
             )
             .into_any_element()
     }

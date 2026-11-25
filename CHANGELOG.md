@@ -13,6 +13,13 @@ Notable changes to Folio. The detailed, dated implementation log is
 
 ### Changed
 
+- New look (Black Glass). The light theme is a monochrome light table: grey
+  ground, paper editor, graphite ink, one steel-blue accent, and a quieter
+  five-hue syntax palette. The activity bar, title bar, Run, terminal tabs,
+  start page and quick open use full-colour Black Glass icons. The title bar
+  Run shows the command it starts and turns into Stop while it runs; the
+  terminal's Run tab gets a running dot and its own Stop. The start page is
+  two columns, actions on the left and recent projects on the right.
 - Typing rescans the gutter Play once the keys pause (300 ms) instead of
   copying and regex-scanning the whole buffer on every keystroke.
 - Release builds link precompiled Metal shaders instead of compiling them from

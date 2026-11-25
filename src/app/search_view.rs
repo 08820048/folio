@@ -453,16 +453,19 @@ impl Folio {
                 "Project Search"
             })
             .absolute()
-            .top(px(48.))
+            .top(px(56.))
             .left(relative(0.5))
             .ml(px(-width / 2.))
             .w(px(width))
-            .rounded_lg()
+            // The one floating sheet in the window: paper, a hairline and a
+            // soft drop. GPUI cannot blur what is behind an element, and
+            // unblurred code showing through is noise, so it is opaque.
+            .rounded(px(14.))
             .border_1()
             .border_color(cx.theme().border)
-            .bg(cx.theme().sidebar)
-            .shadow_lg()
-            .p_2()
+            .bg(cx.theme().popover)
+            .shadow_xl()
+            .p(px(10.))
             .flex()
             .flex_col()
             .gap_2()
@@ -482,8 +485,20 @@ impl Folio {
             .flex()
             .items_center()
             .gap_1()
-            .child(self.panel_tab("panel-tab-files", "Files", Panel::Files, cx))
-            .child(self.panel_tab("panel-tab-search", "Contents", Panel::Search, cx))
+            .child(self.panel_tab(
+                "panel-tab-files",
+                "Files",
+                GlassIcon::QuickOpen,
+                Panel::Files,
+                cx,
+            ))
+            .child(self.panel_tab(
+                "panel-tab-search",
+                "Contents",
+                GlassIcon::Search,
+                Panel::Search,
+                cx,
+            ))
             .child(div().flex_1())
             .when(panel == Panel::Search, |el| {
                 el.child(self.option_toggle(
@@ -542,6 +557,7 @@ impl Folio {
         &self,
         id: &'static str,
         label: &'static str,
+        icon: GlassIcon,
         panel: Panel,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -552,18 +568,20 @@ impl Folio {
             .aria_label(label)
             .focusable()
             .tab_index(0)
-            .h(px(22.))
+            .h(px(24.))
             .px_2()
             .flex()
             .items_center()
-            .rounded_sm()
+            .gap(px(6.))
             .cursor_pointer()
-            .text_size(ui(11.))
+            .text_size(ui(12.))
             .text_color(if active {
-                cx.theme().accent_foreground
+                cx.theme().foreground
             } else {
                 cx.theme().muted_foreground
             })
+            .when(active, |el| el.font_weight(FontWeight::MEDIUM))
+            .child(Self::glass(icon, 16.).when(!active, |el| el.grayscale(true).opacity(0.6)))
             .hover(|el| el.text_color(cx.theme().foreground))
             .focus_visible(|el| el.text_color(cx.theme().accent_foreground))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -668,17 +686,25 @@ impl Folio {
                                 .map(|i| {
                                     let path = this.matches[i].clone();
                                     let label = this.relative_path(&path);
+                                    let file_name = name(&path);
+                                    let folder = label
+                                        .strip_suffix(file_name.as_str())
+                                        .unwrap_or("")
+                                        .trim_end_matches(['/', '\\'])
+                                        .to_string();
                                     div()
                                         .id(("match", i))
                                         .role(Role::ListItem)
                                         .aria_label(label.clone())
                                         .aria_selected(i == this.match_selected)
+                                        .w_full()
                                         .h(px(30.))
-                                        .px_2()
+                                        .px(px(10.))
                                         .flex()
                                         .items_center()
-                                        .text_size(ui(12.))
-                                        .rounded_sm()
+                                        .gap(px(10.))
+                                        .text_size(ui(13.))
+                                        .rounded(px(6.))
                                         .when(i == this.match_selected, |el| {
                                             el.bg(cx.theme().list_active)
                                         })
@@ -686,7 +712,20 @@ impl Folio {
                                         .on_click(cx.listener(move |this, _, window, cx| {
                                             this.open_file(path.clone(), window, cx)
                                         }))
-                                        .child(div().truncate().child(label))
+                                        .child(
+                                            div()
+                                                .flex_shrink_0()
+                                                .font_weight(FontWeight::MEDIUM)
+                                                .child(file_name),
+                                        )
+                                        .child(
+                                            div()
+                                                .min_w_0()
+                                                .truncate()
+                                                .text_size(ui(11.))
+                                                .text_color(cx.theme().muted_foreground)
+                                                .child(folder),
+                                        )
                                 })
                                 .collect()
                         }),

@@ -173,50 +173,66 @@ impl Folio {
                 }
             })
             .collect();
+        let kinds: Vec<(bool, bool)> = self.terminals[&root]
+            .views
+            .iter()
+            .map(|view| {
+                let view = view.read(cx);
+                (view.is_run(), view.is_busy())
+            })
+            .collect();
+        let run_busy = kinds.iter().any(|&(run, busy)| run && busy);
         // The tab strip reads like the one above the code: a tab per
         // terminal, each with its own close, a button that swaps the dock
         // between drawer and right-hand column, and a `+` for another.
         // Its bottom rule is what makes the dock read as its own panel
         // when the column sits beside the editor's tab strip at the same
         // height.
-        let tab_strip =
-            div()
-                .h(px(26.))
-                .flex()
-                .items_center()
-                .pr_2()
-                .border_b_1()
-                .border_color(cx.theme().border)
-                .children((0..tab_count).map(|index| {
-                    self.render_terminal_tab(index, &labels[index], index == active, cx)
-                }))
-                .child(div().flex_1())
-                .child(Self::icon_button(
-                    "terminal-side",
-                    if self.terminal_right {
-                        IconName::PanelBottom
-                    } else {
-                        IconName::PanelRight
-                    },
-                    if self.terminal_right {
-                        "Move Terminal Below"
-                    } else {
-                        "Move Terminal Right"
-                    },
-                    |this, _, cx| {
-                        this.terminal_right = !this.terminal_right;
-                        cx.notify();
-                    },
-                    cx,
-                ))
-                .child(Self::icon_button(
-                    "terminal-new",
-                    IconName::Plus,
-                    "New Terminal",
-                    |this, window, cx| this.new_terminal(window, cx),
-                    cx,
-                ));
-        let body = div().flex_1().min_h_0().overflow_hidden().child(entity);
+        let tab_strip = div()
+            .h(px(34.))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .gap(px(18.))
+            .px(px(14.))
+            .children((0..tab_count).map(|index| {
+                let (run, busy) = kinds[index];
+                self.render_terminal_tab(index, &labels[index], index == active, run, busy, cx)
+            }))
+            .child(div().flex_1())
+            .when(run_busy, |el| el.child(self.render_stop_button(cx)))
+            .child(Self::icon_button(
+                "terminal-side",
+                if self.terminal_right {
+                    IconName::PanelBottom
+                } else {
+                    IconName::PanelRight
+                },
+                if self.terminal_right {
+                    "Move Terminal Below"
+                } else {
+                    "Move Terminal Right"
+                },
+                |this, _, cx| {
+                    this.terminal_right = !this.terminal_right;
+                    cx.notify();
+                },
+                cx,
+            ))
+            .child(Self::icon_button(
+                "terminal-new",
+                IconName::Plus,
+                "New Terminal",
+                |this, window, cx| this.new_terminal(window, cx),
+                cx,
+            ));
+        let body = div()
+            .flex_1()
+            .min_h_0()
+            .overflow_hidden()
+            .pl(px(14.))
+            .pb(px(6.))
+            .child(entity);
         if self.terminal_right {
             // A column beside the editor: the left edge drags the width,
             // the way the drawer's top edge drags the height.
@@ -281,53 +297,96 @@ impl Folio {
         }
     }
 
-    /// One terminal tab: the terminal's mark and title, and the close that
-    /// takes the tab — and, if it was the last, the drawer — with it.
+    /// The drawer's Stop while a Run is going: a red square and the word,
+    /// with the key that stops it (⌘R toggles Run and Stop).
+    fn render_stop_button(&self, cx: &mut Context<Self>) -> AnyElement {
+        let red = run_stop_color(cx);
+        div()
+            .id("terminal-stop")
+            .role(Role::Button)
+            .aria_label("Stop")
+            .focusable()
+            .tab_index(0)
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .cursor_pointer()
+            .text_size(ui(12.))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(red)
+            .hover(|el| el.opacity(0.8))
+            .focus_visible(|el| el.opacity(0.8))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(|this, _, window, cx| this.stop_run(window, cx)))
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                    this.stop_run(window, cx);
+                    cx.stop_propagation();
+                }
+            }))
+            .child(div().size(px(8.)).rounded(px(1.5)).bg(red))
+            .child("Stop")
+            .child(Self::kbd_label(
+                if cfg!(target_os = "macos") {
+                    "⌘R"
+                } else {
+                    "Ctrl+R"
+                },
+                cx,
+            ))
+            .into_any_element()
+    }
+
+    /// One terminal tab: a glass mark (Run or Terminal), the title, a green
+    /// dot while a Run is going, and a close that shows on hover. The active
+    /// tab is ink with a 2px underline; no tile behind any of them.
     pub(super) fn render_terminal_tab(
         &self,
         index: usize,
         label: &str,
         active: bool,
+        run: bool,
+        busy: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let group: SharedString = format!("terminal-tab-{index}").into();
         div()
             .id(("terminal-tab", index))
+            .group(group.clone())
             .role(Role::Button)
             .aria_label(label.to_string())
             .aria_selected(active)
+            .relative()
             .h_full()
             .min_w_0()
-            .max_w(px(220.))
-            .px_2()
+            .max_w(px(260.))
             .flex()
             .items_center()
-            .gap_1p5()
+            .gap(px(6.))
             .flex_shrink_0()
-            .border_r_1()
-            .border_color(cx.theme().border)
             .cursor_pointer()
-            .text_size(ui(11.))
+            .text_size(ui(12.))
+            .when(active, |el| el.font_weight(FontWeight::MEDIUM))
             .text_color(if active {
                 cx.theme().foreground
             } else {
                 cx.theme().muted_foreground
             })
-            .when(active, |el| el.bg(cx.theme().list_active))
-            .hover(|el| el.bg(cx.theme().list_hover))
+            .hover(|el| el.text_color(cx.theme().foreground))
             .on_click(
                 cx.listener(move |this, _, window, cx| {
                     this.activate_terminal_tab(index, window, cx)
                 }),
             )
-            .child(
-                Icon::new(FolioIcon::SquareTerminal)
-                    .size_4()
-                    .text_color(if active {
-                        cx.theme().accent_foreground
-                    } else {
-                        cx.theme().muted_foreground
-                    }),
-            )
+            .child(Self::glass(
+                if run {
+                    GlassIcon::Run
+                } else {
+                    GlassIcon::Terminal
+                },
+                16.,
+            ))
             .child(
                 div()
                     .min_w_0()
@@ -335,6 +394,15 @@ impl Folio {
                     .whitespace_nowrap()
                     .child(label.to_string()),
             )
+            .when(run && busy, |el| {
+                el.child(
+                    div()
+                        .size(px(6.))
+                        .flex_shrink_0()
+                        .rounded_full()
+                        .bg(cx.theme().success),
+                )
+            })
             .child(
                 div()
                     .id(("terminal-tab-close", index))
@@ -345,9 +413,10 @@ impl Folio {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .rounded_sm()
                     .cursor_pointer()
                     .text_color(cx.theme().muted_foreground)
+                    .when(!active, |el| el.invisible())
+                    .group_hover(group, |style| style.visible())
                     .hover(|el| el.text_color(cx.theme().foreground))
                     // Without this the tab underneath would take the same
                     // click and merely activate itself.
@@ -357,6 +426,18 @@ impl Folio {
                     }))
                     .child(Icon::new(IconName::Close).xsmall()),
             )
+            .when(active, |el| {
+                el.child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .right_0()
+                        .bottom_0()
+                        .h(px(2.))
+                        .rounded(px(2.))
+                        .bg(cx.theme().foreground),
+                )
+            })
             .into_any_element()
     }
 

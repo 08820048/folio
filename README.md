@@ -26,10 +26,11 @@ Building from source on a Windows machine is the same document.
 `rust-toolchain.toml` pins Rust 1.95.0 and rustup installs it on demand. The
 first build downloads dependencies; the app itself never needs the network. The
 code fonts JetBrains Mono, Fira Code and Source Code Pro are embedded in the
-binary. Their licenses are in `assets/OFL.txt` and `assets/fonts/`. Interface icons come from the Lucide set bundled with
-gpui-component, except three that the component library does not ship
-(`panel-left-dashed` / `panel-right-dashed` / `square-terminal`), which are
-vendored in `assets/icons/` under the `LICENSE.txt` in that directory.
+binary. Their licenses are in `assets/OFL.txt` and `assets/fonts/`. The main surfaces (activity
+bar, title bar, Run, terminal tabs, start page, quick open) use the Black Glass
+icons in `assets/icons/glass/`; the small line icons are the Lucide set bundled
+with gpui-component, plus `gap-horizontal`, vendored in `assets/icons/` under
+the `LICENSE.txt` in that directory.
 
 To build a local `.app`:
 
@@ -147,13 +148,11 @@ folder and render inline; a relative link to another file in the project opens
 it in Folio, `http(s)` / `mailto` links go to the system opener, and a file
 outside the project opens in the default app. Reference-style images and raw
 HTML `<img>` tags are left as text. A jump from search lands in source so the
-hit is visible. Large files stay in source. Every in-app icon is Lucide and icon buttons draw
-no background box. The activity-bar toggle in the title bar's top-left uses
-`panel-left-dashed` / `panel-right-dashed`; the terminal tab uses
-`square-terminal`. gpui-component does not ship those three, so `src/assets.rs`
-wraps the bundled asset source and serves them from `assets/icons/` — the
-other icons still come from the component library, all under the same
-`icons/<name>.svg` namespace.
+hit is visible. Large files stay in source. The main surfaces use full-colour Black Glass
+icons (`GlassIcon` in `src/assets.rs`, PNGs in `assets/icons/glass/` drawn with
+`gpui::img`, never tinted); the small controls (close, split, chevrons) stay
+Lucide. No icon button draws a background box. `src/assets.rs` wraps the
+bundled asset source so both sets are served from the same `icons/` namespace.
 
 Saving first checks that the file on disk still matches what was read, then
 writes a temporary file alongside it and replaces it atomically. A failure
